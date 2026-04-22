@@ -1,0 +1,21 @@
+# Storage e banco de dados
+storage/
+*.db
+*.sqlite
+*.sqlite3
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Logs
+*.log
+
+# Variáveis de ambiente
+.env
