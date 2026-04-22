@@ -1,4 +1,4 @@
-# 🗄️ Backup Server — Raspberry Pi
+# 🗄️ Backup Files — Raspberry Pi
 
 Sistema de backup de arquivos com deduplicação por metadados e isolamento por identificador.
 Cada backup possui um **label único** — arquivos de backups diferentes são completamente isolados entre si no storage físico, no banco de dados e nas operações de sync.
