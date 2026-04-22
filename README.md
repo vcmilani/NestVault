@@ -1,7 +1,7 @@
-# 🗄️ Backup Files — Raspberry Pi
+# 🗄️ Backup Server — Raspberry Pi
 
-Sistema de backup de arquivos com deduplicação por metadados e isolamento por identificador.
-Cada backup possui um **label único** — arquivos de backups diferentes são completamente isolados entre si no storage físico, no banco de dados e nas operações de sync.
+Sistema de backup de arquivos com deduplicação por metadados, isolamento por identificador e uploads paralelos.
+Cada backup possui um **label único** — arquivos de backups diferentes são completamente isolados no storage físico, no banco de dados e nas operações de sync.
 
 ---
 
@@ -101,13 +101,13 @@ export BACKUP_API_KEY="uma-chave-secreta-forte-aqui"
 ## 🚀 Comandos
 
 O cliente opera com três subcomandos: `backup`, `backups` e `restore`.
-O argumento `--label` é **obrigatório** nos comandos `backup` e `restore` — ele identifica exatamente qual backup está sendo manipulado.
+O argumento `--label` é **obrigatório** nos comandos `backup` e `restore`.
 
 ---
 
 ### backup
 
-Envia arquivos locais para o servidor sob um identificador único (`--label`). Se o backup ainda não existir no servidor, ele é criado automaticamente. Arquivos com metadados idênticos ao estado atual do backup são ignorados sem trafegar nenhum byte.
+Envia arquivos locais para o servidor sob um identificador único (`--label`). Se o backup ainda não existir no servidor, é criado automaticamente. Arquivos com metadados idênticos são ignorados sem trafegar nenhum byte. Os uploads são feitos em paralelo para melhor performance.
 
 ```bash
 # Backup simples
@@ -127,11 +127,11 @@ python backup_client.py backup ~/projeto \
   --server http://192.168.1.100:8000 \
   --exclude node_modules .git __pycache__ .venv dist build
 
-# Definir nome do cliente (padrão: hostname da máquina)
+# Aumentar workers para mais performance (padrão: 4)
 python backup_client.py backup ~/documentos \
   --label "notebook-joao" \
   --server http://192.168.1.100:8000 \
-  --client "notebook-joao"
+  --workers 8
 
 # Verificar sem enviar (dry-run)
 python backup_client.py backup ~/documentos \
@@ -149,17 +149,32 @@ python backup_client.py backup ~/documentos \
 | `--prefix` | | Prefixo do path no servidor |
 | `--client` | | Nome do cliente — padrão é o hostname da máquina |
 | `--exclude` | | Subpastas a ignorar — aceita múltiplos valores |
+| `--workers` | | Número de uploads paralelos (padrão: `4`) |
 | `--dry-run` | | Apenas verifica, não envia nada e não cria o backup |
 
-Durante o upload, uma barra de progresso exibe o andamento em tempo real:
+**Recomendação de workers por cenário:**
+
+| Cenário | Workers sugerido |
+|---------|:----------------:|
+| Pi com cartão SD | 2 |
+| Pi com HD externo USB | 4–6 |
+| Pi com SSD | 6–8 |
+| Muitos arquivos pequenos | 8+ |
+| Arquivos grandes (>100 MB) | 2–3 |
+
+> Em `--dry-run` o número de workers é ignorado e o processamento é sequencial para manter o output legível.
+
+Durante o upload, cada thread exibe sua própria barra de progresso:
 
 ```
-10:42:31  INFO     UPLOAD /home/joao/videos/aula.mp4  (342.7 MB)  [Arquivo novo neste backup]
+10:42:31  INFO     Workers   : 4 threads paralelas
+10:42:31  INFO     UPLOAD /home/joao/videos/aula.mp4  (342.7 MB)  [Arquivo novo]
   aula.mp4                |████████████░░░░░░| 187.3M/342.7M [4.2MB/s]
-10:42:53  INFO     SKIP   /home/joao/docs/relatorio.pdf
+10:42:31  INFO     UPLOAD /home/joao/docs/relatorio.pdf  (1.2 MB)  [Arquivo novo]
+10:42:31  INFO     SKIP   /home/joao/docs/notas.txt
 ```
 
-Ao final do backup, arquivos que existem no servidor mas foram removidos localmente são apagados automaticamente do backup (sync). O sync é isolado ao label — nunca remove arquivos de outro backup.
+Ao final, arquivos que existem no servidor mas foram removidos localmente são apagados automaticamente do backup (sync). O sync é isolado ao label — nunca remove arquivos de outro backup.
 
 ```
 ==================================================
@@ -203,7 +218,7 @@ LABEL                           CLIENTE               STATUS    ARQUIVOS     TAM
 ---------------------------------------------------------------------------------------------------------
 notebook-joao                   notebook-joao         active         142      1.2 GB  2026-04-22 02:00
 servidor-web                    servidor-web          active          38     320.5 MB  2026-04-21 03:00
-projeto-alpha                   notebook-joao         active         891     4.7 GB  2026-04-20 14:30
+projeto-alpha                   notebook-joao         active         891      4.7 GB  2026-04-20 14:30
 ```
 
 Use o valor da coluna **LABEL** para fazer restore de um backup específico.
@@ -260,13 +275,14 @@ crontab -e
 ```
 
 ```cron
-# Backup todo dia às 02:00
+# Backup todo dia às 02:00 com 4 workers
 0 2 * * * BACKUP_API_KEY=sua-chave \
   /home/usuario/client/.venv/bin/python \
   /home/usuario/client/backup_client.py backup ~/docs \
   --label "notebook-joao" \
   --server http://192.168.1.100:8000 \
   --exclude node_modules .git \
+  --workers 4 \
   >> /var/log/backup.log 2>&1
 ```
 
@@ -274,7 +290,7 @@ crontab -e
 
 ## 🔒 Isolamento por label
 
-Cada label possui seu próprio espaço isolado no servidor:
+Cada label possui seu próprio espaço completamente isolado no servidor:
 
 **Storage físico separado:**
 ```
@@ -288,9 +304,10 @@ storage/
 ```
 
 **Regras de isolamento:**
-- O `/check` só consulta arquivos do label informado — um arquivo existente em `notebook-joao` nunca faz com que o upload seja pulado em `servidor-web`
-- O `/sync` só remove arquivos do label informado — impossível apagar arquivos de outro backup
-- O `/restore` só lista e baixa arquivos do label informado
+- `/check` — só consulta arquivos do label informado
+- `/upload` — armazena fisicamente sob a pasta do label
+- `/sync` — só remove arquivos do label informado, nunca toca outros backups
+- `/restore` — só lista e baixa arquivos do label informado
 
 ---
 
@@ -319,7 +336,7 @@ Todos os endpoints (exceto `/health`) exigem o header `X-API-Key`.
 
 | Método | Endpoint | Descrição |
 |--------|----------|-----------|
-| `POST` | `/backups` | Cria um backup (idempotente — retorna existente se label já existe) |
+| `POST` | `/backups` | Cria um backup — idempotente se label já existe |
 | `GET` | `/backups` | Lista todos os backups com stats |
 | `GET` | `/backups/{label}` | Detalhes de um backup |
 | `DELETE` | `/backups/{label}` | Remove o backup e todos os seus arquivos |

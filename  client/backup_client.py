@@ -19,6 +19,8 @@ import socket
 from pathlib import Path
 from typing import Optional
 
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from tqdm import tqdm
 from requests_toolbelt import MultipartEncoder, MultipartEncoderMonitor
@@ -148,6 +150,7 @@ def backup_directory(
     path_prefix: Optional[str] = None,
     exclude: Optional[list] = None,
     client_name: Optional[str] = None,
+    workers: int = 4,
 ):
     root = Path(directory).resolve()
     if not root.exists():
@@ -162,12 +165,15 @@ def backup_directory(
         log.info(f"Backup    : [{label}]  {action}")
 
     stats = {"checked": 0, "uploaded": 0, "skipped": 0, "errors": 0}
+    stats_lock = threading.Lock()
     all_paths: list[str] = []
+    all_paths_lock = threading.Lock()
 
+    # Coleta todos os arquivos elegíveis primeiro
+    pending = []
     for file_path in sorted(root.rglob("*")):
         if not file_path.is_file():
             continue
-
         excluded = False
         for ex in (exclude or []):
             try:
@@ -178,38 +184,57 @@ def backup_directory(
                 pass
         if excluded:
             continue
-
-        stats["checked"] += 1
         original_path = str(file_path) if not path_prefix else str(
             Path(path_prefix) / file_path.relative_to(root)
         )
-        all_paths.append(original_path)
+        pending.append((file_path, original_path))
 
+    with stats_lock:
+        stats["checked"] = len(pending)
+    with all_paths_lock:
+        all_paths.extend(p[1] for p in pending)
+
+    def process_file(file_path: Path, original_path: str):
         stat  = file_path.stat()
         size  = stat.st_size
         mtime = stat.st_mtime
-
         try:
             sha256 = sha256_file(file_path)
             check  = check_file(server, label, original_path, sha256, size, mtime)
 
             if not check["needs_upload"]:
                 log.info(f"SKIP   {original_path}")
-                stats["skipped"] += 1
-                continue
+                with stats_lock:
+                    stats["skipped"] += 1
+                return
 
             log.info(f"UPLOAD {original_path}  ({fmt_size(size)})  [{check['reason']}]")
 
             if dry_run:
                 log.info("  [dry-run] upload nao realizado")
-                continue
+                return
 
             upload_file(server, file_path, label, original_path, mtime)
-            stats["uploaded"] += 1
+            with stats_lock:
+                stats["uploaded"] += 1
 
         except requests.RequestException as e:
             log.error(f"  ERRO em {original_path}: {e}")
-            stats["errors"] += 1
+            with stats_lock:
+                stats["errors"] += 1
+
+    effective_workers = 1 if dry_run else workers
+    if effective_workers > 1:
+        log.info(f"Workers   : {effective_workers} threads paralelas")
+
+    with ThreadPoolExecutor(max_workers=effective_workers) as pool:
+        futures = {pool.submit(process_file, fp, op): op for fp, op in pending}
+        for future in as_completed(futures):
+            exc = future.exception()
+            if exc:
+                log.error(f"  ERRO inesperado: {exc}")
+                with stats_lock:
+                    stats["errors"] += 1
 
     if not dry_run:
         try:
@@ -385,6 +410,7 @@ def main():
     p_backup.add_argument("--prefix", default=None, help="Prefixo de path no servidor")
     p_backup.add_argument("--client", default=None, help="Nome do cliente (padrao: hostname)")
     p_backup.add_argument("--exclude", metavar="PASTA", nargs="+", default=[], help="Subpastas a ignorar")
+    p_backup.add_argument("--workers", type=int, default=4, help="Numero de uploads paralelos (padrao: 4)")
     p_backup.add_argument("--dry-run", action="store_true", help="Apenas verifica, nao envia")
 
     # -- backups --------------------------------------------------------------
@@ -412,6 +438,7 @@ def main():
             log.info(f"Excluindo: {', '.join(args.exclude)}")
         if args.dry_run:
             log.info("Modo     : DRY RUN")
+        log.info(f"Workers  : {args.workers}")
         backup_directory(
             directory=args.directory,
             label=args.label,
@@ -420,6 +447,7 @@ def main():
             path_prefix=args.prefix,
             exclude=args.exclude,
             client_name=args.client,
+            workers=args.workers,
         )
 
     elif args.command == "backups":
