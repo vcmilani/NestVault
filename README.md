@@ -1,7 +1,7 @@
 # 🗄️ Backup Server — Raspberry Pi
 
-Sistema de backup de arquivos com deduplicação por metadados e controle de sessões.
-O cliente só envia o arquivo se o servidor ainda não tiver uma cópia idêntica, e cada execução de backup gera uma sessão identificada — permitindo restaurar exatamente o estado de um backup específico.
+Sistema de backup de arquivos com deduplicação por metadados e isolamento por identificador.
+Cada backup possui um **label único** — arquivos de backups diferentes são completamente isolados entre si no storage físico, no banco de dados e nas operações de sync.
 
 ---
 
@@ -41,7 +41,7 @@ export STORAGE_DIR="/mnt/hd-externo/backups"   # onde os arquivos serão salvos
 export DB_PATH="/mnt/hd-externo/backup.db"      # banco SQLite
 ```
 
-> **Dica:** Coloque essas variáveis em `/etc/environment` ou no arquivo de serviço do systemd.
+> **Dica:** Coloque essas variáveis no arquivo de serviço do systemd ou em `/etc/environment`.
 
 ### 3. Iniciar o servidor
 
@@ -100,65 +100,70 @@ export BACKUP_API_KEY="uma-chave-secreta-forte-aqui"
 
 ## 🚀 Comandos
 
-O cliente opera com três subcomandos: `backup`, `sessions` e `restore`.
+O cliente opera com três subcomandos: `backup`, `backups` e `restore`.
+O argumento `--label` é **obrigatório** nos comandos `backup` e `restore` — ele identifica exatamente qual backup está sendo manipulado.
 
 ---
 
 ### backup
 
-Envia arquivos locais para o servidor. Cada execução cria uma **sessão** identificada por um UUID. Arquivos com metadados idênticos ao último backup são ignorados automaticamente.
+Envia arquivos locais para o servidor sob um identificador único (`--label`). Se o backup ainda não existir no servidor, ele é criado automaticamente. Arquivos com metadados idênticos ao estado atual do backup são ignorados sem trafegar nenhum byte.
 
 ```bash
 # Backup simples
 python backup_client.py backup ~/documentos \
+  --label "notebook-joao" \
   --server http://192.168.1.100:8000
 
-# Com prefixo e label descritivo
+# Com prefixo de path no servidor
 python backup_client.py backup ~/documentos \
+  --label "notebook-joao" \
   --server http://192.168.1.100:8000 \
-  --prefix /backups/meu-notebook \
-  --label "pre-atualizacao-ubuntu"
+  --prefix /home/joao/documentos
 
 # Ignorar subpastas específicas
 python backup_client.py backup ~/projeto \
+  --label "projeto-alpha" \
   --server http://192.168.1.100:8000 \
   --exclude node_modules .git __pycache__ .venv dist build
 
-# Definir nome do cliente manualmente (padrão: hostname da máquina)
+# Definir nome do cliente (padrão: hostname da máquina)
 python backup_client.py backup ~/documentos \
+  --label "notebook-joao" \
   --server http://192.168.1.100:8000 \
   --client "notebook-joao"
 
-# Só verificar sem enviar (dry-run)
+# Verificar sem enviar (dry-run)
 python backup_client.py backup ~/documentos \
+  --label "notebook-joao" \
   --server http://192.168.1.100:8000 \
   --dry-run
 ```
 
 **Opções:**
 
-| Opção | Descrição |
-|-------|-----------|
-| `--server` | URL do servidor (padrão: `http://localhost:8000`) |
-| `--prefix` | Prefixo do path no servidor (ex: `/backups/meu-pc`) |
-| `--label` | Nome amigável para a sessão (ex: `pre-atualizacao`) |
-| `--client` | Nome do cliente — padrão é o hostname da máquina |
-| `--exclude` | Subpastas a ignorar — aceita múltiplos valores |
-| `--dry-run` | Apenas verifica, não envia nada e não cria sessão |
+| Opção | Obrigatório | Descrição |
+|-------|:-----------:|-----------|
+| `--label` | ✅ | Identificador único do backup |
+| `--server` | | URL do servidor (padrão: `http://localhost:8000`) |
+| `--prefix` | | Prefixo do path no servidor |
+| `--client` | | Nome do cliente — padrão é o hostname da máquina |
+| `--exclude` | | Subpastas a ignorar — aceita múltiplos valores |
+| `--dry-run` | | Apenas verifica, não envia nada e não cria o backup |
 
 Durante o upload, uma barra de progresso exibe o andamento em tempo real:
 
 ```
-10:42:31  INFO     UPLOAD /backups/notebook/videos/aula.mp4  (342.7 MB)
+10:42:31  INFO     UPLOAD /home/joao/videos/aula.mp4  (342.7 MB)  [Arquivo novo neste backup]
   aula.mp4                |████████████░░░░░░| 187.3M/342.7M [4.2MB/s]
-10:42:53  INFO       OK  id=87  sha256=a3f9c12d8b01...
+10:42:53  INFO     SKIP   /home/joao/docs/relatorio.pdf
 ```
 
-Ao final, o resumo inclui o ID da sessão criada:
+Ao final do backup, arquivos que existem no servidor mas foram removidos localmente são apagados automaticamente do backup (sync). O sync é isolado ao label — nunca remove arquivos de outro backup.
 
 ```
 ==================================================
-  Sessao      : a3f9c12d-8b01-4e2f-9c3d-1a2b3c4d5e6f
+  Backup      : [notebook-joao]
   Verificados : 42
   Enviados    : 5
   Ignorados   : 37
@@ -167,28 +172,21 @@ Ao final, o resumo inclui o ID da sessão criada:
 ==================================================
 ```
 
-Arquivos que existem no servidor mas foram removidos do cliente são apagados automaticamente ao final (sync).
-
 ---
 
-### sessions
+### backups
 
-Lista todas as sessões de backup registradas no servidor, com contagem de arquivos, tamanho total e status.
+Lista todos os backups registrados no servidor com contagem de arquivos, tamanho total e data do último run.
 
 ```bash
-# Listar todas as sessões
-python backup_client.py sessions \
+# Listar todos os backups
+python backup_client.py backups \
   --server http://192.168.1.100:8000
 
-# Filtrar por cliente
-python backup_client.py sessions \
+# Filtrar por nome do cliente
+python backup_client.py backups \
   --server http://192.168.1.100:8000 \
   --client "notebook-joao"
-
-# Filtrar por status
-python backup_client.py sessions \
-  --server http://192.168.1.100:8000 \
-  --status done
 ```
 
 **Opções:**
@@ -197,66 +195,61 @@ python backup_client.py sessions \
 |-------|-----------|
 | `--server` | URL do servidor |
 | `--client` | Filtrar por nome do cliente |
-| `--status` | Filtrar por status: `done`, `failed`, `running` |
 
 Exemplo de saída:
 
 ```
-ID                                    LABEL                 CLIENTE               STATUS    ARQUIVOS     TAMANHO  INICIO
-------------------------------------------------------------------------------------------------------------------------
-a3f9c12d-...  pre-atualizacao-ubuntu  notebook-joao         done          42      198.3 MB  2026-04-21 02:00
-b7e1d890-...  backup-semanal          notebook-joao         done          40      195.1 MB  2026-04-14 02:00
-c1d2e3f4-...  -                       servidor-web          failed         0         0.0 B  2026-04-10 03:00
+LABEL                           CLIENTE               STATUS    ARQUIVOS     TAMANHO  ULTIMO RUN
+---------------------------------------------------------------------------------------------------------
+notebook-joao                   notebook-joao         active         142      1.2 GB  2026-04-22 02:00
+servidor-web                    servidor-web          active          38     320.5 MB  2026-04-21 03:00
+projeto-alpha                   notebook-joao         active         891     4.7 GB  2026-04-20 14:30
 ```
 
-Use o ID da sessão desejada para fazer um restore seletivo.
+Use o valor da coluna **LABEL** para fazer restore de um backup específico.
 
 ---
 
 ### restore
 
-Baixa os arquivos do servidor e reconstrói a estrutura de pastas no destino. Pode restaurar uma sessão específica ou todos os arquivos disponíveis.
+Baixa os arquivos de um backup identificado pelo `--label` e reconstrói a estrutura de pastas no destino.
 
 ```bash
-# Restaurar uma sessão específica (recomendado)
+# Restaurar um backup pelo label
 python backup_client.py restore /tmp/restore \
-  --server http://192.168.1.100:8000 \
-  --session a3f9c12d-8b01-4e2f-9c3d-1a2b3c4d5e6f
-
-# Restaurar apenas arquivos de um prefixo dentro da sessão
-python backup_client.py restore /tmp/restore \
-  --server http://192.168.1.100:8000 \
-  --session a3f9c12d-8b01-4e2f-9c3d-1a2b3c4d5e6f \
-  --prefix /backups/notebook/home/usuario/documentos
-
-# Restaurar tudo (sem filtro de sessão)
-python backup_client.py restore /tmp/restore \
+  --label "notebook-joao" \
   --server http://192.168.1.100:8000
+
+# Restaurar apenas arquivos de um subdiretório específico
+python backup_client.py restore /tmp/restore \
+  --label "notebook-joao" \
+  --server http://192.168.1.100:8000 \
+  --prefix /home/joao/documentos
 
 # Ver o que seria restaurado sem baixar nada
 python backup_client.py restore /tmp/restore \
+  --label "notebook-joao" \
   --server http://192.168.1.100:8000 \
-  --session a3f9c12d-... \
   --dry-run
 
 # Sobrescrever arquivos que já existem no destino
 python backup_client.py restore /tmp/restore \
+  --label "notebook-joao" \
   --server http://192.168.1.100:8000 \
-  --session a3f9c12d-... \
   --overwrite
 ```
 
 **Opções:**
 
-| Opção | Descrição |
-|-------|-----------|
-| `--server` | URL do servidor |
-| `--session` | ID da sessão a restaurar (obtido via `sessions`) |
-| `--prefix` | Restaurar apenas arquivos com esse prefixo |
-| `--overwrite` | Sobrescreve arquivos existentes no destino |
-| `--dry-run` | Apenas lista, não baixa nada |
+| Opção | Obrigatório | Descrição |
+|-------|:-----------:|-----------|
+| `--label` | ✅ | Identificador do backup a restaurar |
+| `--server` | | URL do servidor |
+| `--prefix` | | Restaurar apenas arquivos com esse prefixo de path |
+| `--overwrite` | | Sobrescreve arquivos existentes no destino |
+| `--dry-run` | | Apenas lista os arquivos, não baixa nada |
 
-O restore valida a integridade de cada arquivo após o download comparando o SHA-256 com o valor registrado no servidor. Se não bater, o arquivo é removido e marcado como erro.
+O restore valida a integridade de cada arquivo após o download comparando o SHA-256 com o valor registrado no servidor. Se não bater, o arquivo é removido localmente e marcado como erro.
 
 ---
 
@@ -267,16 +260,54 @@ crontab -e
 ```
 
 ```cron
-# Backup todo dia às 02:00 com label da data
+# Backup todo dia às 02:00
 0 2 * * * BACKUP_API_KEY=sua-chave \
   /home/usuario/client/.venv/bin/python \
   /home/usuario/client/backup_client.py backup ~/docs \
+  --label "notebook-joao" \
   --server http://192.168.1.100:8000 \
-  --prefix /backups/meu-pc \
-  --label "auto-$(date +\%Y-\%m-\%d)" \
   --exclude node_modules .git \
   >> /var/log/backup.log 2>&1
 ```
+
+---
+
+## 🔒 Isolamento por label
+
+Cada label possui seu próprio espaço isolado no servidor:
+
+**Storage físico separado:**
+```
+storage/
+├── notebook-joao/
+│   └── ab/ab12ef34_relatorio.pdf
+├── servidor-web/
+│   └── cd/cd56gh78_index.html
+└── projeto-alpha/
+    └── ef/ef90ij12_config.yaml
+```
+
+**Regras de isolamento:**
+- O `/check` só consulta arquivos do label informado — um arquivo existente em `notebook-joao` nunca faz com que o upload seja pulado em `servidor-web`
+- O `/sync` só remove arquivos do label informado — impossível apagar arquivos de outro backup
+- O `/restore` só lista e baixa arquivos do label informado
+
+---
+
+## 🔒 Lógica de Deduplicação
+
+Dentro de um mesmo backup, o `/check` compara **4 campos simultaneamente**:
+
+| Campo | O que representa |
+|-------|-----------------|
+| `original_path` | Identidade do arquivo |
+| `sha256` | Hash do conteúdo — garante integridade |
+| `size` | Tamanho em bytes |
+| `mtime` | Última modificação (epoch) |
+
+Se todos os 4 forem idênticos → **sem upload**.
+Se o path existe mas qualquer outro campo mudou → **arquivo modificado, será atualizado**.
+Se o path não existe neste backup → **arquivo novo, upload necessário**.
 
 ---
 
@@ -284,65 +315,28 @@ crontab -e
 
 Todos os endpoints (exceto `/health`) exigem o header `X-API-Key`.
 
-### Sessões
+### Backups (identificadores)
 
 | Método | Endpoint | Descrição |
 |--------|----------|-----------|
-| `POST` | `/sessions` | Cria uma nova sessão de backup |
-| `GET` | `/sessions` | Lista todas as sessões com stats |
-| `GET` | `/sessions/{id}` | Detalhes de uma sessão |
-| `PATCH` | `/sessions/{id}` | Finaliza uma sessão (done/failed) |
-| `DELETE` | `/sessions/{id}` | Remove sessão e todos os seus arquivos |
+| `POST` | `/backups` | Cria um backup (idempotente — retorna existente se label já existe) |
+| `GET` | `/backups` | Lista todos os backups com stats |
+| `GET` | `/backups/{label}` | Detalhes de um backup |
+| `DELETE` | `/backups/{label}` | Remove o backup e todos os seus arquivos |
 
 ### Arquivos
 
 | Método | Endpoint | Descrição |
 |--------|----------|-----------|
 | `GET` | `/health` | Status do servidor |
-| `POST` | `/check` | Verifica se arquivo precisa ser enviado |
-| `POST` | `/upload` | Envia arquivo (aceita `X-Session-Id`) |
-| `POST` | `/sync` | Remove arquivos que sumiram do cliente |
-| `GET` | `/files` | Lista arquivos (filtra por `session_id` e/ou `path_prefix`) |
+| `POST` | `/check` | Verifica se arquivo precisa ser enviado (escopado ao label) |
+| `POST` | `/upload` | Envia arquivo — requer header `X-Backup-Label` |
+| `POST` | `/sync` | Remove arquivos ausentes no cliente (escopado ao label) |
+| `GET` | `/files?backup_label=` | Lista arquivos de um backup (`backup_label` obrigatório) |
 | `GET` | `/files/{id}/download` | Faz download de um arquivo |
 | `DELETE` | `/files/{id}` | Remove um arquivo do backup |
 
 > Paths com caracteres especiais (acentos, cedilha) são transmitidos em **base64** no header `X-Original-Path` e decodificados automaticamente pelo servidor.
-
----
-
-## 🔒 Lógica de Deduplicação
-
-O `/check` compara **4 campos simultaneamente**:
-
-| Campo | O que representa |
-|-------|-----------------|
-| `original_path` | Identidade do arquivo (de onde veio) |
-| `sha256` | Hash do conteúdo — garante integridade |
-| `size` | Tamanho em bytes |
-| `mtime` | Última modificação (epoch) |
-
-Se todos os 4 forem idênticos → **sem upload**.
-Se o path existe mas qualquer outro campo mudou → **arquivo modificado, nova versão**.
-Se o path não existe → **arquivo novo**.
-
----
-
-## 🖥️ Múltiplos clientes
-
-Use `--prefix` para separar o espaço de cada máquina no servidor. O sync e o restore respeitam o prefixo e nunca interferem uns nos outros.
-
-```
-storage/
-├── /backups/notebook-joao/home/joao/docs/...
-├── /backups/notebook-maria/home/maria/docs/...
-└── /backups/servidor-web/var/www/...
-```
-
-Ao listar sessões, use `--client` para ver apenas os backups de uma máquina:
-
-```bash
-python backup_client.py sessions --client "notebook-joao"
-```
 
 ---
 

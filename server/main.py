@@ -1,7 +1,8 @@
 """
 Backup Server - FastAPI
-Roda na Raspberry Pi. Recebe, armazena e controla arquivos com deduplicacao por metadados.
-Suporta sessoes de backup para permitir restore seletivo.
+Cada backup e identificado por um label unico. Arquivos de backups diferentes
+sao completamente isolados — check, upload, sync e storage fisico sao todos
+escopados ao label. Um backup nunca interfere nos arquivos de outro.
 """
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Header
@@ -12,11 +13,10 @@ import os
 import hashlib
 import secrets
 import base64
-import uuid
 from pathlib import Path
 from datetime import datetime
 
-from database import init_db, get_db, FileRecord, BackupSession, SessionLocal
+from database import init_db, get_db, FileRecord, BackupID, SessionLocal
 from sqlalchemy.orm import Session
 
 # -- Config -------------------------------------------------------------------
@@ -24,7 +24,7 @@ STORAGE_DIR = Path(os.getenv("STORAGE_DIR", "./storage"))
 API_KEY     = os.getenv("BACKUP_API_KEY", "change-me-in-production")
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="Backup Server", version="2.0.0")
+app = FastAPI(title="Backup Server", version="3.0.0")
 
 
 # -- Startup ------------------------------------------------------------------
@@ -40,7 +40,24 @@ def require_api_key(x_api_key: str = Header(...)):
 
 
 # -- Schemas ------------------------------------------------------------------
+class BackupCreate(BaseModel):
+    label: str                        # identificador unico — ex: "producao", "notebook-joao"
+    client_name: Optional[str] = None
+    prefix: Optional[str] = None
+
+class BackupInfo(BaseModel):
+    id: int
+    label: str
+    client_name: Optional[str]
+    prefix: Optional[str]
+    created_at: str
+    last_run_at: Optional[str]
+    status: str
+    file_count: int
+    total_size_bytes: int
+
 class CheckRequest(BaseModel):
+    backup_label: str
     original_path: str
     sha256: str
     size: int
@@ -51,28 +68,9 @@ class CheckResponse(BaseModel):
     reason: str
     file_id: Optional[int] = None
 
-class SessionCreate(BaseModel):
-    label: Optional[str] = None       # ex: "backup-semanal", "pre-atualizacao"
-    client_name: Optional[str] = None # ex: "notebook-joao", "servidor-web"
-    prefix: Optional[str] = None
-
-class SessionInfo(BaseModel):
-    id: str
-    label: Optional[str]
-    client_name: Optional[str]
-    prefix: Optional[str]
-    started_at: str
-    finished_at: Optional[str]
-    status: str
-    file_count: int
-    total_size_bytes: int
-
-class SessionFinish(BaseModel):
-    status: str = "done"  # done | failed
-
 class FileInfo(BaseModel):
     id: int
-    session_id: Optional[str]
+    backup_label: str
     original_path: str
     sha256: str
     size: int
@@ -81,8 +79,8 @@ class FileInfo(BaseModel):
     created_at: str
 
 class SyncRequest(BaseModel):
+    backup_label: str
     existing_paths: list[str]
-    path_prefix: Optional[str] = None
 
 class SyncResponse(BaseModel):
     deleted: list[str]
@@ -90,14 +88,17 @@ class SyncResponse(BaseModel):
 
 
 # -- Helpers ------------------------------------------------------------------
-def _storage_path(sha256: str, original_path: str) -> Path:
-    prefix = sha256[:2]
-    filename = Path(original_path).name
-    dest = STORAGE_DIR / prefix / f"{sha256[:16]}_{filename}"
+def _storage_path(backup_label: str, sha256: str, original_path: str) -> Path:
+    """
+    Cada backup tem sua propria subpasta em storage/.
+    storage/<backup_label>/<2 chars sha256>/<hash>_<filename>
+    Isso garante isolamento fisico total entre backups diferentes.
+    """
+    dest = STORAGE_DIR / backup_label / sha256[:2] / f"{sha256[:16]}_{Path(original_path).name}"
     dest.parent.mkdir(parents=True, exist_ok=True)
     return dest
 
-def _sha256_of_upload(upload: UploadFile) -> tuple[str, bytes]:
+def _read_upload(upload: UploadFile) -> tuple[str, bytes]:
     h = hashlib.sha256()
     chunks = []
     while True:
@@ -106,19 +107,27 @@ def _sha256_of_upload(upload: UploadFile) -> tuple[str, bytes]:
             break
         h.update(chunk)
         chunks.append(chunk)
-    upload.file.seek(0)
     return h.hexdigest(), b"".join(chunks)
 
-def _session_info(record: BackupSession, db: Session) -> SessionInfo:
-    files = db.query(FileRecord).filter(FileRecord.session_id == record.id).all()
-    return SessionInfo(
-        id=record.id,
-        label=record.label,
-        client_name=record.client_name,
-        prefix=record.prefix,
-        started_at=str(record.started_at),
-        finished_at=str(record.finished_at) if record.finished_at else None,
-        status=record.status,
+def _get_backup_or_404(label: str, db: Session) -> BackupID:
+    backup = db.query(BackupID).filter(BackupID.label == label).first()
+    if not backup:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Backup '{label}' nao encontrado. Crie-o primeiro via POST /backups"
+        )
+    return backup
+
+def _backup_info(b: BackupID, db: Session) -> BackupInfo:
+    files = db.query(FileRecord).filter(FileRecord.backup_label == b.label).all()
+    return BackupInfo(
+        id=b.id,
+        label=b.label,
+        client_name=b.client_name,
+        prefix=b.prefix,
+        created_at=str(b.created_at),
+        last_run_at=str(b.last_run_at) if b.last_run_at else None,
+        status=b.status,
         file_count=len(files),
         total_size_bytes=sum(f.size for f in files),
     )
@@ -130,193 +139,194 @@ def health():
     return {"status": "ok", "time": datetime.utcnow().isoformat()}
 
 
-# -- Sessions -----------------------------------------------------------------
-@app.post("/sessions", dependencies=[Depends(require_api_key)])
-def create_session(req: SessionCreate, db: Session = Depends(get_db)):
-    """Cria uma nova sessao de backup. Retorna o session_id a ser usado nos uploads."""
-    session = BackupSession(
-        id=str(uuid.uuid4()),
+# -- Backup IDs ---------------------------------------------------------------
+@app.post("/backups", dependencies=[Depends(require_api_key)])
+def create_backup(req: BackupCreate, db: Session = Depends(get_db)):
+    """
+    Cria um novo identificador de backup. O label deve ser unico.
+    Se ja existir um backup com esse label, retorna o existente (idempotente).
+    """
+    existing = db.query(BackupID).filter(BackupID.label == req.label).first()
+    if existing:
+        return {"created": False, "backup": _backup_info(existing, db)}
+
+    backup = BackupID(
         label=req.label,
         client_name=req.client_name,
         prefix=req.prefix,
     )
-    db.add(session)
+    db.add(backup)
     db.commit()
-    db.refresh(session)
-    return {"session_id": session.id, "started_at": str(session.started_at)}
+    db.refresh(backup)
+    return {"created": True, "backup": _backup_info(backup, db)}
 
 
-@app.get("/sessions", dependencies=[Depends(require_api_key)])
-def list_sessions(
-    client_name: Optional[str] = None,
-    status: Optional[str] = None,
-    db: Session = Depends(get_db),
-):
-    """Lista todas as sessoes de backup com contagem de arquivos e tamanho total."""
-    query = db.query(BackupSession).order_by(BackupSession.started_at.desc())
+@app.get("/backups", dependencies=[Depends(require_api_key)])
+def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db)):
+    """Lista todos os identificadores de backup com contagem de arquivos e tamanho total."""
+    query = db.query(BackupID).order_by(BackupID.last_run_at.desc().nullslast())
     if client_name:
-        query = query.filter(BackupSession.client_name == client_name)
-    if status:
-        query = query.filter(BackupSession.status == status)
-    return [_session_info(s, db) for s in query.all()]
+        query = query.filter(BackupID.client_name == client_name)
+    return [_backup_info(b, db) for b in query.all()]
 
 
-@app.get("/sessions/{session_id}", dependencies=[Depends(require_api_key)])
-def get_session(session_id: str, db: Session = Depends(get_db)):
-    """Detalhes de uma sessao especifica."""
-    record = db.query(BackupSession).filter(BackupSession.id == session_id).first()
-    if not record:
-        raise HTTPException(status_code=404, detail="Sessao nao encontrada")
-    return _session_info(record, db)
+@app.get("/backups/{label}", dependencies=[Depends(require_api_key)])
+def get_backup(label: str, db: Session = Depends(get_db)):
+    """Detalhes de um backup especifico."""
+    return _backup_info(_get_backup_or_404(label, db), db)
 
 
-@app.patch("/sessions/{session_id}", dependencies=[Depends(require_api_key)])
-def finish_session(session_id: str, req: SessionFinish, db: Session = Depends(get_db)):
-    """Marca a sessao como concluida (done) ou falha (failed)."""
-    record = db.query(BackupSession).filter(BackupSession.id == session_id).first()
-    if not record:
-        raise HTTPException(status_code=404, detail="Sessao nao encontrada")
-    record.status = req.status
-    record.finished_at = datetime.utcnow()
-    db.commit()
-    return _session_info(record, db)
-
-
-@app.delete("/sessions/{session_id}", dependencies=[Depends(require_api_key)])
-def delete_session(session_id: str, db: Session = Depends(get_db)):
-    """Remove uma sessao e todos os seus arquivos do backup."""
-    record = db.query(BackupSession).filter(BackupSession.id == session_id).first()
-    if not record:
-        raise HTTPException(status_code=404, detail="Sessao nao encontrada")
-    files = db.query(FileRecord).filter(FileRecord.session_id == session_id).all()
-    deleted_files = []
+@app.delete("/backups/{label}", dependencies=[Depends(require_api_key)])
+def delete_backup(label: str, db: Session = Depends(get_db)):
+    """Remove um backup e TODOS os seus arquivos. Nao afeta outros backups."""
+    backup = _get_backup_or_404(label, db)
+    files = db.query(FileRecord).filter(FileRecord.backup_label == label).all()
     for f in files:
         path = Path(f.stored_at)
         if path.exists():
             path.unlink()
         db.delete(f)
-        deleted_files.append(f.original_path)
-    db.delete(record)
+    # Remove a pasta fisica do backup se estiver vazia
+    backup_dir = STORAGE_DIR / label
+    if backup_dir.exists():
+        try:
+            backup_dir.rmdir()
+        except OSError:
+            pass  # pasta nao esta vazia, ignora
+    db.delete(backup)
     db.commit()
-    return {"status": "deleted", "session_id": session_id, "files_removed": len(deleted_files)}
+    return {"status": "deleted", "label": label, "files_removed": len(files)}
 
 
-# -- Check & Upload -----------------------------------------------------------
+# -- Check --------------------------------------------------------------------
 @app.post("/check", response_model=CheckResponse, dependencies=[Depends(require_api_key)])
 def check_file(req: CheckRequest, db: Session = Depends(get_db)):
     """
-    Verifica se o arquivo precisa ser enviado comparando metadados.
-    Nao considera session_id — verifica se o conteudo ja existe no servidor.
+    Verifica se o arquivo precisa ser enviado para um backup especifico.
+    A verificacao e ISOLADA ao backup_label — nunca consulta outros backups.
     """
+    _get_backup_or_404(req.backup_label, db)
+
     record = (
         db.query(FileRecord)
         .filter(
+            FileRecord.backup_label  == req.backup_label,
             FileRecord.original_path == req.original_path,
-            FileRecord.sha256 == req.sha256,
-            FileRecord.size == req.size,
-            FileRecord.mtime == req.mtime,
+            FileRecord.sha256        == req.sha256,
+            FileRecord.size          == req.size,
+            FileRecord.mtime         == req.mtime,
         )
         .first()
     )
     if record:
         return CheckResponse(
             needs_upload=False,
-            reason="Metadados identicos — arquivo ja esta no backup",
+            reason="Metadados identicos — arquivo ja esta neste backup",
             file_id=record.id,
         )
-    existing = db.query(FileRecord).filter(FileRecord.original_path == req.original_path).first()
+
+    existing = (
+        db.query(FileRecord)
+        .filter(
+            FileRecord.backup_label  == req.backup_label,
+            FileRecord.original_path == req.original_path,
+        )
+        .first()
+    )
     if existing:
-        return CheckResponse(needs_upload=True, reason="Arquivo modificado — nova versao sera armazenada")
-    return CheckResponse(needs_upload=True, reason="Arquivo novo — upload necessario")
+        return CheckResponse(needs_upload=True, reason="Arquivo modificado — sera atualizado neste backup")
+
+    return CheckResponse(needs_upload=True, reason="Arquivo novo neste backup")
 
 
+# -- Upload -------------------------------------------------------------------
 @app.post("/upload", dependencies=[Depends(require_api_key)])
 async def upload_file(
     file: UploadFile = File(...),
+    backup_label: str  = Header(..., alias="X-Backup-Label"),
     original_path: str = Header(..., alias="X-Original-Path"),
-    mtime: float = Header(..., alias="X-Mtime"),
-    session_id: Optional[str] = Header(None, alias="X-Session-Id"),
-    db: Session = Depends(get_db),
+    mtime: float       = Header(..., alias="X-Mtime"),
+    db: Session        = Depends(get_db),
 ):
     """
-    Recebe o arquivo e armazena. Associa ao session_id se informado.
+    Recebe e armazena um arquivo dentro do backup identificado por X-Backup-Label.
+    O storage fisico e isolado por label — nunca ha colisao entre backups.
+
     Headers:
+      X-Backup-Label  : identificador do backup (deve existir via POST /backups)
       X-Original-Path : caminho original no cliente (base64)
       X-Mtime         : modification time (epoch float)
-      X-Session-Id    : ID da sessao de backup (opcional)
     """
-    # Decodifica path (base64 para suportar caracteres especiais)
+    _get_backup_or_404(backup_label, db)
+
     try:
         original_path = base64.b64decode(original_path.encode("ascii")).decode("utf-8")
     except Exception:
         pass
 
-    # Valida sessao se informada
-    if session_id:
-        session = db.query(BackupSession).filter(BackupSession.id == session_id).first()
-        if not session:
-            raise HTTPException(status_code=404, detail=f"Sessao '{session_id}' nao encontrada")
-
-    sha256, content = _sha256_of_upload(file)
+    sha256, content = _read_upload(file)
     size = len(content)
 
-    # Dupla verificacao
+    # Upsert: atualiza se o arquivo ja existe neste backup
     record = (
         db.query(FileRecord)
         .filter(
-            FileRecord.session_id == session_id,
+            FileRecord.backup_label  == backup_label,
             FileRecord.original_path == original_path,
-            FileRecord.sha256 == sha256,
-            FileRecord.size == size,
-            FileRecord.mtime == mtime,
         )
         .first()
     )
-    if record:
-        return {"status": "skipped", "reason": "Ja existe registro identico nesta sessao", "file_id": record.id}
 
-    dest = _storage_path(sha256, original_path)
+    if record and record.sha256 == sha256 and record.size == size and record.mtime == mtime:
+        return {"status": "skipped", "reason": "Identico ao registrado neste backup", "file_id": record.id}
+
+    dest = _storage_path(backup_label, sha256, original_path)
     dest.write_bytes(content)
 
-    new_record = FileRecord(
-        session_id=session_id,
-        original_path=original_path,
-        sha256=sha256,
-        size=size,
-        mtime=mtime,
-        stored_at=str(dest),
-    )
-    db.add(new_record)
-    db.commit()
-    db.refresh(new_record)
-
-    return {
-        "status": "stored",
-        "file_id": new_record.id,
-        "session_id": session_id,
-        "sha256": sha256,
-        "stored_at": str(dest),
-    }
+    if record:
+        # Remove arquivo fisico antigo se o path mudou
+        old_path = Path(record.stored_at)
+        if old_path.exists() and old_path != dest:
+            old_path.unlink()
+        record.sha256     = sha256
+        record.size       = size
+        record.mtime      = mtime
+        record.stored_at  = str(dest)
+        record.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(record)
+        return {"status": "updated", "file_id": record.id, "backup_label": backup_label, "sha256": sha256}
+    else:
+        new_record = FileRecord(
+            backup_label=backup_label,
+            original_path=original_path,
+            sha256=sha256,
+            size=size,
+            mtime=mtime,
+            stored_at=str(dest),
+        )
+        db.add(new_record)
+        db.commit()
+        db.refresh(new_record)
+        return {"status": "stored", "file_id": new_record.id, "backup_label": backup_label, "sha256": sha256}
 
 
 # -- Files --------------------------------------------------------------------
 @app.get("/files", dependencies=[Depends(require_api_key)])
 def list_files(
-    session_id: Optional[str] = None,
+    backup_label: str,
     path_prefix: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
-    """Lista arquivos. Filtra por session_id e/ou path_prefix."""
-    query = db.query(FileRecord)
-    if session_id:
-        query = query.filter(FileRecord.session_id == session_id)
+    """Lista arquivos de um backup especifico. backup_label e obrigatorio."""
+    _get_backup_or_404(backup_label, db)
+    query = db.query(FileRecord).filter(FileRecord.backup_label == backup_label)
     if path_prefix:
         query = query.filter(FileRecord.original_path.startswith(path_prefix))
-    records = query.order_by(FileRecord.created_at.desc()).all()
     return [
         FileInfo(
             id=r.id,
-            session_id=r.session_id,
+            backup_label=r.backup_label,
             original_path=r.original_path,
             sha256=r.sha256,
             size=r.size,
@@ -324,7 +334,7 @@ def list_files(
             stored_at=r.stored_at,
             created_at=str(r.created_at),
         )
-        for r in records
+        for r in query.order_by(FileRecord.original_path).all()
     ]
 
 
@@ -355,19 +365,28 @@ def delete_file(file_id: int, db: Session = Depends(get_db)):
 # -- Sync ---------------------------------------------------------------------
 @app.post("/sync", response_model=SyncResponse, dependencies=[Depends(require_api_key)])
 def sync(req: SyncRequest, db: Session = Depends(get_db)):
-    """Remove do backup arquivos que nao existem mais no cliente."""
-    query = db.query(FileRecord)
-    if req.path_prefix:
-        query = query.filter(FileRecord.original_path.startswith(req.path_prefix))
-    server_records = query.all()
+    """
+    Remove do backup apenas os arquivos que nao existem mais no cliente.
+    Completamente isolado ao backup_label — nunca toca arquivos de outros backups.
+    """
+    _get_backup_or_404(req.backup_label, db)
+
+    records = db.query(FileRecord).filter(FileRecord.backup_label == req.backup_label).all()
     client_set = set(req.existing_paths)
     deleted = []
-    for record in server_records:
+
+    for record in records:
         if record.original_path not in client_set:
             path = Path(record.stored_at)
             if path.exists():
                 path.unlink()
             db.delete(record)
             deleted.append(record.original_path)
+
+    # Atualiza last_run_at do backup
+    backup = db.query(BackupID).filter(BackupID.label == req.backup_label).first()
+    if backup:
+        backup.last_run_at = datetime.utcnow()
+
     db.commit()
     return SyncResponse(deleted=deleted, deleted_count=len(deleted))

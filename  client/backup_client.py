@@ -1,12 +1,12 @@
 """
 Backup Client
-Varre um diretorio local e envia apenas os arquivos que foram modificados
-ou ainda nao existem no servidor.
+Cada backup e identificado por um label unico. Backups diferentes sao
+completamente isolados no servidor — arquivos de um nunca interferem no outro.
 
 Uso:
-    python backup_client.py backup ~/documentos --server http://192.168.1.100:8000
-    python backup_client.py restore /tmp/restore --server http://192.168.1.100:8000
-    python backup_client.py sessions --server http://192.168.1.100:8000
+    python backup_client.py backup ~/docs --label "meu-notebook" --server http://192.168.1.100:8000
+    python backup_client.py backups --server http://192.168.1.100:8000
+    python backup_client.py restore /tmp/restore --label "meu-notebook" --server http://192.168.1.100:8000
 """
 
 import os
@@ -64,31 +64,11 @@ def fmt_size(size: int) -> str:
 
 
 # -- API calls ----------------------------------------------------------------
-def create_session(server: str, label: Optional[str], client_name: str, prefix: Optional[str]) -> str:
+def ensure_backup(server: str, label: str, client_name: str, prefix: Optional[str]) -> dict:
+    """Cria o backup se nao existir, ou retorna o existente (idempotente)."""
     resp = requests.post(
-        f"{server}/sessions",
+        f"{server}/backups",
         json={"label": label, "client_name": client_name, "prefix": prefix},
-        headers=build_headers(),
-        timeout=10,
-    )
-    resp.raise_for_status()
-    return resp.json()["session_id"]
-
-
-def finish_session(server: str, session_id: str, status: str = "done"):
-    resp = requests.patch(
-        f"{server}/sessions/{session_id}",
-        json={"status": status},
-        headers=build_headers(),
-        timeout=10,
-    )
-    resp.raise_for_status()
-
-
-def check_file(server: str, original_path: str, sha256: str, size: int, mtime: float) -> dict:
-    resp = requests.post(
-        f"{server}/check",
-        json={"original_path": original_path, "sha256": sha256, "size": size, "mtime": mtime},
         headers=build_headers(),
         timeout=10,
     )
@@ -96,7 +76,24 @@ def check_file(server: str, original_path: str, sha256: str, size: int, mtime: f
     return resp.json()
 
 
-def upload_file(server: str, local_path: Path, original_path: str, mtime: float, session_id: Optional[str]) -> dict:
+def check_file(server: str, backup_label: str, original_path: str, sha256: str, size: int, mtime: float) -> dict:
+    resp = requests.post(
+        f"{server}/check",
+        json={
+            "backup_label": backup_label,
+            "original_path": original_path,
+            "sha256": sha256,
+            "size": size,
+            "mtime": mtime,
+        },
+        headers=build_headers(),
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def upload_file(server: str, local_path: Path, backup_label: str, original_path: str, mtime: float) -> dict:
     file_size = local_path.stat().st_size
     filename  = local_path.name
 
@@ -113,26 +110,31 @@ def upload_file(server: str, local_path: Path, original_path: str, mtime: float,
             bar.update(monitor.bytes_read - bar.n)
 
         monitor = MultipartEncoderMonitor(encoder, _progress)
-        extra = {
-            "X-Original-Path": encode_path(original_path),
-            "X-Mtime": str(mtime),
-            "Content-Type": monitor.content_type,
-        }
-        if session_id:
-            extra["X-Session-Id"] = session_id
 
-        resp = requests.post(f"{server}/upload", data=monitor, headers=build_headers(extra), timeout=120)
+        resp = requests.post(
+            f"{server}/upload",
+            data=monitor,
+            headers=build_headers({
+                "X-Backup-Label":   backup_label,
+                "X-Original-Path":  encode_path(original_path),
+                "X-Mtime":          str(mtime),
+                "Content-Type":     monitor.content_type,
+            }),
+            timeout=120,
+        )
         bar.close()
 
     resp.raise_for_status()
     return resp.json()
 
 
-def sync_with_server(server: str, existing_paths: list, path_prefix: Optional[str] = None) -> dict:
-    payload = {"existing_paths": existing_paths}
-    if path_prefix:
-        payload["path_prefix"] = path_prefix
-    resp = requests.post(f"{server}/sync", json=payload, headers=build_headers(), timeout=30)
+def sync_with_server(server: str, backup_label: str, existing_paths: list) -> dict:
+    resp = requests.post(
+        f"{server}/sync",
+        json={"backup_label": backup_label, "existing_paths": existing_paths},
+        headers=build_headers(),
+        timeout=30,
+    )
     resp.raise_for_status()
     return resp.json()
 
@@ -140,11 +142,11 @@ def sync_with_server(server: str, existing_paths: list, path_prefix: Optional[st
 # -- Backup -------------------------------------------------------------------
 def backup_directory(
     directory: str,
+    label: str,
     server: str = DEFAULT_SERVER,
     dry_run: bool = False,
     path_prefix: Optional[str] = None,
     exclude: Optional[list] = None,
-    label: Optional[str] = None,
     client_name: Optional[str] = None,
 ):
     root = Path(directory).resolve()
@@ -153,96 +155,81 @@ def backup_directory(
         sys.exit(1)
 
     client_name = client_name or socket.gethostname()
-    session_id = None
 
     if not dry_run:
-        session_id = create_session(server, label, client_name, path_prefix)
-        log.info(f"Sessao    : {session_id}" + (f"  [{label}]" if label else ""))
+        result = ensure_backup(server, label, client_name, path_prefix)
+        action = "Criado" if result["created"] else "Encontrado"
+        log.info(f"Backup    : [{label}]  {action}")
 
     stats = {"checked": 0, "uploaded": 0, "skipped": 0, "errors": 0}
     all_paths: list[str] = []
 
-    try:
-        for file_path in sorted(root.rglob("*")):
-            if not file_path.is_file():
+    for file_path in sorted(root.rglob("*")):
+        if not file_path.is_file():
+            continue
+
+        excluded = False
+        for ex in (exclude or []):
+            try:
+                file_path.relative_to((root / ex).resolve())
+                excluded = True
+                break
+            except ValueError:
+                pass
+        if excluded:
+            continue
+
+        stats["checked"] += 1
+        original_path = str(file_path) if not path_prefix else str(
+            Path(path_prefix) / file_path.relative_to(root)
+        )
+        all_paths.append(original_path)
+
+        stat  = file_path.stat()
+        size  = stat.st_size
+        mtime = stat.st_mtime
+
+        try:
+            sha256 = sha256_file(file_path)
+            check  = check_file(server, label, original_path, sha256, size, mtime)
+
+            if not check["needs_upload"]:
+                log.info(f"SKIP   {original_path}")
+                stats["skipped"] += 1
                 continue
 
-            # Verifica exclusoes
-            excluded = False
-            for ex in (exclude or []):
-                ex_path = (root / ex).resolve()
-                try:
-                    file_path.relative_to(ex_path)
-                    excluded = True
-                    break
-                except ValueError:
-                    pass
-            if excluded:
+            log.info(f"UPLOAD {original_path}  ({fmt_size(size)})  [{check['reason']}]")
+
+            if dry_run:
+                log.info("  [dry-run] upload nao realizado")
                 continue
 
-            stats["checked"] += 1
-            original_path = str(file_path) if not path_prefix else str(
-                Path(path_prefix) / file_path.relative_to(root)
-            )
-            all_paths.append(original_path)
+            upload_file(server, file_path, label, original_path, mtime)
+            stats["uploaded"] += 1
 
-            stat = file_path.stat()
-            size  = stat.st_size
-            mtime = stat.st_mtime
+        except requests.RequestException as e:
+            log.error(f"  ERRO em {original_path}: {e}")
+            stats["errors"] += 1
 
-            try:
-                sha256 = sha256_file(file_path)
-                check  = check_file(server, original_path, sha256, size, mtime)
-
-                if not check["needs_upload"]:
-                    log.info(f"SKIP   {original_path}  [{check['reason']}]")
-                    stats["skipped"] += 1
-                    continue
-
-                log.info(f"UPLOAD {original_path}  ({fmt_size(size)})  [{check['reason']}]")
-
-                if dry_run:
-                    log.info("  [dry-run] upload nao realizado")
-                    continue
-
-                result = upload_file(server, file_path, original_path, mtime, session_id)
-                log.info(f"  OK  id={result.get('file_id')}  sha256={sha256[:12]}...")
-                stats["uploaded"] += 1
-
-            except requests.RequestException as e:
-                log.error(f"  ERRO em {original_path}: {e}")
-                stats["errors"] += 1
-
-        # Sync
-        if not dry_run:
-            try:
-                result = sync_with_server(server, all_paths, path_prefix)
-                removed = result.get("deleted_count", 0)
-                stats["removed"] = removed
-                if removed:
-                    log.info(f"SYNC   {removed} arquivo(s) removido(s) do servidor:")
-                    for p in result.get("deleted", []):
-                        log.info(f"  - {p}")
-                else:
-                    log.info("SYNC   Nenhum arquivo removido")
-            except requests.RequestException as e:
-                log.error(f"SYNC   Erro: {e}")
-        else:
-            log.info("SYNC   [dry-run] sync nao executado")
-
-        if not dry_run and session_id:
-            status = "failed" if stats["errors"] else "done"
-            finish_session(server, session_id, status)
-            log.info(f"Sessao {session_id} finalizada com status: {status}")
-
-    except Exception as e:
-        if not dry_run and session_id:
-            finish_session(server, session_id, "failed")
-        raise
+    if not dry_run:
+        try:
+            result = sync_with_server(server, label, all_paths)
+            removed = result.get("deleted_count", 0)
+            stats["removed"] = removed
+            if removed:
+                log.info(f"SYNC   {removed} arquivo(s) removido(s) de [{label}]:")
+                for p in result.get("deleted", []):
+                    log.info(f"  - {p}")
+            else:
+                log.info(f"SYNC   Nenhum arquivo removido de [{label}]")
+        except requests.RequestException as e:
+            log.error(f"SYNC   Erro: {e}")
+    else:
+        log.info("SYNC   [dry-run] nao executado")
 
     log.info("")
     log.info("=" * 50)
-    log.info(f"  Sessao      : {session_id or 'dry-run'}")
+    log.info(f"  Backup      : [{label}]")
     log.info(f"  Verificados : {stats['checked']}")
     log.info(f"  Enviados    : {stats['uploaded']}")
     log.info(f"  Ignorados   : {stats['skipped']}")
@@ -253,45 +240,39 @@ def backup_directory(
     return stats
 
 
-# -- Sessions -----------------------------------------------------------------
-def list_sessions(
-    server: str = DEFAULT_SERVER,
-    client_name: Optional[str] = None,
-    status: Optional[str] = None,
-):
+# -- List backups -------------------------------------------------------------
+def list_backups(server: str = DEFAULT_SERVER, client_name: Optional[str] = None):
     params = {}
     if client_name:
         params["client_name"] = client_name
-    if status:
-        params["status"] = status
 
-    resp = requests.get(f"{server}/sessions", headers=build_headers(), params=params, timeout=10)
+    resp = requests.get(f"{server}/backups", headers=build_headers(), params=params, timeout=10)
     resp.raise_for_status()
-    sessions = resp.json()
+    backups = resp.json()
 
-    if not sessions:
-        log.info("Nenhuma sessao encontrada.")
+    if not backups:
+        log.info("Nenhum backup encontrado.")
         return
 
     log.info("")
-    log.info(f"{'ID':36}  {'LABEL':20}  {'CLIENTE':20}  {'STATUS':8}  {'ARQUIVOS':>8}  {'TAMANHO':>10}  INICIO")
-    log.info("-" * 120)
-    for s in sessions:
-        label       = (s.get("label") or "-")[:20]
-        client      = (s.get("client_name") or "-")[:20]
-        status_str  = s["status"]
-        files       = s["file_count"]
-        size        = fmt_size(s["total_size_bytes"])
-        started     = s["started_at"][:19]
-        log.info(f"{s['id']}  {label:20}  {client:20}  {status_str:8}  {files:>8}  {size:>10}  {started}")
+    log.info(f"{'LABEL':30}  {'CLIENTE':20}  {'STATUS':8}  {'ARQUIVOS':>8}  {'TAMANHO':>10}  ULTIMO RUN")
+    log.info("-" * 105)
+    for b in backups:
+        label      = b["label"][:30]
+        client     = (b.get("client_name") or "-")[:20]
+        status     = b["status"]
+        files      = b["file_count"]
+        size       = fmt_size(b["total_size_bytes"])
+        last_run   = (b.get("last_run_at") or b["created_at"])[:19]
+        log.info(f"{label:30}  {client:20}  {status:8}  {files:>8}  {size:>10}  {last_run}")
     log.info("")
 
 
 # -- Restore ------------------------------------------------------------------
 def restore(
     destination: str,
+    label: str,
     server: str = DEFAULT_SERVER,
-    session_id: Optional[str] = None,
     path_prefix: Optional[str] = None,
     dry_run: bool = False,
     overwrite: bool = False,
@@ -299,13 +280,10 @@ def restore(
     dest_root = Path(destination)
     dest_root.mkdir(parents=True, exist_ok=True)
 
-    log.info(f"Restaurando para : {dest_root}")
-    if session_id:
-        log.info(f"Sessao           : {session_id}")
+    log.info(f"Backup      : [{label}]")
+    log.info(f"Destino     : {dest_root}")
 
-    params = {}
-    if session_id:
-        params["session_id"] = session_id
+    params = {"backup_label": label}
     if path_prefix:
         params["path_prefix"] = path_prefix
 
@@ -314,14 +292,14 @@ def restore(
         resp.raise_for_status()
         files = resp.json()
     except requests.RequestException as e:
-        log.error(f"Erro ao buscar lista de arquivos: {e}")
+        log.error(f"Erro ao buscar arquivos de [{label}]: {e}")
         sys.exit(1)
 
     if not files:
-        log.info("Nenhum arquivo encontrado para restaurar.")
+        log.info("Nenhum arquivo encontrado neste backup.")
         return
 
-    log.info(f"{len(files)} arquivo(s) encontrado(s).")
+    log.info(f"{len(files)} arquivo(s) no backup [{label}].")
     stats = {"restored": 0, "skipped": 0, "errors": 0}
 
     for record in files:
@@ -341,7 +319,7 @@ def restore(
             if sha256_file(dest_file) == sha256:
                 log.info(f"SKIP   {relative}  [identico]")
             else:
-                log.info(f"DIFF   {relative}  [modificado localmente — use --overwrite para sobrescrever]")
+                log.info(f"DIFF   {relative}  [modificado localmente — use --overwrite]")
             stats["skipped"] += 1
             continue
 
@@ -354,9 +332,7 @@ def restore(
         try:
             resp = requests.get(
                 f"{server}/files/{file_id}/download",
-                headers=build_headers(),
-                stream=True,
-                timeout=120,
+                headers=build_headers(), stream=True, timeout=120,
             )
             resp.raise_for_status()
 
@@ -374,13 +350,12 @@ def restore(
             bar.close()
 
             if sha256_file(dest_file) != sha256:
-                log.error(f"  INTEGRIDADE FALHOU para {relative} — arquivo removido")
+                log.error(f"  INTEGRIDADE FALHOU — {relative} removido")
                 dest_file.unlink()
                 stats["errors"] += 1
                 continue
 
             stats["restored"] += 1
-            log.info(f"  OK  sha256={sha256[:12]}...")
 
         except requests.RequestException as e:
             log.error(f"  ERRO ao baixar {relative}: {e}")
@@ -388,6 +363,7 @@ def restore(
 
     log.info("")
     log.info("=" * 50)
+    log.info(f"  Backup      : [{label}]")
     log.info(f"  Restaurados : {stats['restored']}")
     log.info(f"  Ignorados   : {stats['skipped']}")
     log.info(f"  Erros       : {stats['errors']}")
@@ -404,24 +380,23 @@ def main():
     # -- backup ---------------------------------------------------------------
     p_backup = subparsers.add_parser("backup", help="Envia arquivos para o servidor")
     p_backup.add_argument("directory", help="Diretorio a fazer backup")
+    p_backup.add_argument("--label", required=True, help="Identificador unico do backup (ex: notebook-joao)")
     p_backup.add_argument("--server", default=DEFAULT_SERVER)
-    p_backup.add_argument("--prefix", default=None, help="Prefixo no servidor (ex: /backups/meu-pc)")
-    p_backup.add_argument("--label", default=None, help="Nome amigavel para esta sessao (ex: pre-atualizacao)")
-    p_backup.add_argument("--client", default=None, help="Nome do cliente (padrao: hostname da maquina)")
+    p_backup.add_argument("--prefix", default=None, help="Prefixo de path no servidor")
+    p_backup.add_argument("--client", default=None, help="Nome do cliente (padrao: hostname)")
     p_backup.add_argument("--exclude", metavar="PASTA", nargs="+", default=[], help="Subpastas a ignorar")
     p_backup.add_argument("--dry-run", action="store_true", help="Apenas verifica, nao envia")
 
-    # -- sessions -------------------------------------------------------------
-    p_sessions = subparsers.add_parser("sessions", help="Lista sessoes de backup disponiveis")
-    p_sessions.add_argument("--server", default=DEFAULT_SERVER)
-    p_sessions.add_argument("--client", default=None, help="Filtrar por nome do cliente")
-    p_sessions.add_argument("--status", default=None, help="Filtrar por status (done, failed, running)")
+    # -- backups --------------------------------------------------------------
+    p_list = subparsers.add_parser("backups", help="Lista todos os backups disponiveis")
+    p_list.add_argument("--server", default=DEFAULT_SERVER)
+    p_list.add_argument("--client", default=None, help="Filtrar por nome do cliente")
 
     # -- restore --------------------------------------------------------------
-    p_restore = subparsers.add_parser("restore", help="Baixa arquivos do servidor")
+    p_restore = subparsers.add_parser("restore", help="Restaura arquivos de um backup")
     p_restore.add_argument("destination", help="Pasta de destino")
+    p_restore.add_argument("--label", required=True, help="Identificador do backup a restaurar")
     p_restore.add_argument("--server", default=DEFAULT_SERVER)
-    p_restore.add_argument("--session", default=None, help="ID da sessao a restaurar (ver: sessions)")
     p_restore.add_argument("--prefix", default=None, help="Restaurar apenas arquivos com esse prefixo")
     p_restore.add_argument("--overwrite", action="store_true", help="Sobrescreve arquivos existentes")
     p_restore.add_argument("--dry-run", action="store_true", help="Apenas lista, nao baixa")
@@ -431,40 +406,38 @@ def main():
     if args.command == "backup":
         log.info(f"Comando  : BACKUP")
         log.info(f"Servidor : {args.server}")
+        log.info(f"Label    : [{args.label}]")
         log.info(f"Diretorio: {args.directory}")
-        if args.label:
-            log.info(f"Label    : {args.label}")
         if args.exclude:
             log.info(f"Excluindo: {', '.join(args.exclude)}")
         if args.dry_run:
             log.info("Modo     : DRY RUN")
         backup_directory(
             directory=args.directory,
+            label=args.label,
             server=args.server,
             dry_run=args.dry_run,
             path_prefix=args.prefix,
             exclude=args.exclude,
-            label=args.label,
             client_name=args.client,
         )
 
-    elif args.command == "sessions":
-        log.info(f"Comando  : SESSIONS")
+    elif args.command == "backups":
+        log.info(f"Comando  : BACKUPS")
         log.info(f"Servidor : {args.server}")
-        list_sessions(server=args.server, client_name=args.client, status=args.status)
+        list_backups(server=args.server, client_name=args.client)
 
     elif args.command == "restore":
         log.info(f"Comando  : RESTORE")
         log.info(f"Servidor : {args.server}")
+        log.info(f"Label    : [{args.label}]")
         log.info(f"Destino  : {args.destination}")
-        if args.session:
-            log.info(f"Sessao   : {args.session}")
         if args.dry_run:
             log.info("Modo     : DRY RUN")
         restore(
             destination=args.destination,
+            label=args.label,
             server=args.server,
-            session_id=args.session,
             path_prefix=args.prefix,
             dry_run=args.dry_run,
             overwrite=args.overwrite,
