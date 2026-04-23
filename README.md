@@ -10,11 +10,13 @@ Cada backup possui um **label único** — arquivos de backups diferentes são c
 ```
 backup_system/
 ├── server/
-│   ├── main.py          ← API FastAPI (roda na Raspberry Pi)
-│   ├── database.py      ← Modelos SQLite/SQLAlchemy
-│   └── requirements.txt
+│   ├── main.py              ← API FastAPI (roda na Raspberry Pi)
+│   ├── database.py          ← Modelos SQLite/SQLAlchemy
+│   ├── requirements.txt
+│   └── static/
+│       └── index.html       ← Dashboard web
 ├── client/
-│   ├── backup_client.py ← Script de backup/restore (roda no cliente)
+│   ├── backup_client.py     ← Script de backup/restore (roda no cliente)
 │   └── requirements.txt
 ├── .gitignore
 └── README.md
@@ -328,6 +330,25 @@ Se o path não existe neste backup → **arquivo novo, upload necessário**.
 
 ---
 
+## 🖥️ Dashboard Web
+
+O servidor inclui um dashboard acessível pelo browser, servido diretamente pelo FastAPI.
+
+```
+http://<ip-da-pi>:8000/
+```
+
+Na primeira visita, o browser pedirá a **API Key** — ela é salva no `localStorage` e não precisa ser informada novamente.
+
+**O que o dashboard exibe:**
+
+- **Stats globais** — total de backups, total de arquivos, storage utilizado e backups ativos
+- **Tabela de backups** — label, cliente, status, nº de arquivos, tamanho total e data do último run
+- **Painel de arquivos** — clique em qualquer linha da tabela para expandir e ver todos os arquivos do backup, com path original, tamanho, SHA-256 e data de inclusão
+- **Auto-refresh** a cada 30 segundos, ou manual pelo botão ↻
+
+---
+
 ## 🔌 Endpoints da API
 
 Todos os endpoints (exceto `/health`) exigem o header `X-API-Key`.
@@ -345,6 +366,7 @@ Todos os endpoints (exceto `/health`) exigem o header `X-API-Key`.
 
 | Método | Endpoint | Descrição |
 |--------|----------|-----------|
+| `GET` | `/` | Dashboard web (browser) |
 | `GET` | `/health` | Status do servidor |
 | `POST` | `/check` | Verifica se arquivo precisa ser enviado (escopado ao label) |
 | `POST` | `/upload` | Envia arquivo — requer header `X-Backup-Label` |
@@ -360,5 +382,6 @@ Todos os endpoints (exceto `/health`) exigem o header `X-API-Key`.
 ## 📊 Documentação automática
 
 Com o servidor rodando, acesse:
+- **Dashboard**: `http://<ip-da-pi>:8000/`
 - **Swagger UI**: `http://<ip-da-pi>:8000/docs`
 - **ReDoc**: `http://<ip-da-pi>:8000/redoc`

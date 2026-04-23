@@ -6,7 +6,8 @@ escopados ao label. Um backup nunca interfere nos arquivos de outro.
 """
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Header
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional
 import os
@@ -21,10 +22,17 @@ from sqlalchemy.orm import Session
 
 # -- Config -------------------------------------------------------------------
 STORAGE_DIR = Path(os.getenv("STORAGE_DIR", "./storage"))
-API_KEY     = os.getenv("BACKUP_API_KEY", "change-me-in-production")
+API_KEY     = os.getenv("BACKUP_API_KEY", "")   # vazio = sem autenticacao
+STATIC_DIR  = Path(__file__).parent / "static"
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="Backup Server", version="3.0.0")
+AUTH_ENABLED = bool(API_KEY)
+
+app = FastAPI(title="Backup Files — Raspberry Pi", version="3.0.0")
+
+# Serve static files (dashboard)
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 # -- Startup ------------------------------------------------------------------
@@ -34,8 +42,10 @@ def startup():
 
 
 # -- Auth ---------------------------------------------------------------------
-def require_api_key(x_api_key: str = Header(...)):
-    if not secrets.compare_digest(x_api_key, API_KEY):
+def require_api_key(x_api_key: Optional[str] = Header(None)):
+    if not AUTH_ENABLED:
+        return  # autenticacao desativada — BACKUP_API_KEY nao definida
+    if not x_api_key or not secrets.compare_digest(x_api_key, API_KEY):
         raise HTTPException(status_code=401, detail="API key invalida")
 
 
@@ -131,6 +141,16 @@ def _backup_info(b: BackupID, db: Session) -> BackupInfo:
         file_count=len(files),
         total_size_bytes=sum(f.size for f in files),
     )
+
+
+# -- Dashboard ----------------------------------------------------------------
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def dashboard():
+    """Serve o dashboard web."""
+    index = STATIC_DIR / "index.html"
+    if not index.exists():
+        return HTMLResponse("<h1>Dashboard nao encontrado</h1>", status_code=404)
+    return HTMLResponse(index.read_text(encoding="utf-8"))
 
 
 # -- Health -------------------------------------------------------------------

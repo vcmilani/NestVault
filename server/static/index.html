@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Backup Files — Raspberry Pi</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:        #0d0f0f;
+    --bg2:       #131616;
+    --bg3:       #1a1e1e;
+    --border:    #232929;
+    --border2:   #2e3636;
+    --text:      #c8d0ce;
+    --text-dim:  #5a6666;
+    --text-mute: #3a4444;
+    --amber:     #e8a940;
+    --amber-dim: #7a5520;
+    --green:     #4ecb8d;
+    --green-dim: #1d5a3d;
+    --red:       #e05c5c;
+    --red-dim:   #5a2020;
+    --blue:      #5ba4cf;
+    --mono: 'IBM Plex Mono', monospace;
+    --sans: 'IBM Plex Sans', sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* scanline overlay */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,.04) 2px,
+      rgba(0,0,0,.04) 4px
+    );
+    pointer-events: none;
+    z-index: 999;
+  }
+
+  /* ── Header ─────────────────────────────────── */
+  header {
+    border-bottom: 1px solid var(--border);
+    padding: 0 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 56px;
+    position: sticky; top: 0;
+    background: var(--bg);
+    z-index: 10;
+  }
+
+  .logo {
+    display: flex; align-items: center; gap: 12px;
+  }
+  .logo-icon {
+    width: 28px; height: 28px;
+    border: 1.5px solid var(--amber);
+    display: grid; place-items: center;
+    color: var(--amber);
+    font-size: 14px;
+  }
+  .logo-text {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--text);
+  }
+  .logo-sub {
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: .08em;
+  }
+
+  .header-right {
+    display: flex; align-items: center; gap: 24px;
+  }
+  .status-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%,100% { opacity:1; } 50% { opacity:.4; }
+  }
+  .refresh-btn {
+    background: none; border: 1px solid var(--border2);
+    color: var(--text-dim); padding: 5px 12px;
+    font-family: var(--mono); font-size: 11px;
+    cursor: pointer; letter-spacing: .06em;
+    transition: all .15s;
+  }
+  .refresh-btn:hover { border-color: var(--amber); color: var(--amber); }
+
+  .last-updated { font-size: 11px; color: var(--text-mute); }
+
+  /* ── Layout ─────────────────────────────────── */
+  main { padding: 28px 32px; max-width: 1400px; }
+
+  /* ── Stats bar ──────────────────────────────── */
+  .stats-bar {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1px;
+    border: 1px solid var(--border);
+    margin-bottom: 28px;
+    background: var(--border);
+  }
+  .stat-box {
+    background: var(--bg2);
+    padding: 20px 24px;
+    position: relative;
+    overflow: hidden;
+    animation: fadeUp .4s ease both;
+  }
+  .stat-box:nth-child(1) { animation-delay: .05s }
+  .stat-box:nth-child(2) { animation-delay: .10s }
+  .stat-box:nth-child(3) { animation-delay: .15s }
+  .stat-box:nth-child(4) { animation-delay: .20s }
+
+  @keyframes fadeUp {
+    from { opacity:0; transform:translateY(8px) }
+    to   { opacity:1; transform:translateY(0) }
+  }
+
+  .stat-box::before {
+    content: '';
+    position: absolute; top: 0; left: 0; right: 0;
+    height: 1px;
+    background: var(--amber);
+    transform: scaleX(0);
+    transform-origin: left;
+    transition: transform .3s;
+  }
+  .stat-box:hover::before { transform: scaleX(1); }
+
+  .stat-label {
+    font-size: 10px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+  .stat-value {
+    font-size: 28px; font-weight: 300;
+    color: var(--amber); letter-spacing: -.02em;
+    line-height: 1;
+  }
+  .stat-unit { font-size: 13px; color: var(--text-dim); margin-left: 4px; }
+
+  /* ── Section header ─────────────────────────── */
+  .section-head {
+    display: flex; align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .section-title {
+    font-size: 10px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--text-dim);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .section-title::before {
+    content: ''; display: block;
+    width: 3px; height: 12px;
+    background: var(--amber);
+  }
+  .count-badge {
+    background: var(--bg3); border: 1px solid var(--border2);
+    padding: 2px 8px; font-size: 10px;
+    color: var(--text-dim); letter-spacing: .06em;
+  }
+
+  /* ── Table ──────────────────────────────────── */
+  .table-wrap {
+    border: 1px solid var(--border);
+    margin-bottom: 28px;
+    animation: fadeUp .4s .25s ease both;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    background: var(--bg3);
+    padding: 10px 16px;
+    text-align: left;
+    font-size: 10px; letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  thead th:first-child { padding-left: 20px; }
+
+  tbody tr {
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    transition: background .1s;
+  }
+  tbody tr:last-child { border-bottom: none; }
+  tbody tr:hover { background: var(--bg3); }
+  tbody tr.active { background: rgba(232,169,64,.06); }
+  tbody tr.active td:first-child {
+    border-left: 2px solid var(--amber);
+    padding-left: 18px;
+  }
+
+  td {
+    padding: 12px 16px;
+    vertical-align: middle;
+    font-size: 12px;
+  }
+  td:first-child { padding-left: 20px; }
+
+  .label-cell {
+    font-weight: 500;
+    color: var(--text);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .label-cell .chevron {
+    color: var(--text-mute); font-size: 10px;
+    transition: transform .2s;
+  }
+  tr.active .chevron { transform: rotate(90deg); color: var(--amber); }
+
+  .client-cell { color: var(--text-dim); }
+  .num-cell { text-align: right; font-variant-numeric: tabular-nums; }
+  .size-cell { text-align: right; color: var(--blue); font-variant-numeric: tabular-nums; }
+  .date-cell { color: var(--text-dim); white-space: nowrap; }
+
+  .badge {
+    display: inline-block; padding: 2px 8px;
+    font-size: 10px; letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+  .badge-active { background: var(--green-dim); color: var(--green); }
+  .badge-deleted { background: var(--red-dim); color: var(--red); }
+
+  /* ── Files panel ────────────────────────────── */
+  .files-panel {
+    border: 1px solid var(--border);
+    border-top: 2px solid var(--amber);
+    margin-bottom: 28px;
+    animation: fadeUp .25s ease both;
+  }
+  .files-panel-head {
+    background: var(--bg3);
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center;
+    justify-content: space-between;
+  }
+  .files-panel-title {
+    font-size: 11px; letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--amber);
+  }
+  .close-btn {
+    background: none; border: none;
+    color: var(--text-mute); cursor: pointer;
+    font-size: 16px; line-height: 1;
+    padding: 0 4px;
+  }
+  .close-btn:hover { color: var(--text); }
+
+  .files-table th { background: var(--bg2); }
+  .files-table td { font-size: 11px; }
+  .path-cell {
+    color: var(--text);
+    max-width: 500px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .hash-cell { color: var(--text-mute); font-size: 10px; }
+
+  /* ── Loading / empty ────────────────────────── */
+  .loading {
+    padding: 60px; text-align: center;
+    color: var(--text-mute); letter-spacing: .1em;
+    font-size: 11px; text-transform: uppercase;
+  }
+  .loading::after {
+    content: '...';
+    animation: dots 1.2s steps(4,end) infinite;
+  }
+  @keyframes dots {
+    0%,20%  { content: '.'; }
+    40%     { content: '..'; }
+    60%,100%{ content: '...'; }
+  }
+  .empty { padding: 40px; text-align: center; color: var(--text-mute); font-size: 11px; }
+
+  /* ── Error ──────────────────────────────────── */
+  .error-bar {
+    background: var(--red-dim); border: 1px solid var(--red);
+    padding: 10px 16px; margin-bottom: 20px;
+    color: var(--red); font-size: 11px;
+    display: none;
+  }
+  .error-bar.visible { display: block; }
+
+  /* scrollbar */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border2); }
+
+  /* ── Login overlay ──────────────────────────── */
+  .login-overlay {
+    position: fixed; inset: 0;
+    background: rgba(13,15,15,.92);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 100;
+    backdrop-filter: blur(4px);
+  }
+  .login-box {
+    border: 1px solid var(--border2);
+    border-top: 2px solid var(--amber);
+    background: var(--bg2);
+    padding: 40px 48px;
+    width: 400px;
+    animation: fadeUp .3s ease;
+  }
+  .login-title {
+    font-size: 11px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--amber);
+    margin-bottom: 6px;
+  }
+  .login-sub {
+    font-size: 11px; color: var(--text-dim);
+    margin-bottom: 28px;
+  }
+  .login-label {
+    font-size: 10px; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--text-dim);
+    display: block; margin-bottom: 8px;
+  }
+  .login-input {
+    width: 100%;
+    background: var(--bg3); border: 1px solid var(--border2);
+    color: var(--text); font-family: var(--mono); font-size: 13px;
+    padding: 10px 14px; outline: none;
+    transition: border-color .15s;
+  }
+  .login-input:focus { border-color: var(--amber); }
+  .login-btn {
+    margin-top: 16px; width: 100%;
+    background: var(--amber); border: none;
+    color: var(--bg); font-family: var(--mono);
+    font-size: 11px; font-weight: 600;
+    letter-spacing: .1em; text-transform: uppercase;
+    padding: 11px; cursor: pointer;
+    transition: opacity .15s;
+  }
+  .login-btn:hover { opacity: .85; }
+  .login-error {
+    margin-top: 12px; font-size: 11px;
+    color: var(--red); min-height: 16px;
+  }
+  .logout-btn {
+    background: none; border: none;
+    color: var(--text-mute); font-family: var(--mono);
+    font-size: 11px; cursor: pointer; letter-spacing: .06em;
+    padding: 0;
+  }
+  .logout-btn:hover { color: var(--text-dim); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">◈</div>
+    <div>
+      <div class="logo-text">Backup Files</div>
+      <div class="logo-sub">Raspberry Pi</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <div class="status-dot" id="statusDot" title="Online"></div>
+    <span class="last-updated" id="lastUpdated">—</span>
+    <button class="refresh-btn" onclick="loadAll()">↻ Refresh</button>
+    <button class="logout-btn" id="logoutBtn" title="Trocar API Key">⌀ API Key</button>
+  </div>
+</header>
+
+<main>
+  <div class="error-bar" id="errorBar"></div>
+
+  <!-- Stats -->
+  <div class="stats-bar" id="statsBar">
+    <div class="stat-box">
+      <div class="stat-label">Backups</div>
+      <div class="stat-value" id="statBackups">—</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-label">Arquivos</div>
+      <div class="stat-value" id="statFiles">—</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-label">Storage Total</div>
+      <div class="stat-value" id="statSize">—</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-label">Ativos</div>
+      <div class="stat-value" id="statActive">—</div>
+    </div>
+  </div>
+
+  <!-- Backups table -->
+  <div class="section-head">
+    <div class="section-title">Backups</div>
+    <span class="count-badge" id="backupCount">0</span>
+  </div>
+
+  <div class="table-wrap">
+    <div id="backupsTable"><div class="loading">Carregando</div></div>
+  </div>
+
+  <!-- Files panel (hidden by default) -->
+  <div class="files-panel" id="filesPanel" style="display:none">
+    <div class="files-panel-head">
+      <span class="files-panel-title" id="filesPanelTitle">Arquivos</span>
+      <button class="close-btn" onclick="closeFiles()">✕</button>
+    </div>
+    <div id="filesTable"><div class="loading">Carregando</div></div>
+  </div>
+</main>
+
+<!-- Login overlay -->
+<div class="login-overlay" id="loginOverlay" style="display:none">
+  <div class="login-box">
+    <div class="login-title">◈ Backup Files</div>
+    <div class="login-sub">Informe a API Key para continuar</div>
+    <form id="loginForm">
+      <label class="login-label" for="apiKeyInput">API Key</label>
+      <input class="login-input" id="apiKeyInput" type="password"
+             placeholder="sua-api-key-aqui" autocomplete="off" spellcheck="false">
+      <button class="login-btn" type="submit">Entrar →</button>
+      <div class="login-error" id="loginError"></div>
+    </form>
+  </div>
+</div>
+
+<script>
+  let API_KEY = localStorage.getItem('backupApiKey') || '';
+  let activeLabel = null;
+  let autoRefresh = null;
+
+  function headers() {
+    return { 'X-API-Key': API_KEY };
+  }
+
+  function showLogin(msg) {
+    clearInterval(autoRefresh);
+    document.getElementById('loginOverlay').style.display = 'flex';
+    if (msg) document.getElementById('loginError').textContent = msg;
+  }
+
+  function hideLogin() {
+    document.getElementById('loginOverlay').style.display = 'none';
+  }
+
+  document.getElementById('loginForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    const key = document.getElementById('apiKeyInput').value.trim();
+    if (!key) return;
+    API_KEY = key;
+    localStorage.setItem('backupApiKey', key);
+    document.getElementById('loginError').textContent = '';
+    hideLogin();
+    loadAll();
+    autoRefresh = setInterval(loadAll, 30000);
+  });
+
+  document.getElementById('logoutBtn').addEventListener('click', function() {
+    localStorage.removeItem('backupApiKey');
+    API_KEY = '';
+    showLogin();
+  });
+
+  function fmtSize(bytes) {
+    const units = ['B','KB','MB','GB','TB'];
+    let v = bytes;
+    for (const u of units) {
+      if (v < 1024) return v.toFixed(1) + ' ' + u;
+      v /= 1024;
+    }
+    return v.toFixed(1) + ' PB';
+  }
+
+  function fmtDate(str) {
+    if (!str) return '—';
+    return str.replace('T',' ').slice(0,16);
+  }
+
+  function showError(msg) {
+    const bar = document.getElementById('errorBar');
+    bar.textContent = '⚠ ' + msg;
+    bar.classList.add('visible');
+    document.getElementById('statusDot').style.background = 'var(--red)';
+    document.getElementById('statusDot').style.boxShadow = '0 0 8px var(--red)';
+  }
+
+  function clearError() {
+    document.getElementById('errorBar').classList.remove('visible');
+    document.getElementById('statusDot').style.background = '';
+    document.getElementById('statusDot').style.boxShadow = '';
+  }
+
+  async function loadAll() {
+    clearError();
+    try {
+      const resp = await fetch('/backups', { headers: headers() });
+      if (resp.status === 401) throw new Error('401 Unauthorized');
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const backups = await resp.json();
+      renderStats(backups);
+      renderBackups(backups);
+      document.getElementById('lastUpdated').textContent =
+        new Date().toLocaleTimeString('pt-BR');
+      if (activeLabel) loadFiles(activeLabel);
+    } catch (e) {
+      if (e.message.includes('401')) {
+        showLogin('API Key inválida. Tente novamente.');
+      } else {
+        showError('Não foi possível conectar ao servidor: ' + e.message);
+      }
+    }
+  }
+
+  function renderStats(backups) {
+    const total   = backups.length;
+    const active  = backups.filter(b => b.status === 'active').length;
+    const files   = backups.reduce((s, b) => s + b.file_count, 0);
+    const bytes   = backups.reduce((s, b) => s + b.total_size_bytes, 0);
+    document.getElementById('statBackups').textContent = total;
+    document.getElementById('statFiles').textContent   = files.toLocaleString('pt-BR');
+    document.getElementById('statSize').textContent    = fmtSize(bytes);
+    document.getElementById('statActive').textContent  = active;
+    document.getElementById('backupCount').textContent = total;
+  }
+
+  function renderBackups(backups) {
+    const el = document.getElementById('backupsTable');
+    if (!backups.length) {
+      el.innerHTML = '<div class="empty">Nenhum backup encontrado</div>';
+      return;
+    }
+    const rows = backups.map(b => {
+      const isActive = b.label === activeLabel;
+      const lastRun  = fmtDate(b.last_run_at || b.created_at);
+      const badge    = b.status === 'active'
+        ? '<span class="badge badge-active">active</span>'
+        : '<span class="badge badge-deleted">deleted</span>';
+      return `
+        <tr class="${isActive ? 'active' : ''}" onclick="toggleFiles('${b.label}')">
+          <td><div class="label-cell">
+            <span class="chevron">▶</span>
+            ${escHtml(b.label)}
+          </div></td>
+          <td class="client-cell">${escHtml(b.client_name || '—')}</td>
+          <td>${badge}</td>
+          <td class="num-cell">${b.file_count.toLocaleString('pt-BR')}</td>
+          <td class="size-cell">${fmtSize(b.total_size_bytes)}</td>
+          <td class="date-cell">${lastRun}</td>
+        </tr>`;
+    }).join('');
+
+    el.innerHTML = `
+      <table>
+        <thead><tr>
+          <th>Label</th>
+          <th>Cliente</th>
+          <th>Status</th>
+          <th style="text-align:right">Arquivos</th>
+          <th style="text-align:right">Tamanho</th>
+          <th>Último run</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  }
+
+  async function toggleFiles(label) {
+    if (activeLabel === label) {
+      closeFiles();
+      return;
+    }
+    activeLabel = label;
+    document.getElementById('filesPanel').style.display = 'block';
+    document.getElementById('filesPanelTitle').textContent = `Arquivos — ${label}`;
+    document.getElementById('filesTable').innerHTML = '<div class="loading">Carregando</div>';
+    // re-render to show active row
+    const resp = await fetch('/backups', { headers: headers() });
+    const backups = await resp.json();
+    renderBackups(backups);
+    await loadFiles(label);
+  }
+
+  async function loadFiles(label) {
+    try {
+      const resp = await fetch(`/files?backup_label=${encodeURIComponent(label)}`,
+        { headers: headers() });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const files = await resp.json();
+      renderFiles(files);
+    } catch (e) {
+      document.getElementById('filesTable').innerHTML =
+        `<div class="empty">Erro ao carregar arquivos: ${e.message}</div>`;
+    }
+  }
+
+  function renderFiles(files) {
+    const el = document.getElementById('filesTable');
+    if (!files.length) {
+      el.innerHTML = '<div class="empty">Nenhum arquivo neste backup</div>';
+      return;
+    }
+    const rows = files.map(f => {
+      const date = fmtDate(f.created_at);
+      return `
+        <tr>
+          <td class="path-cell" title="${escHtml(f.original_path)}">${escHtml(f.original_path)}</td>
+          <td class="size-cell">${fmtSize(f.size)}</td>
+          <td class="hash-cell">${f.sha256.slice(0,16)}…</td>
+          <td class="date-cell">${date}</td>
+        </tr>`;
+    }).join('');
+
+    el.innerHTML = `
+      <table class="files-table">
+        <thead><tr>
+          <th>Path original</th>
+          <th style="text-align:right">Tamanho</th>
+          <th>SHA-256</th>
+          <th>Adicionado em</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  }
+
+  function closeFiles() {
+    activeLabel = null;
+    document.getElementById('filesPanel').style.display = 'none';
+    loadAll();
+  }
+
+  function escHtml(str) {
+    return String(str)
+      .replace(/&/g,'&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;');
+  }
+
+  // Tenta carregar sem key primeiro (servidor pode estar sem autenticacao)
+  // Se retornar 401, mostra o formulario de login
+  async function init() {
+    const resp = await fetch('/health');
+    if (!resp.ok) { showError('Servidor indisponivel'); return; }
+
+    const test = await fetch('/backups', { headers: headers() });
+    if (test.status === 401) {
+      showLogin();
+    } else {
+      loadAll();
+      autoRefresh = setInterval(loadAll, 30000);
+    }
+  }
+  init();
+</script>
+</body>
+</html>
