@@ -27,7 +27,21 @@ from requests_toolbelt import MultipartEncoder, MultipartEncoderMonitor
 
 # -- Config -------------------------------------------------------------------
 DEFAULT_SERVER = "http://localhost:8000"
-API_KEY = os.getenv("BACKUP_API_KEY", "change-me-in-production")
+
+def _load_api_key() -> str:
+    key = os.getenv("BACKUP_API_KEY", "")
+    try:
+        key.encode("latin-1")
+    except UnicodeEncodeError:
+        print(
+            "ERRO: BACKUP_API_KEY contem caracteres invalidos (ex: aspas curvas “ ”)."
+            "\nCopie a chave novamente usando apenas caracteres ASCII simples.",
+            file=__import__("sys").stderr,
+        )
+        __import__("sys").exit(1)
+    return key
+
+API_KEY = _load_api_key()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -171,8 +185,15 @@ def backup_directory(
 
     # Coleta todos os arquivos elegíveis primeiro
     pending = []
+    # Arquivos ignorados por padrao
+    IGNORED_NAMES = {'.DS_Store', 'Thumbs.db', 'desktop.ini'}
+
     for file_path in sorted(root.rglob("*")):
         if not file_path.is_file():
+            continue
+
+        if file_path.name in IGNORED_NAMES:
+            log.debug(f"SKIP   {file_path.name}  [ignorado por padrao]")
             continue
         excluded = False
         for ex in (exclude or []):
