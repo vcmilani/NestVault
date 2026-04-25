@@ -1,8 +1,8 @@
 """
-Backup Server - FastAPI
-Cada backup e identificado por um label unico. Arquivos de backups diferentes
-sao completamente isolados — check, upload, sync e storage fisico sao todos
-escopados ao label. Um backup nunca interfere nos arquivos de outro.
+Backup Files — Raspberry Pi  v2.0
+Suporte a versoes dentro do mesmo label.
+Deduplicacao por conteudo (sha256) — cada arquivo fisico e armazenado uma unica vez.
+Arquivos deletados sao marcados, nao removidos do storage.
 """
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Header
@@ -10,27 +10,22 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional
-import os
-import hashlib
-import secrets
-import base64
+import os, hashlib, secrets, base64
 from pathlib import Path
 from datetime import datetime
 
-from database import init_db, get_db, FileRecord, BackupID, SessionLocal
+from database import init_db, get_db, BackupID, BackupVersion, FileContent, VersionFile
 from sqlalchemy.orm import Session
 
 # -- Config -------------------------------------------------------------------
 STORAGE_DIR = Path(os.getenv("STORAGE_DIR", "./storage"))
-API_KEY     = os.getenv("BACKUP_API_KEY", "")   # vazio = sem autenticacao
+API_KEY     = os.getenv("BACKUP_API_KEY", "")
 STATIC_DIR  = Path(__file__).parent / "static"
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-
 AUTH_ENABLED = bool(API_KEY)
 
-app = FastAPI(title="Backup Files — Raspberry Pi", version="3.0.0")
+app = FastAPI(title="Backup Files — Raspberry Pi", version="2.0.0")
 
-# Serve static files (dashboard)
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -44,30 +39,26 @@ def startup():
 # -- Auth ---------------------------------------------------------------------
 def require_api_key(x_api_key: Optional[str] = Header(None)):
     if not AUTH_ENABLED:
-        return  # autenticacao desativada — BACKUP_API_KEY nao definida
+        return
     if not x_api_key or not secrets.compare_digest(x_api_key, API_KEY):
         raise HTTPException(status_code=401, detail="API key invalida")
 
 
 # -- Schemas ------------------------------------------------------------------
 class BackupCreate(BaseModel):
-    label: str                        # identificador unico — ex: "producao", "notebook-joao"
+    label: str
     client_name: Optional[str] = None
     prefix: Optional[str] = None
 
-class BackupInfo(BaseModel):
-    id: int
-    label: str
-    client_name: Optional[str]
-    prefix: Optional[str]
-    created_at: str
-    last_run_at: Optional[str]
-    status: str
-    file_count: int
-    total_size_bytes: int
+class VersionCreate(BaseModel):
+    version_key: str   # datetime ISO: "2026-04-25T10:42:31"
+
+class VersionFinish(BaseModel):
+    status: str = "done"  # done | failed
 
 class CheckRequest(BaseModel):
     backup_label: str
+    version_key: str
     original_path: str
     sha256: str
     size: int
@@ -75,36 +66,28 @@ class CheckRequest(BaseModel):
 
 class CheckResponse(BaseModel):
     needs_upload: bool
+    content_exists: bool   # True = conteudo ja no storage, so precisa registrar
     reason: str
     file_id: Optional[int] = None
 
-class FileInfo(BaseModel):
-    id: int
-    backup_label: str
-    original_path: str
-    sha256: str
-    size: int
-    mtime: float
-    stored_at: str
-    created_at: str
-
 class SyncRequest(BaseModel):
     backup_label: str
+    version_key: str
     existing_paths: list[str]
 
 class SyncResponse(BaseModel):
-    deleted: list[str]
+    marked_deleted: list[str]
     deleted_count: int
+
+class CleanupRequest(BaseModel):
+    backup_label: str
+    keep: int = 5   # quantas versoes manter
 
 
 # -- Helpers ------------------------------------------------------------------
-def _storage_path(backup_label: str, sha256: str, original_path: str) -> Path:
-    """
-    Cada backup tem sua propria subpasta em storage/.
-    storage/<backup_label>/<2 chars sha256>/<hash>_<filename>
-    Isso garante isolamento fisico total entre backups diferentes.
-    """
-    dest = STORAGE_DIR / backup_label / sha256[:2] / f"{sha256[:16]}_{Path(original_path).name}"
+def _content_path(sha256: str) -> Path:
+    """Storage fisico unico por sha256 — compartilhado entre todas as versoes e labels."""
+    dest = STORAGE_DIR / "_content" / sha256[:2] / sha256
     dest.parent.mkdir(parents=True, exist_ok=True)
     return dest
 
@@ -120,33 +103,63 @@ def _read_upload(upload: UploadFile) -> tuple[str, bytes]:
     return h.hexdigest(), b"".join(chunks)
 
 def _get_backup_or_404(label: str, db: Session) -> BackupID:
-    backup = db.query(BackupID).filter(BackupID.label == label).first()
-    if not backup:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Backup '{label}' nao encontrado. Crie-o primeiro via POST /backups"
-        )
-    return backup
+    b = db.query(BackupID).filter(BackupID.label == label).first()
+    if not b:
+        raise HTTPException(404, f"Backup '{label}' nao encontrado")
+    return b
 
-def _backup_info(b: BackupID, db: Session) -> BackupInfo:
-    files = db.query(FileRecord).filter(FileRecord.backup_label == b.label).all()
-    return BackupInfo(
-        id=b.id,
-        label=b.label,
-        client_name=b.client_name,
-        prefix=b.prefix,
-        created_at=str(b.created_at),
-        last_run_at=str(b.last_run_at) if b.last_run_at else None,
-        status=b.status,
-        file_count=len(files),
-        total_size_bytes=sum(f.size for f in files),
-    )
+def _get_version_or_404(label: str, version_key: str, db: Session) -> BackupVersion:
+    v = (db.query(BackupVersion)
+         .filter(BackupVersion.backup_label == label,
+                 BackupVersion.version_key  == version_key)
+         .first())
+    if not v:
+        raise HTTPException(404, f"Versao '{version_key}' nao encontrada em '{label}'")
+    return v
+
+def _version_stats(v: BackupVersion, db: Session) -> dict:
+    files = db.query(VersionFile).filter(VersionFile.version_id == v.id).all()
+    active  = [f for f in files if f.status == "active"]
+    deleted = [f for f in files if f.status == "deleted"]
+    size    = sum(f.content.size for f in active if f.content)
+    return {
+        "id": v.id,
+        "version_key": v.version_key,
+        "backup_label": v.backup_label,
+        "status": v.status,
+        "created_at": str(v.created_at),
+        "finished_at": str(v.finished_at) if v.finished_at else None,
+        "file_count": len(active),
+        "deleted_count": len(deleted),
+        "total_size_bytes": size,
+    }
+
+def _backup_info(b: BackupID, db: Session) -> dict:
+    versions = (db.query(BackupVersion)
+                .filter(BackupVersion.backup_label == b.label,
+                        BackupVersion.status == "done")
+                .order_by(BackupVersion.version_key.desc())
+                .all())
+    latest = versions[0] if versions else None
+    total_files = sum(_version_stats(v, db)["file_count"] for v in versions[:1])
+    total_size  = sum(_version_stats(v, db)["total_size_bytes"] for v in versions[:1])
+    return {
+        "id": b.id,
+        "label": b.label,
+        "client_name": b.client_name,
+        "prefix": b.prefix,
+        "status": b.status,
+        "created_at": str(b.created_at),
+        "last_version": latest.version_key if latest else None,
+        "version_count": len(versions),
+        "file_count": total_files,
+        "total_size_bytes": total_size,
+    }
 
 
 # -- Dashboard ----------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def dashboard():
-    """Serve o dashboard web."""
     index = STATIC_DIR / "index.html"
     if not index.exists():
         return HTMLResponse("<h1>Dashboard nao encontrado</h1>", status_code=404)
@@ -156,257 +169,287 @@ def dashboard():
 # -- Health -------------------------------------------------------------------
 @app.get("/health")
 def health():
-    return {"status": "ok", "time": datetime.utcnow().isoformat()}
+    return {"status": "ok", "version": "2.0.0", "time": datetime.utcnow().isoformat()}
 
 
-# -- Backup IDs ---------------------------------------------------------------
+# -- Backups ------------------------------------------------------------------
 @app.post("/backups", dependencies=[Depends(require_api_key)])
 def create_backup(req: BackupCreate, db: Session = Depends(get_db)):
-    """
-    Cria um novo identificador de backup. O label deve ser unico.
-    Se ja existir um backup com esse label, retorna o existente (idempotente).
-    """
     existing = db.query(BackupID).filter(BackupID.label == req.label).first()
     if existing:
         return {"created": False, "backup": _backup_info(existing, db)}
-
-    backup = BackupID(
-        label=req.label,
-        client_name=req.client_name,
-        prefix=req.prefix,
-    )
-    db.add(backup)
-    db.commit()
-    db.refresh(backup)
-    return {"created": True, "backup": _backup_info(backup, db)}
-
+    b = BackupID(label=req.label, client_name=req.client_name, prefix=req.prefix)
+    db.add(b); db.commit(); db.refresh(b)
+    return {"created": True, "backup": _backup_info(b, db)}
 
 @app.get("/backups", dependencies=[Depends(require_api_key)])
 def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db)):
-    """Lista todos os identificadores de backup com contagem de arquivos e tamanho total."""
-    query = db.query(BackupID).order_by(BackupID.last_run_at.desc().nullslast())
+    q = db.query(BackupID).order_by(BackupID.created_at.desc())
     if client_name:
-        query = query.filter(BackupID.client_name == client_name)
-    return [_backup_info(b, db) for b in query.all()]
-
+        q = q.filter(BackupID.client_name == client_name)
+    return [_backup_info(b, db) for b in q.all()]
 
 @app.get("/backups/{label}", dependencies=[Depends(require_api_key)])
 def get_backup(label: str, db: Session = Depends(get_db)):
-    """Detalhes de um backup especifico."""
     return _backup_info(_get_backup_or_404(label, db), db)
-
 
 @app.delete("/backups/{label}", dependencies=[Depends(require_api_key)])
 def delete_backup(label: str, db: Session = Depends(get_db)):
-    """Remove um backup e TODOS os seus arquivos. Nao afeta outros backups."""
-    backup = _get_backup_or_404(label, db)
-    files = db.query(FileRecord).filter(FileRecord.backup_label == label).all()
-    for f in files:
-        path = Path(f.stored_at)
-        if path.exists():
-            path.unlink()
-        db.delete(f)
-    # Remove a pasta fisica do backup se estiver vazia
-    backup_dir = STORAGE_DIR / label
-    if backup_dir.exists():
-        try:
-            backup_dir.rmdir()
-        except OSError:
-            pass  # pasta nao esta vazia, ignora
-    db.delete(backup)
+    b = _get_backup_or_404(label, db)
+    versions = db.query(BackupVersion).filter(BackupVersion.backup_label == label).all()
+    for v in versions:
+        db.query(VersionFile).filter(VersionFile.version_id == v.id).delete()
+        db.delete(v)
+    db.delete(b)
     db.commit()
-    return {"status": "deleted", "label": label, "files_removed": len(files)}
+    _cleanup_orphan_contents(db)
+    return {"status": "deleted", "label": label}
+
+
+# -- Versions -----------------------------------------------------------------
+@app.post("/backups/{label}/versions", dependencies=[Depends(require_api_key)])
+def create_version(label: str, req: VersionCreate, db: Session = Depends(get_db)):
+    """Cria uma nova versao. version_key deve ser unico dentro do label."""
+    _get_backup_or_404(label, db)
+    existing = (db.query(BackupVersion)
+                .filter(BackupVersion.backup_label == label,
+                        BackupVersion.version_key  == req.version_key)
+                .first())
+    if existing:
+        return {"created": False, "version": _version_stats(existing, db)}
+    v = BackupVersion(backup_label=label, version_key=req.version_key)
+    db.add(v); db.commit(); db.refresh(v)
+    return {"created": True, "version": _version_stats(v, db)}
+
+@app.get("/backups/{label}/versions", dependencies=[Depends(require_api_key)])
+def list_versions(label: str, db: Session = Depends(get_db)):
+    _get_backup_or_404(label, db)
+    versions = (db.query(BackupVersion)
+                .filter(BackupVersion.backup_label == label)
+                .order_by(BackupVersion.version_key.desc())
+                .all())
+    return [_version_stats(v, db) for v in versions]
+
+@app.get("/backups/{label}/versions/{version_key}", dependencies=[Depends(require_api_key)])
+def get_version(label: str, version_key: str, db: Session = Depends(get_db)):
+    return _version_stats(_get_version_or_404(label, version_key, db), db)
+
+@app.patch("/backups/{label}/versions/{version_key}", dependencies=[Depends(require_api_key)])
+def finish_version(label: str, version_key: str, req: VersionFinish, db: Session = Depends(get_db)):
+    v = _get_version_or_404(label, version_key, db)
+    v.status = req.status
+    v.finished_at = datetime.utcnow()
+    db.commit()
+    return _version_stats(v, db)
+
+@app.delete("/backups/{label}/versions/{version_key}", dependencies=[Depends(require_api_key)])
+def delete_version(label: str, version_key: str, db: Session = Depends(get_db)):
+    """Remove uma versao especifica. Limpa FileContents orfaos automaticamente."""
+    v = _get_version_or_404(label, version_key, db)
+    db.query(VersionFile).filter(VersionFile.version_id == v.id).delete()
+    db.delete(v); db.commit()
+    removed = _cleanup_orphan_contents(db)
+    return {"status": "deleted", "version_key": version_key, "files_removed_from_storage": removed}
 
 
 # -- Check --------------------------------------------------------------------
 @app.post("/check", response_model=CheckResponse, dependencies=[Depends(require_api_key)])
 def check_file(req: CheckRequest, db: Session = Depends(get_db)):
     """
-    Verifica se o arquivo precisa ser enviado para um backup especifico.
-    A verificacao e ISOLADA ao backup_label — nunca consulta outros backups.
+    Verifica se o arquivo precisa ser enviado na versao atual.
+    Retorna content_exists=True se o conteudo ja existe no storage
+    (cliente nao precisa fazer upload, so registrar).
     """
-    _get_backup_or_404(req.backup_label, db)
+    v = _get_version_or_404(req.backup_label, req.version_key, db)
 
-    record = (
-        db.query(FileRecord)
-        .filter(
-            FileRecord.backup_label  == req.backup_label,
-            FileRecord.original_path == req.original_path,
-            FileRecord.sha256        == req.sha256,
-            FileRecord.size          == req.size,
-            FileRecord.mtime         == req.mtime,
-        )
-        .first()
+    # Ja registrado nesta versao com mesmo conteudo?
+    vf = (db.query(VersionFile)
+          .filter(VersionFile.version_id    == v.id,
+                  VersionFile.original_path == req.original_path,
+                  VersionFile.sha256        == req.sha256)
+          .first())
+    if vf:
+        return CheckResponse(needs_upload=False, content_exists=True,
+                             reason="Ja registrado nesta versao", file_id=vf.id)
+
+    # Conteudo ja existe no storage (outra versao ou label)?
+    content_exists = db.query(FileContent).filter(FileContent.sha256 == req.sha256).first() is not None
+
+    return CheckResponse(
+        needs_upload=True,
+        content_exists=content_exists,
+        reason="Conteudo ja no storage — apenas registrar" if content_exists else "Upload necessario",
     )
-    if record:
-        return CheckResponse(
-            needs_upload=False,
-            reason="Metadados identicos — arquivo ja esta neste backup",
-            file_id=record.id,
-        )
-
-    existing = (
-        db.query(FileRecord)
-        .filter(
-            FileRecord.backup_label  == req.backup_label,
-            FileRecord.original_path == req.original_path,
-        )
-        .first()
-    )
-    if existing:
-        return CheckResponse(needs_upload=True, reason="Arquivo modificado — sera atualizado neste backup")
-
-    return CheckResponse(needs_upload=True, reason="Arquivo novo neste backup")
 
 
 # -- Upload -------------------------------------------------------------------
 @app.post("/upload", dependencies=[Depends(require_api_key)])
 async def upload_file(
-    file: UploadFile = File(...),
-    backup_label: str  = Header(..., alias="X-Backup-Label"),
-    original_path: str = Header(..., alias="X-Original-Path"),
-    mtime: float       = Header(..., alias="X-Mtime"),
-    db: Session        = Depends(get_db),
+    file: UploadFile = File(None),
+    backup_label:  str           = Header(..., alias="X-Backup-Label"),
+    version_key:   str           = Header(..., alias="X-Version-Key"),
+    original_path: str           = Header(..., alias="X-Original-Path"),
+    mtime:         float         = Header(..., alias="X-Mtime"),
+    content_sha256: Optional[str] = Header(None, alias="X-Content-Sha256"),
+    db: Session = Depends(get_db),
 ):
     """
-    Recebe e armazena um arquivo dentro do backup identificado por X-Backup-Label.
-    O storage fisico e isolado por label — nunca ha colisao entre backups.
-
+    Registra um arquivo na versao atual.
+    Se X-Content-Sha256 for enviado e o conteudo ja existir no storage,
+    o cliente pode omitir o body (evita re-upload do mesmo conteudo).
     Headers:
-      X-Backup-Label  : identificador do backup (deve existir via POST /backups)
-      X-Original-Path : caminho original no cliente (base64)
-      X-Mtime         : modification time (epoch float)
+      X-Backup-Label   : label do backup
+      X-Version-Key    : chave da versao (datetime ISO)
+      X-Original-Path  : path original no cliente (base64)
+      X-Mtime          : modification time (epoch float)
+      X-Content-Sha256 : sha256 do arquivo (quando content_exists=True no /check)
     """
-    _get_backup_or_404(backup_label, db)
+    v = _get_version_or_404(backup_label, version_key, db)
 
     try:
         original_path = base64.b64decode(original_path.encode("ascii")).decode("utf-8")
     except Exception:
         pass
 
-    sha256, content = _read_upload(file)
-    size = len(content)
-
-    # Upsert: atualiza se o arquivo ja existe neste backup
-    record = (
-        db.query(FileRecord)
-        .filter(
-            FileRecord.backup_label  == backup_label,
-            FileRecord.original_path == original_path,
-        )
-        .first()
-    )
-
-    if record and record.sha256 == sha256 and record.size == size and record.mtime == mtime:
-        return {"status": "skipped", "reason": "Identico ao registrado neste backup", "file_id": record.id}
-
-    dest = _storage_path(backup_label, sha256, original_path)
-    dest.write_bytes(content)
-
-    if record:
-        # Remove arquivo fisico antigo se o path mudou
-        old_path = Path(record.stored_at)
-        if old_path.exists() and old_path != dest:
-            old_path.unlink()
-        record.sha256     = sha256
-        record.size       = size
-        record.mtime      = mtime
-        record.stored_at  = str(dest)
-        record.updated_at = datetime.utcnow()
-        db.commit()
-        db.refresh(record)
-        return {"status": "updated", "file_id": record.id, "backup_label": backup_label, "sha256": sha256}
+    # Modo "so registrar" — conteudo ja existe no storage
+    if content_sha256 and not file:
+        fc = db.query(FileContent).filter(FileContent.sha256 == content_sha256).first()
+        if not fc:
+            raise HTTPException(400, f"Conteudo sha256={content_sha256} nao encontrado no storage")
+        sha256 = content_sha256
+        size   = fc.size
     else:
-        new_record = FileRecord(
-            backup_label=backup_label,
-            original_path=original_path,
-            sha256=sha256,
-            size=size,
-            mtime=mtime,
-            stored_at=str(dest),
-        )
-        db.add(new_record)
-        db.commit()
-        db.refresh(new_record)
-        return {"status": "stored", "file_id": new_record.id, "backup_label": backup_label, "sha256": sha256}
+        if not file:
+            raise HTTPException(400, "Body do arquivo obrigatorio quando conteudo nao existe no storage")
+        sha256, content = _read_upload(file)
+        size = len(content)
+        fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+        if not fc:
+            dest = _content_path(sha256)
+            dest.write_bytes(content)
+            fc = FileContent(sha256=sha256, stored_at=str(dest), size=size)
+            db.add(fc)
+
+    # Upsert VersionFile
+    vf = (db.query(VersionFile)
+          .filter(VersionFile.version_id    == v.id,
+                  VersionFile.original_path == original_path)
+          .first())
+    if vf:
+        vf.sha256  = sha256
+        vf.mtime   = mtime
+        vf.status  = "active"
+    else:
+        vf = VersionFile(version_id=v.id, original_path=original_path,
+                         sha256=sha256, mtime=mtime, status="active")
+        db.add(vf)
+
+    db.commit(); db.refresh(vf)
+    return {"status": "registered", "file_id": vf.id, "sha256": sha256,
+            "uploaded": not bool(content_sha256)}
+
+
+# -- Sync (fecha versao) ------------------------------------------------------
+@app.post("/sync", response_model=SyncResponse, dependencies=[Depends(require_api_key)])
+def sync(req: SyncRequest, db: Session = Depends(get_db)):
+    """
+    Fecha a versao: arquivos que nao estao em existing_paths sao marcados como deleted.
+    O conteudo fisico NAO e removido.
+    """
+    v = _get_version_or_404(req.backup_label, req.version_key, db)
+    client_set = set(req.existing_paths)
+    active_files = (db.query(VersionFile)
+                    .filter(VersionFile.version_id == v.id,
+                            VersionFile.status     == "active")
+                    .all())
+    marked = []
+    for vf in active_files:
+        if vf.original_path not in client_set:
+            vf.status = "deleted"
+            marked.append(vf.original_path)
+    db.commit()
+    return SyncResponse(marked_deleted=marked, deleted_count=len(marked))
 
 
 # -- Files --------------------------------------------------------------------
 @app.get("/files", dependencies=[Depends(require_api_key)])
 def list_files(
     backup_label: str,
-    path_prefix: Optional[str] = None,
+    version_key: str,
+    include_deleted: bool = False,
     db: Session = Depends(get_db),
 ):
-    """Lista arquivos de um backup especifico. backup_label e obrigatorio."""
-    _get_backup_or_404(backup_label, db)
-    query = db.query(FileRecord).filter(FileRecord.backup_label == backup_label)
-    if path_prefix:
-        query = query.filter(FileRecord.original_path.startswith(path_prefix))
+    """Lista arquivos de uma versao especifica."""
+    v = _get_version_or_404(backup_label, version_key, db)
+    q = db.query(VersionFile).filter(VersionFile.version_id == v.id)
+    if not include_deleted:
+        q = q.filter(VersionFile.status == "active")
+    files = q.order_by(VersionFile.original_path).all()
     return [
-        FileInfo(
-            id=r.id,
-            backup_label=r.backup_label,
-            original_path=r.original_path,
-            sha256=r.sha256,
-            size=r.size,
-            mtime=r.mtime,
-            stored_at=r.stored_at,
-            created_at=str(r.created_at),
-        )
-        for r in query.order_by(FileRecord.original_path).all()
+        {
+            "id": f.id,
+            "original_path": f.original_path,
+            "sha256": f.sha256,
+            "size": f.content.size if f.content else 0,
+            "mtime": f.mtime,
+            "status": f.status,
+            "created_at": str(f.created_at),
+        }
+        for f in files
     ]
-
 
 @app.get("/files/{file_id}/download", dependencies=[Depends(require_api_key)])
 def download_file(file_id: int, db: Session = Depends(get_db)):
-    record = db.query(FileRecord).filter(FileRecord.id == file_id).first()
-    if not record:
-        raise HTTPException(status_code=404, detail="Arquivo nao encontrado")
-    path = Path(record.stored_at)
-    if not path.exists():
-        raise HTTPException(status_code=410, detail="Arquivo removido do storage")
-    return FileResponse(path, filename=Path(record.original_path).name)
+    vf = db.query(VersionFile).filter(VersionFile.id == file_id).first()
+    if not vf:
+        raise HTTPException(404, "Arquivo nao encontrado")
+    if vf.status == "deleted":
+        raise HTTPException(410, "Arquivo marcado como deletado nesta versao")
+    fc = db.query(FileContent).filter(FileContent.sha256 == vf.sha256).first()
+    if not fc or not Path(fc.stored_at).exists():
+        raise HTTPException(410, "Conteudo fisico nao encontrado")
+    return FileResponse(Path(fc.stored_at), filename=Path(vf.original_path).name)
 
 
-@app.delete("/files/{file_id}", dependencies=[Depends(require_api_key)])
-def delete_file(file_id: int, db: Session = Depends(get_db)):
-    record = db.query(FileRecord).filter(FileRecord.id == file_id).first()
-    if not record:
-        raise HTTPException(status_code=404, detail="Arquivo nao encontrado")
-    path = Path(record.stored_at)
-    if path.exists():
-        path.unlink()
-    db.delete(record)
-    db.commit()
-    return {"status": "deleted", "file_id": file_id}
-
-
-# -- Sync ---------------------------------------------------------------------
-@app.post("/sync", response_model=SyncResponse, dependencies=[Depends(require_api_key)])
-def sync(req: SyncRequest, db: Session = Depends(get_db)):
+# -- Cleanup ------------------------------------------------------------------
+@app.post("/backups/{label}/cleanup", dependencies=[Depends(require_api_key)])
+def cleanup_versions(label: str, req: CleanupRequest, db: Session = Depends(get_db)):
     """
-    Remove do backup apenas os arquivos que nao existem mais no cliente.
-    Completamente isolado ao backup_label — nunca toca arquivos de outros backups.
+    Mantem apenas as `keep` versoes mais recentes (status=done).
+    Versoes mais antigas sao removidas. FileContents orfaos sao apagados do storage.
     """
-    _get_backup_or_404(req.backup_label, db)
-
-    records = db.query(FileRecord).filter(FileRecord.backup_label == req.backup_label).all()
-    client_set = set(req.existing_paths)
-    deleted = []
-
-    for record in records:
-        if record.original_path not in client_set:
-            path = Path(record.stored_at)
-            if path.exists():
-                path.unlink()
-            db.delete(record)
-            deleted.append(record.original_path)
-
-    # Atualiza last_run_at do backup
-    backup = db.query(BackupID).filter(BackupID.label == req.backup_label).first()
-    if backup:
-        backup.last_run_at = datetime.utcnow()
-
+    _get_backup_or_404(label, db)
+    done_versions = (db.query(BackupVersion)
+                     .filter(BackupVersion.backup_label == label,
+                             BackupVersion.status       == "done")
+                     .order_by(BackupVersion.version_key.desc())
+                     .all())
+    to_delete = done_versions[req.keep:]
+    removed_versions = []
+    for v in to_delete:
+        db.query(VersionFile).filter(VersionFile.version_id == v.id).delete()
+        db.delete(v)
+        removed_versions.append(v.version_key)
     db.commit()
-    return SyncResponse(deleted=deleted, deleted_count=len(deleted))
+    orphans_removed = _cleanup_orphan_contents(db)
+    return {
+        "kept": req.keep,
+        "versions_removed": removed_versions,
+        "storage_files_removed": orphans_removed,
+    }
+
+
+def _cleanup_orphan_contents(db: Session) -> int:
+    """Remove FileContents que nao sao referenciados por nenhum VersionFile."""
+    all_contents = db.query(FileContent).all()
+    removed = 0
+    for fc in all_contents:
+        refs = db.query(VersionFile).filter(VersionFile.sha256 == fc.sha256).count()
+        if refs == 0:
+            p = Path(fc.stored_at)
+            if p.exists():
+                p.unlink()
+            db.delete(fc)
+            removed += 1
+    db.commit()
+    return removed

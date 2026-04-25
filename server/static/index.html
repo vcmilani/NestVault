@@ -7,377 +7,117 @@
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg:        #0d0f0f;
-    --bg2:       #131616;
-    --bg3:       #1a1e1e;
-    --border:    #232929;
-    --border2:   #2e3636;
-    --text:      #c8d0ce;
-    --text-dim:  #5a6666;
-    --text-mute: #3a4444;
-    --amber:     #e8a940;
-    --amber-dim: #7a5520;
-    --green:     #4ecb8d;
-    --green-dim: #1d5a3d;
-    --red:       #e05c5c;
-    --red-dim:   #5a2020;
-    --blue:      #5ba4cf;
-    --mono: 'IBM Plex Mono', monospace;
-    --sans: 'IBM Plex Sans', sans-serif;
+    --bg:#0d0f0f; --bg2:#131616; --bg3:#1a1e1e;
+    --border:#232929; --border2:#2e3636;
+    --text:#c8d0ce; --text-dim:#5a6666; --text-mute:#3a4444;
+    --amber:#e8a940; --amber-dim:#7a5520;
+    --green:#4ecb8d; --green-dim:#1d5a3d;
+    --red:#e05c5c; --red-dim:#5a2020;
+    --blue:#5ba4cf; --purple:#a78bfa;
+    --mono:'IBM Plex Mono',monospace;
   }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;min-height:100vh}
+  body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.04) 2px,rgba(0,0,0,.04) 4px);pointer-events:none;z-index:999}
 
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  /* Header */
+  header{border-bottom:1px solid var(--border);padding:0 32px;display:flex;align-items:center;justify-content:space-between;height:56px;position:sticky;top:0;background:var(--bg);z-index:10}
+  .logo{display:flex;align-items:center;gap:12px}
+  .logo-icon{width:28px;height:28px;border:1.5px solid var(--amber);display:grid;place-items:center;color:var(--amber);font-size:14px}
+  .logo-text{font-size:12px;font-weight:500;letter-spacing:.12em;text-transform:uppercase}
+  .logo-sub{font-size:10px;color:var(--text-dim);letter-spacing:.08em}
+  .header-right{display:flex;align-items:center;gap:20px}
+  .status-dot{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 2s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  .hbtn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 12px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s}
+  .hbtn:hover{border-color:var(--amber);color:var(--amber)}
+  .last-updated{font-size:11px;color:var(--text-mute)}
 
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--mono);
-    font-size: 13px;
-    min-height: 100vh;
-    overflow-x: hidden;
-  }
+  /* Layout */
+  main{padding:28px 32px;max-width:1500px}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
 
-  /* scanline overlay */
-  body::before {
-    content: '';
-    position: fixed; inset: 0;
-    background: repeating-linear-gradient(
-      0deg,
-      transparent,
-      transparent 2px,
-      rgba(0,0,0,.04) 2px,
-      rgba(0,0,0,.04) 4px
-    );
-    pointer-events: none;
-    z-index: 999;
-  }
+  /* Stats */
+  .stats-bar{display:grid;grid-template-columns:repeat(5,1fr);gap:1px;border:1px solid var(--border);margin-bottom:28px;background:var(--border)}
+  .stat-box{background:var(--bg2);padding:18px 22px;position:relative;overflow:hidden;animation:fadeUp .4s ease both}
+  .stat-box:nth-child(1){animation-delay:.05s}.stat-box:nth-child(2){animation-delay:.10s}
+  .stat-box:nth-child(3){animation-delay:.15s}.stat-box:nth-child(4){animation-delay:.20s}
+  .stat-box:nth-child(5){animation-delay:.25s}
+  .stat-box::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:var(--amber);transform:scaleX(0);transform-origin:left;transition:transform .3s}
+  .stat-box:hover::before{transform:scaleX(1)}
+  .stat-label{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim);margin-bottom:8px}
+  .stat-value{font-size:26px;font-weight:300;color:var(--amber);letter-spacing:-.02em;line-height:1}
 
-  /* ── Header ─────────────────────────────────── */
-  header {
-    border-bottom: 1px solid var(--border);
-    padding: 0 32px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    height: 56px;
-    position: sticky; top: 0;
-    background: var(--bg);
-    z-index: 10;
-  }
+  /* Error */
+  .error-bar{background:var(--red-dim);border:1px solid var(--red);padding:10px 16px;margin-bottom:20px;color:var(--red);font-size:11px;display:none}
+  .error-bar.visible{display:block}
 
-  .logo {
-    display: flex; align-items: center; gap: 12px;
-  }
-  .logo-icon {
-    width: 28px; height: 28px;
-    border: 1.5px solid var(--amber);
-    display: grid; place-items: center;
-    color: var(--amber);
-    font-size: 14px;
-  }
-  .logo-text {
-    font-family: var(--mono);
-    font-size: 12px;
-    font-weight: 500;
-    letter-spacing: .12em;
-    text-transform: uppercase;
-    color: var(--text);
-  }
-  .logo-sub {
-    font-size: 10px;
-    color: var(--text-dim);
-    letter-spacing: .08em;
-  }
+  /* Section */
+  .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+  .section-title{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-dim);display:flex;align-items:center;gap:8px}
+  .section-title::before{content:'';display:block;width:3px;height:12px;background:var(--amber)}
+  .count-badge{background:var(--bg3);border:1px solid var(--border2);padding:2px 8px;font-size:10px;color:var(--text-dim)}
 
-  .header-right {
-    display: flex; align-items: center; gap: 24px;
-  }
-  .status-dot {
-    width: 6px; height: 6px; border-radius: 50%;
-    background: var(--green);
-    box-shadow: 0 0 8px var(--green);
-    animation: pulse 2s ease-in-out infinite;
-  }
-  @keyframes pulse {
-    0%,100% { opacity:1; } 50% { opacity:.4; }
-  }
-  .refresh-btn {
-    background: none; border: 1px solid var(--border2);
-    color: var(--text-dim); padding: 5px 12px;
-    font-family: var(--mono); font-size: 11px;
-    cursor: pointer; letter-spacing: .06em;
-    transition: all .15s;
-  }
-  .refresh-btn:hover { border-color: var(--amber); color: var(--amber); }
+  /* Table */
+  .table-wrap{border:1px solid var(--border);margin-bottom:24px;animation:fadeUp .4s .2s ease both}
+  table{width:100%;border-collapse:collapse}
+  thead th{background:var(--bg3);padding:9px 14px;text-align:left;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);border-bottom:1px solid var(--border);white-space:nowrap}
+  thead th:first-child{padding-left:18px}
+  tbody tr{border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s}
+  tbody tr:last-child{border-bottom:none}
+  tbody tr:hover{background:var(--bg3)}
+  td{padding:11px 14px;vertical-align:middle;font-size:12px}
+  td:first-child{padding-left:18px}
+  .chevron{color:var(--text-mute);font-size:10px;transition:transform .2s;display:inline-block;margin-right:6px}
+  tr.expanded .chevron,.row-version.expanded .chevron{transform:rotate(90deg);color:var(--amber)}
+  .num-cell{text-align:right;font-variant-numeric:tabular-nums}
+  .size-cell{text-align:right;color:var(--blue);font-variant-numeric:tabular-nums}
+  .date-cell{color:var(--text-dim);white-space:nowrap}
+  .dim-cell{color:var(--text-dim)}
+  .badge{display:inline-block;padding:2px 7px;font-size:10px;letter-spacing:.06em;text-transform:uppercase}
+  .badge-active,.badge-done{background:var(--green-dim);color:var(--green)}
+  .badge-deleted,.badge-failed{background:var(--red-dim);color:var(--red)}
+  .badge-running{background:var(--amber-dim);color:var(--amber)}
 
-  .last-updated { font-size: 11px; color: var(--text-mute); }
+  /* Versions sub-table */
+  .versions-row td{padding:0}
+  .versions-container{border-top:1px solid var(--border);background:var(--bg2)}
+  .versions-head{padding:10px 18px;border-bottom:1px solid var(--border);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--amber);display:flex;align-items:center;justify-content:space-between}
+  .versions-inner{overflow:hidden}
+  .row-version{cursor:pointer;transition:background .1s}
+  .row-version:hover{background:var(--bg3)}
+  .row-version.expanded{background:rgba(232,169,64,.04)}
+  .row-version td{padding:9px 18px 9px 36px;font-size:11px;border-bottom:1px solid var(--border)}
+  .row-version:last-child td{border-bottom:none}
 
-  /* ── Layout ─────────────────────────────────── */
-  main { padding: 28px 32px; max-width: 1400px; }
+  /* Files sub-table */
+  .files-row td{padding:0}
+  .files-container{border-top:1px solid var(--border);background:var(--bg)}
+  .files-inner table thead th{background:var(--bg);font-size:9px}
+  .files-inner table td{font-size:11px;padding:8px 14px 8px 52px}
+  .path-cell{max-width:480px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+  .hash-cell{color:var(--text-mute);font-size:10px}
+  .deleted-file td{opacity:.45}
+  .empty{padding:32px;text-align:center;color:var(--text-mute);font-size:11px}
+  .loading{padding:40px;text-align:center;color:var(--text-mute);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+  .loading::after{content:'...';animation:dots 1.2s steps(4,end) infinite}
+  @keyframes dots{0%,20%{content:'.'}40%{content:'..'}60%,100%{content:'...'}}
 
-  /* ── Stats bar ──────────────────────────────── */
-  .stats-bar {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 1px;
-    border: 1px solid var(--border);
-    margin-bottom: 28px;
-    background: var(--border);
-  }
-  .stat-box {
-    background: var(--bg2);
-    padding: 20px 24px;
-    position: relative;
-    overflow: hidden;
-    animation: fadeUp .4s ease both;
-  }
-  .stat-box:nth-child(1) { animation-delay: .05s }
-  .stat-box:nth-child(2) { animation-delay: .10s }
-  .stat-box:nth-child(3) { animation-delay: .15s }
-  .stat-box:nth-child(4) { animation-delay: .20s }
+  /* Login */
+  .login-overlay{position:fixed;inset:0;background:rgba(13,15,15,.93);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
+  .login-box{border:1px solid var(--border2);border-top:2px solid var(--amber);background:var(--bg2);padding:40px 48px;width:400px;animation:fadeUp .3s ease}
+  .login-title{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--amber);margin-bottom:6px}
+  .login-sub{font-size:11px;color:var(--text-dim);margin-bottom:28px}
+  .login-label{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);display:block;margin-bottom:8px}
+  .login-input{width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:13px;padding:10px 14px;outline:none;transition:border-color .15s}
+  .login-input:focus{border-color:var(--amber)}
+  .login-btn{margin-top:16px;width:100%;background:var(--amber);border:none;color:var(--bg);font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;padding:11px;cursor:pointer;transition:opacity .15s}
+  .login-btn:hover{opacity:.85}
+  .login-error{margin-top:12px;font-size:11px;color:var(--red);min-height:16px}
 
-  @keyframes fadeUp {
-    from { opacity:0; transform:translateY(8px) }
-    to   { opacity:1; transform:translateY(0) }
-  }
-
-  .stat-box::before {
-    content: '';
-    position: absolute; top: 0; left: 0; right: 0;
-    height: 1px;
-    background: var(--amber);
-    transform: scaleX(0);
-    transform-origin: left;
-    transition: transform .3s;
-  }
-  .stat-box:hover::before { transform: scaleX(1); }
-
-  .stat-label {
-    font-size: 10px; letter-spacing: .12em;
-    text-transform: uppercase; color: var(--text-dim);
-    margin-bottom: 8px;
-  }
-  .stat-value {
-    font-size: 28px; font-weight: 300;
-    color: var(--amber); letter-spacing: -.02em;
-    line-height: 1;
-  }
-  .stat-unit { font-size: 13px; color: var(--text-dim); margin-left: 4px; }
-
-  /* ── Section header ─────────────────────────── */
-  .section-head {
-    display: flex; align-items: center;
-    justify-content: space-between;
-    margin-bottom: 12px;
-  }
-  .section-title {
-    font-size: 10px; letter-spacing: .14em;
-    text-transform: uppercase; color: var(--text-dim);
-    display: flex; align-items: center; gap: 8px;
-  }
-  .section-title::before {
-    content: ''; display: block;
-    width: 3px; height: 12px;
-    background: var(--amber);
-  }
-  .count-badge {
-    background: var(--bg3); border: 1px solid var(--border2);
-    padding: 2px 8px; font-size: 10px;
-    color: var(--text-dim); letter-spacing: .06em;
-  }
-
-  /* ── Table ──────────────────────────────────── */
-  .table-wrap {
-    border: 1px solid var(--border);
-    margin-bottom: 28px;
-    animation: fadeUp .4s .25s ease both;
-  }
-  table { width: 100%; border-collapse: collapse; }
-  thead th {
-    background: var(--bg3);
-    padding: 10px 16px;
-    text-align: left;
-    font-size: 10px; letter-spacing: .1em;
-    text-transform: uppercase;
-    color: var(--text-dim);
-    border-bottom: 1px solid var(--border);
-    font-weight: 500;
-    white-space: nowrap;
-  }
-  thead th:first-child { padding-left: 20px; }
-
-  tbody tr {
-    border-bottom: 1px solid var(--border);
-    cursor: pointer;
-    transition: background .1s;
-  }
-  tbody tr:last-child { border-bottom: none; }
-  tbody tr:hover { background: var(--bg3); }
-  tbody tr.active { background: rgba(232,169,64,.06); }
-  tbody tr.active td:first-child {
-    border-left: 2px solid var(--amber);
-    padding-left: 18px;
-  }
-
-  td {
-    padding: 12px 16px;
-    vertical-align: middle;
-    font-size: 12px;
-  }
-  td:first-child { padding-left: 20px; }
-
-  .label-cell {
-    font-weight: 500;
-    color: var(--text);
-    display: flex; align-items: center; gap: 8px;
-  }
-  .label-cell .chevron {
-    color: var(--text-mute); font-size: 10px;
-    transition: transform .2s;
-  }
-  tr.active .chevron { transform: rotate(90deg); color: var(--amber); }
-
-  .client-cell { color: var(--text-dim); }
-  .num-cell { text-align: right; font-variant-numeric: tabular-nums; }
-  .size-cell { text-align: right; color: var(--blue); font-variant-numeric: tabular-nums; }
-  .date-cell { color: var(--text-dim); white-space: nowrap; }
-
-  .badge {
-    display: inline-block; padding: 2px 8px;
-    font-size: 10px; letter-spacing: .08em;
-    text-transform: uppercase;
-  }
-  .badge-active { background: var(--green-dim); color: var(--green); }
-  .badge-deleted { background: var(--red-dim); color: var(--red); }
-
-  /* ── Files panel ────────────────────────────── */
-  .files-panel {
-    border: 1px solid var(--border);
-    border-top: 2px solid var(--amber);
-    margin-bottom: 28px;
-    animation: fadeUp .25s ease both;
-  }
-  .files-panel-head {
-    background: var(--bg3);
-    padding: 12px 20px;
-    border-bottom: 1px solid var(--border);
-    display: flex; align-items: center;
-    justify-content: space-between;
-  }
-  .files-panel-title {
-    font-size: 11px; letter-spacing: .1em;
-    text-transform: uppercase;
-    color: var(--amber);
-  }
-  .close-btn {
-    background: none; border: none;
-    color: var(--text-mute); cursor: pointer;
-    font-size: 16px; line-height: 1;
-    padding: 0 4px;
-  }
-  .close-btn:hover { color: var(--text); }
-
-  .files-table th { background: var(--bg2); }
-  .files-table td { font-size: 11px; }
-  .path-cell {
-    color: var(--text);
-    max-width: 500px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .hash-cell { color: var(--text-mute); font-size: 10px; }
-
-  /* ── Loading / empty ────────────────────────── */
-  .loading {
-    padding: 60px; text-align: center;
-    color: var(--text-mute); letter-spacing: .1em;
-    font-size: 11px; text-transform: uppercase;
-  }
-  .loading::after {
-    content: '...';
-    animation: dots 1.2s steps(4,end) infinite;
-  }
-  @keyframes dots {
-    0%,20%  { content: '.'; }
-    40%     { content: '..'; }
-    60%,100%{ content: '...'; }
-  }
-  .empty { padding: 40px; text-align: center; color: var(--text-mute); font-size: 11px; }
-
-  /* ── Error ──────────────────────────────────── */
-  .error-bar {
-    background: var(--red-dim); border: 1px solid var(--red);
-    padding: 10px 16px; margin-bottom: 20px;
-    color: var(--red); font-size: 11px;
-    display: none;
-  }
-  .error-bar.visible { display: block; }
-
-  /* scrollbar */
-  ::-webkit-scrollbar { width: 6px; height: 6px; }
-  ::-webkit-scrollbar-track { background: var(--bg); }
-  ::-webkit-scrollbar-thumb { background: var(--border2); }
-
-  /* ── Login overlay ──────────────────────────── */
-  .login-overlay {
-    position: fixed; inset: 0;
-    background: rgba(13,15,15,.92);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 100;
-    backdrop-filter: blur(4px);
-  }
-  .login-box {
-    border: 1px solid var(--border2);
-    border-top: 2px solid var(--amber);
-    background: var(--bg2);
-    padding: 40px 48px;
-    width: 400px;
-    animation: fadeUp .3s ease;
-  }
-  .login-title {
-    font-size: 11px; letter-spacing: .14em;
-    text-transform: uppercase; color: var(--amber);
-    margin-bottom: 6px;
-  }
-  .login-sub {
-    font-size: 11px; color: var(--text-dim);
-    margin-bottom: 28px;
-  }
-  .login-label {
-    font-size: 10px; letter-spacing: .1em;
-    text-transform: uppercase; color: var(--text-dim);
-    display: block; margin-bottom: 8px;
-  }
-  .login-input {
-    width: 100%;
-    background: var(--bg3); border: 1px solid var(--border2);
-    color: var(--text); font-family: var(--mono); font-size: 13px;
-    padding: 10px 14px; outline: none;
-    transition: border-color .15s;
-  }
-  .login-input:focus { border-color: var(--amber); }
-  .login-btn {
-    margin-top: 16px; width: 100%;
-    background: var(--amber); border: none;
-    color: var(--bg); font-family: var(--mono);
-    font-size: 11px; font-weight: 600;
-    letter-spacing: .1em; text-transform: uppercase;
-    padding: 11px; cursor: pointer;
-    transition: opacity .15s;
-  }
-  .login-btn:hover { opacity: .85; }
-  .login-error {
-    margin-top: 12px; font-size: 11px;
-    color: var(--red); min-height: 16px;
-  }
-  .logout-btn {
-    background: none; border: none;
-    color: var(--text-mute); font-family: var(--mono);
-    font-size: 11px; cursor: pointer; letter-spacing: .06em;
-    padding: 0;
-  }
-  .logout-btn:hover { color: var(--text-dim); }
+  ::-webkit-scrollbar{width:6px;height:6px}
+  ::-webkit-scrollbar-track{background:var(--bg)}
+  ::-webkit-scrollbar-thumb{background:var(--border2)}
 </style>
 </head>
 <body>
@@ -385,59 +125,33 @@
 <header>
   <div class="logo">
     <div class="logo-icon">◈</div>
-    <div>
-      <div class="logo-text">Backup Files</div>
-      <div class="logo-sub">Raspberry Pi</div>
-    </div>
+    <div><div class="logo-text">Backup Files</div><div class="logo-sub">Raspberry Pi · v2.0</div></div>
   </div>
   <div class="header-right">
-    <div class="status-dot" id="statusDot" title="Online"></div>
+    <div class="status-dot" id="statusDot"></div>
     <span class="last-updated" id="lastUpdated">—</span>
-    <button class="refresh-btn" onclick="loadAll()">↻ Refresh</button>
-    <button class="logout-btn" id="logoutBtn" title="Trocar API Key">⌀ API Key</button>
+    <button class="hbtn" onclick="loadAll()">↻ Refresh</button>
+    <button class="hbtn" id="logoutBtn">⌀ API Key</button>
   </div>
 </header>
 
 <main>
   <div class="error-bar" id="errorBar"></div>
 
-  <!-- Stats -->
-  <div class="stats-bar" id="statsBar">
-    <div class="stat-box">
-      <div class="stat-label">Backups</div>
-      <div class="stat-value" id="statBackups">—</div>
-    </div>
-    <div class="stat-box">
-      <div class="stat-label">Arquivos</div>
-      <div class="stat-value" id="statFiles">—</div>
-    </div>
-    <div class="stat-box">
-      <div class="stat-label">Storage Total</div>
-      <div class="stat-value" id="statSize">—</div>
-    </div>
-    <div class="stat-box">
-      <div class="stat-label">Ativos</div>
-      <div class="stat-value" id="statActive">—</div>
-    </div>
+  <div class="stats-bar">
+    <div class="stat-box"><div class="stat-label">Backups</div><div class="stat-value" id="sBackups">—</div></div>
+    <div class="stat-box"><div class="stat-label">Versões</div><div class="stat-value" id="sVersions">—</div></div>
+    <div class="stat-box"><div class="stat-label">Arquivos</div><div class="stat-value" id="sFiles">—</div></div>
+    <div class="stat-box"><div class="stat-label">Storage</div><div class="stat-value" id="sSize">—</div></div>
+    <div class="stat-box"><div class="stat-label">Dedup. Storage</div><div class="stat-value" id="sDedupSize">—</div></div>
   </div>
 
-  <!-- Backups table -->
   <div class="section-head">
     <div class="section-title">Backups</div>
     <span class="count-badge" id="backupCount">0</span>
   </div>
-
   <div class="table-wrap">
     <div id="backupsTable"><div class="loading">Carregando</div></div>
-  </div>
-
-  <!-- Files panel (hidden by default) -->
-  <div class="files-panel" id="filesPanel" style="display:none">
-    <div class="files-panel-head">
-      <span class="files-panel-title" id="filesPanelTitle">Arquivos</span>
-      <button class="close-btn" onclick="closeFiles()">✕</button>
-    </div>
-    <div id="filesTable"><div class="loading">Carregando</div></div>
   </div>
 </main>
 
@@ -448,8 +162,7 @@
     <div class="login-sub">Informe a API Key para continuar</div>
     <form id="loginForm">
       <label class="login-label" for="apiKeyInput">API Key</label>
-      <input class="login-input" id="apiKeyInput" type="password"
-             placeholder="sua-api-key-aqui" autocomplete="off" spellcheck="false">
+      <input class="login-input" id="apiKeyInput" type="password" placeholder="sua-api-key-aqui" autocomplete="off">
       <button class="login-btn" type="submit">Entrar →</button>
       <div class="login-error" id="loginError"></div>
     </form>
@@ -458,194 +171,254 @@
 
 <script>
   let API_KEY = localStorage.getItem('backupApiKey') || '';
-  let activeLabel = null;
-  let autoRefresh = null;
+  let expandedLabel = null;
+  let expandedVersion = {};  // label -> version_key
 
-  function headers() {
-    return { 'X-API-Key': API_KEY };
+  const H = () => ({'X-API-Key': API_KEY});
+
+  const fmtSize = b => {
+    const u = ['B','KB','MB','GB','TB'];
+    for (const unit of u) { if (b < 1024) return b.toFixed(1)+' '+unit; b /= 1024; }
+    return b.toFixed(1)+' PB';
+  };
+  const fmtDate = s => s ? s.replace('T',' ').slice(0,19) : '—';
+  const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const badge = s => `<span class="badge badge-${s}">${s}</span>`;
+
+  function showError(msg) {
+    const b = document.getElementById('errorBar');
+    b.textContent = '⚠ '+msg; b.classList.add('visible');
   }
+  function clearError() { document.getElementById('errorBar').classList.remove('visible'); }
 
-  function showLogin(msg) {
-    clearInterval(autoRefresh);
+  function showLogin(msg='') {
     document.getElementById('loginOverlay').style.display = 'flex';
-    if (msg) document.getElementById('loginError').textContent = msg;
+    document.getElementById('loginError').textContent = msg;
   }
+  function hideLogin() { document.getElementById('loginOverlay').style.display = 'none'; }
 
-  function hideLogin() {
-    document.getElementById('loginOverlay').style.display = 'none';
-  }
-
-  document.getElementById('loginForm').addEventListener('submit', function(e) {
+  document.getElementById('loginForm').addEventListener('submit', e => {
     e.preventDefault();
     const key = document.getElementById('apiKeyInput').value.trim();
     if (!key) return;
-    API_KEY = key;
-    localStorage.setItem('backupApiKey', key);
-    document.getElementById('loginError').textContent = '';
-    hideLogin();
-    loadAll();
-    autoRefresh = setInterval(loadAll, 30000);
+    API_KEY = key; localStorage.setItem('backupApiKey', key);
+    hideLogin(); loadAll();
   });
-
-  document.getElementById('logoutBtn').addEventListener('click', function() {
-    localStorage.removeItem('backupApiKey');
-    API_KEY = '';
-    showLogin();
+  document.getElementById('logoutBtn').addEventListener('click', () => {
+    localStorage.removeItem('backupApiKey'); API_KEY = ''; showLogin();
   });
-
-  function fmtSize(bytes) {
-    const units = ['B','KB','MB','GB','TB'];
-    let v = bytes;
-    for (const u of units) {
-      if (v < 1024) return v.toFixed(1) + ' ' + u;
-      v /= 1024;
-    }
-    return v.toFixed(1) + ' PB';
-  }
-
-  function fmtDate(str) {
-    if (!str) return '—';
-    return str.replace('T',' ').slice(0,16);
-  }
-
-  function showError(msg) {
-    const bar = document.getElementById('errorBar');
-    bar.textContent = '⚠ ' + msg;
-    bar.classList.add('visible');
-    document.getElementById('statusDot').style.background = 'var(--red)';
-    document.getElementById('statusDot').style.boxShadow = '0 0 8px var(--red)';
-  }
-
-  function clearError() {
-    document.getElementById('errorBar').classList.remove('visible');
-    document.getElementById('statusDot').style.background = '';
-    document.getElementById('statusDot').style.boxShadow = '';
-  }
 
   async function loadAll() {
     clearError();
     try {
-      const resp = await fetch('/backups', { headers: headers() });
-      if (resp.status === 401) throw new Error('401 Unauthorized');
+      const resp = await fetch('/backups', {headers: H()});
+      if (resp.status === 401) { showLogin('API Key inválida.'); return; }
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const backups = await resp.json();
-      renderStats(backups);
+
+      // Fetch dedup storage stats
+      let dedupSize = 0;
+      try {
+        const hs = await fetch('/storage/stats', {headers: H()});
+        if (hs.ok) { const sd = await hs.json(); dedupSize = sd.total_bytes || 0; }
+      } catch(_) {}
+
+      renderStats(backups, dedupSize);
       renderBackups(backups);
-      document.getElementById('lastUpdated').textContent =
-        new Date().toLocaleTimeString('pt-BR');
-      if (activeLabel) loadFiles(activeLabel);
-    } catch (e) {
-      if (e.message.includes('401')) {
-        showLogin('API Key inválida. Tente novamente.');
-      } else {
-        showError('Não foi possível conectar ao servidor: ' + e.message);
-      }
+      document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString('pt-BR');
+    } catch(e) {
+      showError('Não foi possível conectar: '+e.message);
     }
   }
 
-  function renderStats(backups) {
-    const total   = backups.length;
-    const active  = backups.filter(b => b.status === 'active').length;
-    const files   = backups.reduce((s, b) => s + b.file_count, 0);
-    const bytes   = backups.reduce((s, b) => s + b.total_size_bytes, 0);
-    document.getElementById('statBackups').textContent = total;
-    document.getElementById('statFiles').textContent   = files.toLocaleString('pt-BR');
-    document.getElementById('statSize').textContent    = fmtSize(bytes);
-    document.getElementById('statActive').textContent  = active;
-    document.getElementById('backupCount').textContent = total;
+  function renderStats(backups, dedupSize) {
+    const totalVersions = backups.reduce((s,b) => s+b.version_count, 0);
+    const totalFiles    = backups.reduce((s,b) => s+b.file_count, 0);
+    const totalSize     = backups.reduce((s,b) => s+b.total_size_bytes, 0);
+    document.getElementById('sBackups').textContent  = backups.length;
+    document.getElementById('sVersions').textContent = totalVersions;
+    document.getElementById('sFiles').textContent    = totalFiles.toLocaleString('pt-BR');
+    document.getElementById('sSize').textContent     = fmtSize(totalSize);
+    document.getElementById('sDedupSize').textContent = dedupSize ? fmtSize(dedupSize) : '—';
+    document.getElementById('backupCount').textContent = backups.length;
   }
 
   function renderBackups(backups) {
     const el = document.getElementById('backupsTable');
-    if (!backups.length) {
-      el.innerHTML = '<div class="empty">Nenhum backup encontrado</div>';
-      return;
-    }
+    if (!backups.length) { el.innerHTML='<div class="empty">Nenhum backup encontrado</div>'; return; }
+
     const rows = backups.map(b => {
-      const isActive = b.label === activeLabel;
-      const lastRun  = fmtDate(b.last_run_at || b.created_at);
-      const badge    = b.status === 'active'
-        ? '<span class="badge badge-active">active</span>'
-        : '<span class="badge badge-deleted">deleted</span>';
+      const isExp = b.label === expandedLabel;
       return `
-        <tr class="${isActive ? 'active' : ''}" onclick="toggleFiles('${b.label}')">
-          <td><div class="label-cell">
-            <span class="chevron">▶</span>
-            ${escHtml(b.label)}
-          </div></td>
-          <td class="client-cell">${escHtml(b.client_name || '—')}</td>
-          <td>${badge}</td>
+        <tr class="${isExp?'expanded':''}" onclick="toggleVersions('${esc(b.label)}',this)">
+          <td><span class="chevron">▶</span>${esc(b.label)}</td>
+          <td class="dim-cell">${esc(b.client_name||'—')}</td>
+          <td>${badge('active')}</td>
+          <td class="num-cell">${b.version_count}</td>
           <td class="num-cell">${b.file_count.toLocaleString('pt-BR')}</td>
           <td class="size-cell">${fmtSize(b.total_size_bytes)}</td>
-          <td class="date-cell">${lastRun}</td>
+          <td class="date-cell">${b.last_version ? fmtDate(b.last_version) : '—'}</td>
+        </tr>
+        <tr class="versions-row" id="vrow-${esc(b.label)}" style="display:${isExp?'':'none'}">
+          <td colspan="7">
+            <div class="versions-container">
+              <div class="versions-head">
+                <span>Versões — ${esc(b.label)}</span>
+              </div>
+              <div class="versions-inner" id="vinner-${esc(b.label)}">
+                <div class="loading">Carregando</div>
+              </div>
+            </div>
+          </td>
         </tr>`;
     }).join('');
 
     el.innerHTML = `
       <table>
         <thead><tr>
-          <th>Label</th>
-          <th>Cliente</th>
-          <th>Status</th>
+          <th>Label</th><th>Cliente</th><th>Status</th>
+          <th style="text-align:right">Versões</th>
           <th style="text-align:right">Arquivos</th>
           <th style="text-align:right">Tamanho</th>
-          <th>Último run</th>
+          <th>Última versão</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
   }
 
-  async function toggleFiles(label) {
-    if (activeLabel === label) {
-      closeFiles();
+  async function toggleVersions(label, row) {
+    const vrow = document.getElementById(`vrow-${label}`);
+    if (expandedLabel === label) {
+      expandedLabel = null;
+      row.classList.remove('expanded');
+      vrow.style.display = 'none';
       return;
     }
-    activeLabel = label;
-    document.getElementById('filesPanel').style.display = 'block';
-    document.getElementById('filesPanelTitle').textContent = `Arquivos — ${label}`;
-    document.getElementById('filesTable').innerHTML = '<div class="loading">Carregando</div>';
-    // re-render to show active row
-    const resp = await fetch('/backups', { headers: headers() });
-    const backups = await resp.json();
-    renderBackups(backups);
-    await loadFiles(label);
+    // Close previous
+    if (expandedLabel) {
+      const prev = document.getElementById(`vrow-${expandedLabel}`);
+      if (prev) prev.style.display = 'none';
+      document.querySelectorAll('tbody tr.expanded').forEach(r => r.classList.remove('expanded'));
+    }
+    expandedLabel = label;
+    row.classList.add('expanded');
+    vrow.style.display = '';
+    document.getElementById(`vinner-${label}`).innerHTML = '<div class="loading">Carregando</div>';
+    await loadVersions(label);
   }
 
-  async function loadFiles(label) {
+  async function loadVersions(label) {
     try {
-      const resp = await fetch(`/files?backup_label=${encodeURIComponent(label)}`,
-        { headers: headers() });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const files = await resp.json();
-      renderFiles(files);
-    } catch (e) {
-      document.getElementById('filesTable').innerHTML =
-        `<div class="empty">Erro ao carregar arquivos: ${e.message}</div>`;
+      const r = await fetch(`/backups/${encodeURIComponent(label)}/versions`, {headers: H()});
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const versions = await r.json();
+      renderVersions(label, versions);
+    } catch(e) {
+      document.getElementById(`vinner-${label}`).innerHTML =
+        `<div class="empty">Erro: ${e.message}</div>`;
     }
   }
 
-  function renderFiles(files) {
-    const el = document.getElementById('filesTable');
-    if (!files.length) {
-      el.innerHTML = '<div class="empty">Nenhum arquivo neste backup</div>';
-      return;
-    }
-    const rows = files.map(f => {
-      const date = fmtDate(f.created_at);
+  function renderVersions(label, versions) {
+    const el = document.getElementById(`vinner-${label}`);
+    if (!versions.length) { el.innerHTML='<div class="empty">Nenhuma versão encontrada</div>'; return; }
+
+    const curVer = expandedVersion[label];
+    const rows = versions.map(v => {
+      const isExp = v.version_key === curVer;
+      const vid = `${label}__${v.version_key}`;
       return `
-        <tr>
-          <td class="path-cell" title="${escHtml(f.original_path)}">${escHtml(f.original_path)}</td>
-          <td class="size-cell">${fmtSize(f.size)}</td>
-          <td class="hash-cell">${f.sha256.slice(0,16)}…</td>
-          <td class="date-cell">${date}</td>
+        <tr class="row-version ${isExp?'expanded':''}"
+            onclick="toggleFiles('${esc(label)}','${esc(v.version_key)}',this)">
+          <td><span class="chevron">▶</span>${esc(v.version_key)}</td>
+          <td>${badge(v.status)}</td>
+          <td class="num-cell">${v.file_count}</td>
+          <td class="num-cell dim-cell">${v.deleted_count} deletados</td>
+          <td class="size-cell">${fmtSize(v.total_size_bytes)}</td>
+          <td class="date-cell">${fmtDate(v.created_at)}</td>
+        </tr>
+        <tr class="files-row" id="frow-${esc(vid)}" style="display:${isExp?'':'none'}">
+          <td colspan="6">
+            <div class="files-container">
+              <div class="files-inner" id="finner-${esc(vid)}">
+                <div class="loading">Carregando</div>
+              </div>
+            </div>
+          </td>
         </tr>`;
     }).join('');
 
     el.innerHTML = `
-      <table class="files-table">
+      <table>
+        <thead><tr>
+          <th>Versão</th><th>Status</th>
+          <th style="text-align:right">Arquivos</th>
+          <th style="text-align:right">Deletados</th>
+          <th style="text-align:right">Tamanho</th>
+          <th>Criada em</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+
+    if (curVer) {
+      const vid = `${label}__${curVer}`;
+      loadFiles(label, curVer, vid);
+    }
+  }
+
+  async function toggleFiles(label, version_key, row) {
+    const vid = `${label}__${version_key}`;
+    const frow = document.getElementById(`frow-${vid}`);
+    if (expandedVersion[label] === version_key) {
+      expandedVersion[label] = null;
+      row.classList.remove('expanded');
+      frow.style.display = 'none';
+      return;
+    }
+    // Close previous version in same label
+    if (expandedVersion[label]) {
+      const prevVid = `${label}__${expandedVersion[label]}`;
+      const prev = document.getElementById(`frow-${prevVid}`);
+      if (prev) prev.style.display = 'none';
+      document.querySelectorAll('.row-version.expanded').forEach(r => r.classList.remove('expanded'));
+    }
+    expandedVersion[label] = version_key;
+    row.classList.add('expanded');
+    frow.style.display = '';
+    document.getElementById(`finner-${vid}`).innerHTML = '<div class="loading">Carregando</div>';
+    await loadFiles(label, version_key, vid);
+  }
+
+  async function loadFiles(label, version_key, vid) {
+    try {
+      const url = `/files?backup_label=${encodeURIComponent(label)}&version_key=${encodeURIComponent(version_key)}&include_deleted=true`;
+      const r = await fetch(url, {headers: H()});
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const files = await r.json();
+      renderFiles(vid, files);
+    } catch(e) {
+      document.getElementById(`finner-${vid}`).innerHTML =
+        `<div class="empty">Erro: ${e.message}</div>`;
+    }
+  }
+
+  function renderFiles(vid, files) {
+    const el = document.getElementById(`finner-${vid}`);
+    if (!files.length) { el.innerHTML='<div class="empty">Nenhum arquivo nesta versão</div>'; return; }
+    const rows = files.map(f => `
+      <tr class="${f.status==='deleted'?'deleted-file':''}">
+        <td class="path-cell" title="${esc(f.original_path)}">${esc(f.original_path)}</td>
+        <td class="size-cell">${fmtSize(f.size)}</td>
+        <td>${badge(f.status)}</td>
+        <td class="hash-cell">${f.sha256.slice(0,16)}…</td>
+        <td class="date-cell">${fmtDate(f.created_at)}</td>
+      </tr>`).join('');
+    el.innerHTML = `
+      <table>
         <thead><tr>
           <th>Path original</th>
           <th style="text-align:right">Tamanho</th>
+          <th>Status</th>
           <th>SHA-256</th>
           <th>Adicionado em</th>
         </tr></thead>
@@ -653,33 +426,13 @@
       </table>`;
   }
 
-  function closeFiles() {
-    activeLabel = null;
-    document.getElementById('filesPanel').style.display = 'none';
-    loadAll();
-  }
-
-  function escHtml(str) {
-    return String(str)
-      .replace(/&/g,'&amp;')
-      .replace(/</g,'&lt;')
-      .replace(/>/g,'&gt;')
-      .replace(/"/g,'&quot;');
-  }
-
-  // Tenta carregar sem key primeiro (servidor pode estar sem autenticacao)
-  // Se retornar 401, mostra o formulario de login
+  // Init
   async function init() {
     const resp = await fetch('/health');
-    if (!resp.ok) { showError('Servidor indisponivel'); return; }
-
-    const test = await fetch('/backups', { headers: headers() });
-    if (test.status === 401) {
-      showLogin();
-    } else {
-      loadAll();
-      autoRefresh = setInterval(loadAll, 30000);
-    }
+    if (!resp.ok) { showError('Servidor indisponível'); return; }
+    const test = await fetch('/backups', {headers: H()});
+    if (test.status === 401) { showLogin(); }
+    else { loadAll(); setInterval(loadAll, 30000); }
   }
   init();
 </script>
