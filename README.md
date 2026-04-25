@@ -1,7 +1,8 @@
-# 🗄️ Backup Files — Raspberry Pi
+# 🗄️ Backup Files — Raspberry Pi  `v2.0`
 
-Sistema de backup de arquivos com deduplicação por metadados, isolamento por identificador e uploads paralelos.
-Cada backup possui um **label único** — arquivos de backups diferentes são completamente isolados no storage físico, no banco de dados e nas operações de sync.
+Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
+
+Cada execução de backup cria uma nova versão dentro do label. O servidor armazena o conteúdo físico apenas uma vez por sha256 — versões diferentes que compartilham arquivos idênticos não duplicam o storage. Arquivos deletados são marcados na versão, nunca apagados do storage diretamente.
 
 ---
 
@@ -16,7 +17,7 @@ backup_system/
 │   └── static/
 │       └── index.html       ← Dashboard web
 ├── client/
-│   ├── backup_client.py     ← Script de backup/restore (roda no cliente)
+│   ├── backup_client.py     ← Cliente de backup/restore
 │   └── requirements.txt
 ├── .gitignore
 └── README.md
@@ -38,12 +39,10 @@ pip install -r requirements.txt
 ### 2. Configurar variáveis de ambiente
 
 ```bash
-export BACKUP_API_KEY="uma-chave-secreta-forte-aqui"
-export STORAGE_DIR="/mnt/hd-externo/backups"   # onde os arquivos serão salvos
-export DB_PATH="/mnt/hd-externo/backup.db"      # banco SQLite
+export BACKUP_API_KEY="uma-chave-secreta-forte-aqui"   # omitir = sem autenticação
+export STORAGE_DIR="/mnt/hd-externo/backups"
+export DB_PATH="/mnt/hd-externo/backup.db"
 ```
-
-> **Dica:** Coloque essas variáveis no arquivo de serviço do systemd ou em `/etc/environment`.
 
 ### 3. Iniciar o servidor
 
@@ -57,7 +56,7 @@ Crie `/etc/systemd/system/backup-server.service`:
 
 ```ini
 [Unit]
-Description=Backup Server
+Description=Backup Files — Raspberry Pi
 After=network.target
 
 [Service]
@@ -98,21 +97,24 @@ pip install -r requirements.txt
 export BACKUP_API_KEY="uma-chave-secreta-forte-aqui"
 ```
 
+> Se o servidor estiver sem autenticação, basta omitir a variável.
+
 ---
 
 ## 🚀 Comandos
 
-O cliente opera com três subcomandos: `backup`, `backups` e `restore`.
-O argumento `--label` é **obrigatório** nos comandos `backup` e `restore`.
+O cliente possui cinco subcomandos: `backup`, `backups`, `versions`, `restore` e `cleanup`.
 
 ---
 
 ### backup
 
-Envia arquivos locais para o servidor sob um identificador único (`--label`). Se o backup ainda não existir no servidor, é criado automaticamente. Arquivos com metadados idênticos são ignorados sem trafegar nenhum byte. Os uploads são feitos em paralelo para melhor performance.
+Envia arquivos para o servidor criando uma **nova versão** a cada execução. A versão é identificada automaticamente pela data e hora de início (`2026-04-25T10:42:31`).
+
+Arquivos cujo conteúdo já existe no storage (mesmo sha256) são apenas **registrados** na nova versão — zero bytes trafegam na rede. Arquivos sem alteração desde a última versão são **ignorados**.
 
 ```bash
-# Backup simples
+# Backup simples — cria nova versão automaticamente
 python backup_client.py backup ~/documentos \
   --label "notebook-joao" \
   --server http://192.168.1.100:8000
@@ -123,19 +125,19 @@ python backup_client.py backup ~/documentos \
   --server http://192.168.1.100:8000 \
   --prefix /home/joao/documentos
 
-# Ignorar subpastas específicas
+# Ignorar subpastas
 python backup_client.py backup ~/projeto \
   --label "projeto-alpha" \
   --server http://192.168.1.100:8000 \
   --exclude node_modules .git __pycache__ .venv dist build
 
-# Aumentar workers para mais performance (padrão: 4)
+# Aumentar paralelismo (padrão: 4 workers)
 python backup_client.py backup ~/documentos \
   --label "notebook-joao" \
   --server http://192.168.1.100:8000 \
   --workers 8
 
-# Verificar sem enviar (dry-run)
+# Verificar sem enviar
 python backup_client.py backup ~/documentos \
   --label "notebook-joao" \
   --server http://192.168.1.100:8000 \
@@ -151,59 +153,45 @@ python backup_client.py backup ~/documentos \
 | `--prefix` | | Prefixo do path no servidor |
 | `--client` | | Nome do cliente — padrão é o hostname da máquina |
 | `--exclude` | | Subpastas a ignorar — aceita múltiplos valores |
-| `--workers` | | Número de uploads paralelos (padrão: `4`) |
-| `--dry-run` | | Apenas verifica, não envia nada e não cria o backup |
+| `--workers` | | Uploads paralelos (padrão: `4`) |
+| `--dry-run` | | Apenas verifica, não envia |
 
-**Recomendação de workers por cenário:**
+**Resumo ao final do backup:**
 
-| Cenário | Workers sugerido |
-|---------|:----------------:|
+```
+=======================================================
+  Backup      : [notebook-joao]
+  Versao      : 2026-04-25T10:42:31
+  Verificados : 142
+  Enviados    : 3    ← conteúdo novo, upload completo
+  Registrados : 12   ← conteúdo já no storage, só registrou
+  Ignorados   : 127  ← idênticos à versão anterior
+  Deletados   : 1    ← marcados como deleted nesta versão
+  Erros       : 0
+=======================================================
+```
+
+**Recomendação de workers:**
+
+| Cenário | Workers |
+|---------|:-------:|
 | Pi com cartão SD | 2 |
 | Pi com HD externo USB | 4–6 |
 | Pi com SSD | 6–8 |
 | Muitos arquivos pequenos | 8+ |
 | Arquivos grandes (>100 MB) | 2–3 |
 
-> Em `--dry-run` o número de workers é ignorado e o processamento é sequencial para manter o output legível.
-
-Durante o upload, cada thread exibe sua própria barra de progresso:
-
-```
-10:42:31  INFO     Workers   : 4 threads paralelas
-10:42:31  INFO     UPLOAD /home/joao/videos/aula.mp4  (342.7 MB)  [Arquivo novo]
-  aula.mp4                |████████████░░░░░░| 187.3M/342.7M [4.2MB/s]
-10:42:31  INFO     UPLOAD /home/joao/docs/relatorio.pdf  (1.2 MB)  [Arquivo novo]
-10:42:31  INFO     SKIP   /home/joao/docs/notas.txt
-```
-
-Ao final, arquivos que existem no servidor mas foram removidos localmente são apagados automaticamente do backup (sync). O sync é isolado ao label — nunca remove arquivos de outro backup.
-
-```
-==================================================
-  Backup      : [notebook-joao]
-  Verificados : 42
-  Enviados    : 5
-  Ignorados   : 37
-  Erros       : 0
-  Removidos   : 1
-==================================================
-```
-
 ---
 
 ### backups
 
-Lista todos os backups registrados no servidor com contagem de arquivos, tamanho total e data do último run.
+Lista todos os backups registrados no servidor.
 
 ```bash
-# Listar todos os backups
-python backup_client.py backups \
-  --server http://192.168.1.100:8000
+python backup_client.py backups --server http://192.168.1.100:8000
 
-# Filtrar por nome do cliente
-python backup_client.py backups \
-  --server http://192.168.1.100:8000 \
-  --client "notebook-joao"
+# Filtrar por cliente
+python backup_client.py backups --server http://192.168.1.100:8000 --client "notebook-joao"
 ```
 
 **Opções:**
@@ -216,43 +204,75 @@ python backup_client.py backups \
 Exemplo de saída:
 
 ```
-LABEL                           CLIENTE               STATUS    ARQUIVOS     TAMANHO  ULTIMO RUN
----------------------------------------------------------------------------------------------------------
-notebook-joao                   notebook-joao         active         142      1.2 GB  2026-04-22 02:00
-servidor-web                    servidor-web          active          38     320.5 MB  2026-04-21 03:00
-projeto-alpha                   notebook-joao         active         891      4.7 GB  2026-04-20 14:30
+LABEL                           CLIENTE               VERSOES  ARQUIVOS     TAMANHO  ULTIMA VERSAO
+----------------------------------------------------------------------------------------------------------
+notebook-joao                   notebook-joao               8       142      1.4 GB  2026-04-25T10:42:31
+servidor-web                    servidor-web                5        38     320.5 MB  2026-04-21T03:00:00
+projeto-alpha                   notebook-joao              12       891      4.7 GB  2026-04-20T14:30:00
 ```
 
-Use o valor da coluna **LABEL** para fazer restore de um backup específico.
+---
+
+### versions
+
+Lista todas as versões de um backup, com contagem de arquivos ativos, deletados e tamanho.
+
+```bash
+python backup_client.py versions \
+  --label "notebook-joao" \
+  --server http://192.168.1.100:8000
+```
+
+**Opções:**
+
+| Opção | Obrigatório | Descrição |
+|-------|:-----------:|-----------|
+| `--label` | ✅ | Label do backup |
+| `--server` | | URL do servidor |
+
+Exemplo de saída:
+
+```
+Versoes de [notebook-joao]:
+  VERSAO                  STATUS    ARQUIVOS  DELETADOS     TAMANHO
+  -----------------------------------------------------------------
+  2026-04-25T10:42:31     done           142          1      1.4 GB
+  2026-04-24T02:00:00     done           141          0      1.4 GB
+  2026-04-23T02:00:00     done           139          3      1.3 GB
+```
+
+Use o valor da coluna **VERSAO** para restaurar um estado específico.
 
 ---
 
 ### restore
 
-Baixa os arquivos de um backup identificado pelo `--label` e reconstrói a estrutura de pastas no destino.
+Baixa os arquivos de uma **versão específica** e reconstrói a estrutura de pastas no destino. Apenas arquivos com status `active` são restaurados — deletados são ignorados.
 
 ```bash
-# Restaurar um backup pelo label
+# Restaurar uma versão específica
 python backup_client.py restore /tmp/restore \
   --label "notebook-joao" \
+  --version "2026-04-25T10:42:31" \
   --server http://192.168.1.100:8000
 
-# Restaurar apenas arquivos de um subdiretório específico
+# Restaurar apenas um subdiretório da versão
 python backup_client.py restore /tmp/restore \
   --label "notebook-joao" \
+  --version "2026-04-25T10:42:31" \
   --server http://192.168.1.100:8000 \
   --prefix /home/joao/documentos
 
-# Ver o que seria restaurado sem baixar nada
+# Ver o que seria restaurado sem baixar
 python backup_client.py restore /tmp/restore \
   --label "notebook-joao" \
-  --server http://192.168.1.100:8000 \
+  --version "2026-04-25T10:42:31" \
   --dry-run
 
-# Sobrescrever arquivos que já existem no destino
+# Sobrescrever arquivos existentes no destino
 python backup_client.py restore /tmp/restore \
   --label "notebook-joao" \
-  --server http://192.168.1.100:8000 \
+  --version "2026-04-25T10:42:31" \
   --overwrite
 ```
 
@@ -260,13 +280,67 @@ python backup_client.py restore /tmp/restore \
 
 | Opção | Obrigatório | Descrição |
 |-------|:-----------:|-----------|
-| `--label` | ✅ | Identificador do backup a restaurar |
+| `--label` | ✅ | Label do backup |
+| `--version` | ✅ | Chave da versão (obtida via `versions`) |
 | `--server` | | URL do servidor |
-| `--prefix` | | Restaurar apenas arquivos com esse prefixo de path |
+| `--prefix` | | Restaurar apenas arquivos com esse prefixo |
 | `--overwrite` | | Sobrescreve arquivos existentes no destino |
-| `--dry-run` | | Apenas lista os arquivos, não baixa nada |
+| `--dry-run` | | Apenas lista, não baixa |
 
-O restore valida a integridade de cada arquivo após o download comparando o SHA-256 com o valor registrado no servidor. Se não bater, o arquivo é removido localmente e marcado como erro.
+A integridade de cada arquivo é validada após o download pelo SHA-256. Se não bater, o arquivo é removido e marcado como erro.
+
+---
+
+### cleanup
+
+Remove versões antigas de um ou todos os backups, mantendo apenas as `N` mais recentes. Arquivos físicos órfãos (não referenciados por nenhuma versão remanescente) são apagados do storage automaticamente.
+
+```bash
+# Limpar um label específico, manter 5 versões
+python backup_client.py cleanup \
+  --label "notebook-joao" \
+  --keep 5 \
+  --server http://192.168.1.100:8000
+
+# Limpar TODOS os labels de uma vez, manter 5 versões cada
+python backup_client.py cleanup \
+  --all \
+  --keep 5 \
+  --server http://192.168.1.100:8000
+
+# Manter apenas 3 versões em todos os backups
+python backup_client.py cleanup \
+  --all \
+  --keep 3 \
+  --server http://192.168.1.100:8000
+```
+
+**Opções:**
+
+| Opção | Descrição |
+|-------|-----------|
+| `--label` | Label específico a limpar (mutuamente exclusivo com `--all`) |
+| `--all` | Limpa todos os labels do servidor de uma vez |
+| `--keep` | Quantas versões manter por label (padrão: `5`) |
+| `--server` | URL do servidor |
+
+Exemplo de saída com `--all`:
+
+```
+Cleanup em todos os labels (3 encontrados), keep=5
+
+  [notebook-joao]  mantidas=5  removidas=2  storage=4 arquivo(s) apagado(s)
+    - 2026-04-10T02:00:00
+    - 2026-04-03T02:00:00
+  [servidor-web]   mantidas=5  removidas=0  storage=0 arquivo(s) apagado(s)
+  [projeto-alpha]  mantidas=5  removidas=7  storage=12 arquivo(s) apagado(s)
+
+==================================================
+  Labels processados : 3
+  Versoes removidas  : 9
+  Arquivos do storage: 16
+==================================================
+```
 
 ---
 
@@ -277,7 +351,7 @@ crontab -e
 ```
 
 ```cron
-# Backup todo dia às 02:00 com 4 workers
+# Backup todo dia às 02:00
 0 2 * * * BACKUP_API_KEY=sua-chave \
   /home/usuario/client/.venv/bin/python \
   /home/usuario/client/backup_client.py backup ~/docs \
@@ -286,102 +360,114 @@ crontab -e
   --exclude node_modules .git \
   --workers 4 \
   >> /var/log/backup.log 2>&1
+
+# Cleanup semanal — manter 10 versões em todos os labels
+0 3 * * 0 BACKUP_API_KEY=sua-chave \
+  /home/usuario/client/.venv/bin/python \
+  /home/usuario/client/backup_client.py cleanup \
+  --all --keep 10 \
+  --server http://192.168.1.100:8000 \
+  >> /var/log/backup-cleanup.log 2>&1
 ```
-
----
-
-## 🔒 Isolamento por label
-
-Cada label possui seu próprio espaço completamente isolado no servidor:
-
-**Storage físico separado:**
-```
-storage/
-├── notebook-joao/
-│   └── ab/ab12ef34_relatorio.pdf
-├── servidor-web/
-│   └── cd/cd56gh78_index.html
-└── projeto-alpha/
-    └── ef/ef90ij12_config.yaml
-```
-
-**Regras de isolamento:**
-- `/check` — só consulta arquivos do label informado
-- `/upload` — armazena fisicamente sob a pasta do label
-- `/sync` — só remove arquivos do label informado, nunca toca outros backups
-- `/restore` — só lista e baixa arquivos do label informado
-
----
-
-## 🔒 Lógica de Deduplicação
-
-Dentro de um mesmo backup, o `/check` compara **4 campos simultaneamente**:
-
-| Campo | O que representa |
-|-------|-----------------|
-| `original_path` | Identidade do arquivo |
-| `sha256` | Hash do conteúdo — garante integridade |
-| `size` | Tamanho em bytes |
-| `mtime` | Última modificação (epoch) |
-
-Se todos os 4 forem idênticos → **sem upload**.
-Se o path existe mas qualquer outro campo mudou → **arquivo modificado, será atualizado**.
-Se o path não existe neste backup → **arquivo novo, upload necessário**.
 
 ---
 
 ## 🖥️ Dashboard Web
 
-O servidor inclui um dashboard acessível pelo browser, servido diretamente pelo FastAPI.
+Acessível pelo browser, servido diretamente pelo FastAPI:
 
 ```
 http://<ip-da-pi>:8000/
 ```
 
-Na primeira visita, o browser pedirá a **API Key** — ela é salva no `localStorage` e não precisa ser informada novamente.
+Na primeira visita com autenticação ativada, o browser pedirá a API Key — salva no `localStorage`. Para trocar, clique em **⌀ API Key** no header.
 
 **O que o dashboard exibe:**
 
-- **Stats globais** — total de backups, total de arquivos, storage utilizado e backups ativos
-- **Tabela de backups** — label, cliente, status, nº de arquivos, tamanho total e data do último run
-- **Painel de arquivos** — clique em qualquer linha da tabela para expandir e ver todos os arquivos do backup, com path original, tamanho, SHA-256 e data de inclusão
+- **Stats globais** — total de backups, versões, arquivos, storage total
+- **Tabela de backups** — clique em um label para expandir as versões
+- **Versões** — clique em uma versão para ver os arquivos, incluindo os marcados como `deleted` (em cinza)
 - **Auto-refresh** a cada 30 segundos, ou manual pelo botão ↻
+
+---
+
+## 🗃️ Arquitetura de dados
+
+```
+BackupID (label)
+  └── BackupVersion (version_key = datetime ISO)
+        └── VersionFile (original_path, sha256, status = active | deleted)
+                └── FileContent (sha256, stored_at) ← arquivo físico único por conteúdo
+```
+
+**Storage físico:**
+```
+storage/
+└── _content/
+    ├── ab/
+    │   └── abcd1234ef567890...   ← conteúdo único por sha256
+    └── f7/
+        └── f7a923bc11d24e5f...
+```
+
+O conteúdo de cada arquivo é armazenado **uma única vez**, independente de quantas versões ou labels o referenciem. Isso garante deduplicação real — dois labels com um arquivo idêntico compartilham o mesmo bloco de storage.
+
+---
+
+## 🔒 Isolamento por label
+
+Cada label tem seu próprio conjunto de versões e VersionFiles. As operações de `check`, `upload`, `sync` e `restore` são sempre escopadas ao label — um backup nunca interfere em outro.
 
 ---
 
 ## 🔌 Endpoints da API
 
-Todos os endpoints (exceto `/health`) exigem o header `X-API-Key`.
+Todos os endpoints (exceto `/health` e `/`) exigem `X-API-Key` quando autenticação está ativada.
 
-### Backups (identificadores)
+### Dashboard e Health
 
 | Método | Endpoint | Descrição |
 |--------|----------|-----------|
-| `POST` | `/backups` | Cria um backup — idempotente se label já existe |
+| `GET` | `/` | Dashboard web |
+| `GET` | `/health` | Status do servidor e versão |
+
+### Backups
+
+| Método | Endpoint | Descrição |
+|--------|----------|-----------|
+| `POST` | `/backups` | Cria backup — idempotente se label já existe |
 | `GET` | `/backups` | Lista todos os backups com stats |
 | `GET` | `/backups/{label}` | Detalhes de um backup |
-| `DELETE` | `/backups/{label}` | Remove o backup e todos os seus arquivos |
+| `DELETE` | `/backups/{label}` | Remove backup e todas as suas versões |
+
+### Versões
+
+| Método | Endpoint | Descrição |
+|--------|----------|-----------|
+| `POST` | `/backups/{label}/versions` | Cria nova versão |
+| `GET` | `/backups/{label}/versions` | Lista versões do label |
+| `GET` | `/backups/{label}/versions/{version_key}` | Detalhes de uma versão |
+| `PATCH` | `/backups/{label}/versions/{version_key}` | Finaliza versão (done/failed) |
+| `DELETE` | `/backups/{label}/versions/{version_key}` | Remove versão e limpa órfãos |
+| `POST` | `/backups/{label}/cleanup` | Remove versões antigas, mantém `keep` mais recentes |
 
 ### Arquivos
 
 | Método | Endpoint | Descrição |
 |--------|----------|-----------|
-| `GET` | `/` | Dashboard web (browser) |
-| `GET` | `/health` | Status do servidor |
-| `POST` | `/check` | Verifica se arquivo precisa ser enviado (escopado ao label) |
-| `POST` | `/upload` | Envia arquivo — requer header `X-Backup-Label` |
-| `POST` | `/sync` | Remove arquivos ausentes no cliente (escopado ao label) |
-| `GET` | `/files?backup_label=` | Lista arquivos de um backup (`backup_label` obrigatório) |
+| `POST` | `/check` | Verifica se arquivo precisa upload na versão atual |
+| `POST` | `/upload` | Registra arquivo na versão (com ou sem upload de conteúdo) |
+| `POST` | `/sync` | Marca como deleted arquivos ausentes no cliente |
+| `GET` | `/files` | Lista arquivos de uma versão (`backup_label` + `version_key` obrigatórios) |
 | `GET` | `/files/{id}/download` | Faz download de um arquivo |
-| `DELETE` | `/files/{id}` | Remove um arquivo do backup |
 
-> Paths com caracteres especiais (acentos, cedilha) são transmitidos em **base64** no header `X-Original-Path` e decodificados automaticamente pelo servidor.
+> Paths com caracteres especiais são transmitidos em **base64** no header `X-Original-Path`.
 
 ---
 
 ## 📊 Documentação automática
 
-Com o servidor rodando, acesse:
+Com o servidor rodando:
 - **Dashboard**: `http://<ip-da-pi>:8000/`
 - **Swagger UI**: `http://<ip-da-pi>:8000/docs`
 - **ReDoc**: `http://<ip-da-pi>:8000/redoc`

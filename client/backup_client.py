@@ -1,26 +1,23 @@
 """
-Backup Client
-Cada backup e identificado por um label unico. Backups diferentes sao
-completamente isolados no servidor — arquivos de um nunca interferem no outro.
+Backup Files — Raspberry Pi  v2.0
+Cada execucao de backup cria uma nova versao dentro do label.
+Conteudo identico e armazenado uma unica vez no servidor (deduplicacao por sha256).
+Arquivos deletados sao marcados na versao, nao apagados do storage.
 
 Uso:
-    python backup_client.py backup ~/docs --label "meu-notebook" --server http://192.168.1.100:8000
+    python backup_client.py backup ~/docs --label "notebook" --server http://192.168.1.100:8000
+    python backup_client.py versions --label "notebook" --server http://192.168.1.100:8000
+    python backup_client.py restore /tmp/r --label "notebook" --version "2026-04-25T10:42:31"
+    python backup_client.py cleanup --label "notebook" --keep 5
     python backup_client.py backups --server http://192.168.1.100:8000
-    python backup_client.py restore /tmp/restore --label "meu-notebook" --server http://192.168.1.100:8000
 """
 
-import os
-import sys
-import hashlib
-import argparse
-import logging
-import base64
-import socket
+import os, sys, hashlib, argparse, logging, base64, socket, threading
 from pathlib import Path
 from typing import Optional
-
-import threading
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import requests
 from tqdm import tqdm
 from requests_toolbelt import MultipartEncoder, MultipartEncoderMonitor
@@ -34,11 +31,11 @@ def _load_api_key() -> str:
         key.encode("latin-1")
     except UnicodeEncodeError:
         print(
-            "ERRO: BACKUP_API_KEY contem caracteres invalidos (ex: aspas curvas “ ”)."
-            "\nCopie a chave novamente usando apenas caracteres ASCII simples.",
-            file=__import__("sys").stderr,
+            "ERRO: BACKUP_API_KEY contem caracteres invalidos (ex: aspas curvas).\n"
+            "Copie a chave novamente usando apenas caracteres ASCII simples.",
+            file=sys.stderr,
         )
-        __import__("sys").exit(1)
+        sys.exit(1)
     return key
 
 API_KEY = _load_api_key()
@@ -48,7 +45,9 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(message)s",
     datefmt="%H:%M:%S",
 )
-log = logging.getLogger("backup_client")
+log = logging.getLogger("backup")
+
+IGNORED_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 
 
 # -- Helpers ------------------------------------------------------------------
@@ -59,17 +58,14 @@ def sha256_file(path: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
-
 def build_headers(extra: Optional[dict] = None) -> dict:
-    headers = {"X-API-Key": API_KEY}
+    h = {"X-API-Key": API_KEY}
     if extra:
-        headers.update(extra)
-    return headers
-
+        h.update(extra)
+    return h
 
 def encode_path(path: str) -> str:
     return base64.b64encode(path.encode("utf-8")).decode("ascii")
-
 
 def fmt_size(size: int) -> str:
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -78,296 +74,276 @@ def fmt_size(size: int) -> str:
         size /= 1024
     return f"{size:.1f} PB"
 
+def now_key() -> str:
+    return datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
 
 # -- API calls ----------------------------------------------------------------
-def ensure_backup(server: str, label: str, client_name: str, prefix: Optional[str]) -> dict:
-    """Cria o backup se nao existir, ou retorna o existente (idempotente)."""
-    resp = requests.post(
-        f"{server}/backups",
-        json={"label": label, "client_name": client_name, "prefix": prefix},
-        headers=build_headers(),
-        timeout=10,
+def ensure_backup(server, label, client_name, prefix):
+    r = requests.post(f"{server}/backups",
+                      json={"label": label, "client_name": client_name, "prefix": prefix},
+                      headers=build_headers(), timeout=10)
+    r.raise_for_status(); return r.json()
+
+def create_version(server, label, version_key):
+    r = requests.post(f"{server}/backups/{label}/versions",
+                      json={"version_key": version_key},
+                      headers=build_headers(), timeout=10)
+    r.raise_for_status(); return r.json()
+
+def finish_version(server, label, version_key, status="done"):
+    r = requests.patch(f"{server}/backups/{label}/versions/{version_key}",
+                       json={"status": status},
+                       headers=build_headers(), timeout=10)
+    r.raise_for_status()
+
+def check_file(server, label, version_key, original_path, sha256, size, mtime):
+    r = requests.post(f"{server}/check",
+                      json={"backup_label": label, "version_key": version_key,
+                            "original_path": original_path,
+                            "sha256": sha256, "size": size, "mtime": mtime},
+                      headers=build_headers(), timeout=10)
+    r.raise_for_status(); return r.json()
+
+def register_file(server, label, version_key, original_path, mtime, sha256):
+    """Registra arquivo cujo conteudo ja existe no storage (sem upload)."""
+    r = requests.post(
+        f"{server}/upload",
+        headers=build_headers({
+            "X-Backup-Label":   label,
+            "X-Version-Key":    version_key,
+            "X-Original-Path":  encode_path(original_path),
+            "X-Mtime":          str(mtime),
+            "X-Content-Sha256": sha256,
+        }),
+        timeout=30,
     )
-    resp.raise_for_status()
-    return resp.json()
+    r.raise_for_status(); return r.json()
 
-
-def check_file(server: str, backup_label: str, original_path: str, sha256: str, size: int, mtime: float) -> dict:
-    resp = requests.post(
-        f"{server}/check",
-        json={
-            "backup_label": backup_label,
-            "original_path": original_path,
-            "sha256": sha256,
-            "size": size,
-            "mtime": mtime,
-        },
-        headers=build_headers(),
-        timeout=10,
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-
-def upload_file(server: str, local_path: Path, backup_label: str, original_path: str, mtime: float) -> dict:
+def upload_file(server, local_path: Path, label, version_key, original_path, mtime):
+    """Faz upload do conteudo e registra o arquivo na versao."""
     file_size = local_path.stat().st_size
-    filename  = local_path.name
-
     with open(local_path, "rb") as f:
-        encoder = MultipartEncoder(fields={"file": (filename, f, "application/octet-stream")})
-
+        encoder = MultipartEncoder(fields={"file": (local_path.name, f, "application/octet-stream")})
         bar = tqdm(
             total=file_size, unit="B", unit_scale=True, unit_divisor=1024,
-            desc=f"  {filename[:40]}", leave=False,
+            desc=f"  {local_path.name[:40]}", leave=False,
             bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}]",
         )
-
-        def _progress(monitor):
-            bar.update(monitor.bytes_read - bar.n)
-
-        monitor = MultipartEncoderMonitor(encoder, _progress)
-
-        resp = requests.post(
+        monitor = MultipartEncoderMonitor(encoder, lambda m: bar.update(m.bytes_read - bar.n))
+        r = requests.post(
             f"{server}/upload",
             data=monitor,
             headers=build_headers({
-                "X-Backup-Label":   backup_label,
-                "X-Original-Path":  encode_path(original_path),
-                "X-Mtime":          str(mtime),
-                "Content-Type":     monitor.content_type,
+                "X-Backup-Label":  label,
+                "X-Version-Key":   version_key,
+                "X-Original-Path": encode_path(original_path),
+                "X-Mtime":         str(mtime),
+                "Content-Type":    monitor.content_type,
             }),
             timeout=120,
         )
         bar.close()
+    r.raise_for_status(); return r.json()
 
-    resp.raise_for_status()
-    return resp.json()
-
-
-def sync_with_server(server: str, backup_label: str, existing_paths: list) -> dict:
-    resp = requests.post(
-        f"{server}/sync",
-        json={"backup_label": backup_label, "existing_paths": existing_paths},
-        headers=build_headers(),
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()
+def sync_version(server, label, version_key, existing_paths):
+    r = requests.post(f"{server}/sync",
+                      json={"backup_label": label, "version_key": version_key,
+                            "existing_paths": existing_paths},
+                      headers=build_headers(), timeout=30)
+    r.raise_for_status(); return r.json()
 
 
 # -- Backup -------------------------------------------------------------------
 def backup_directory(
-    directory: str,
-    label: str,
-    server: str = DEFAULT_SERVER,
-    dry_run: bool = False,
-    path_prefix: Optional[str] = None,
-    exclude: Optional[list] = None,
-    client_name: Optional[str] = None,
-    workers: int = 4,
+    directory, label, server=DEFAULT_SERVER, dry_run=False,
+    path_prefix=None, exclude=None, client_name=None, workers=4,
 ):
     root = Path(directory).resolve()
     if not root.exists():
-        log.error(f"Diretorio nao encontrado: {root}")
-        sys.exit(1)
+        log.error(f"Diretorio nao encontrado: {root}"); sys.exit(1)
 
     client_name = client_name or socket.gethostname()
+    version_key = now_key()
 
     if not dry_run:
-        result = ensure_backup(server, label, client_name, path_prefix)
-        action = "Criado" if result["created"] else "Encontrado"
-        log.info(f"Backup    : [{label}]  {action}")
+        ensure_backup(server, label, client_name, path_prefix)
+        create_version(server, label, version_key)
+        log.info(f"Backup    : [{label}]")
+        log.info(f"Versao    : {version_key}")
 
-    stats = {"checked": 0, "uploaded": 0, "skipped": 0, "errors": 0}
-    stats_lock = threading.Lock()
-    all_paths: list[str] = []
-    all_paths_lock = threading.Lock()
-
-    # Coleta todos os arquivos elegíveis primeiro
+    # Coleta arquivos
     pending = []
-    # Arquivos ignorados por padrao
-    IGNORED_NAMES = {'.DS_Store', 'Thumbs.db', 'desktop.ini'}
-
-    for file_path in sorted(root.rglob("*")):
-        if not file_path.is_file():
+    for fp in sorted(root.rglob("*")):
+        if not fp.is_file() or fp.name in IGNORED_NAMES:
             continue
-
-        if file_path.name in IGNORED_NAMES:
-            log.debug(f"SKIP   {file_path.name}  [ignorado por padrao]")
-            continue
-        excluded = False
-        for ex in (exclude or []):
-            try:
-                file_path.relative_to((root / ex).resolve())
-                excluded = True
-                break
-            except ValueError:
-                pass
-        if excluded:
-            continue
-        original_path = str(file_path) if not path_prefix else str(
-            Path(path_prefix) / file_path.relative_to(root)
+        excluded = any(
+            (lambda ex_path: True if fp == fp else False)(None)
+            for ex in (exclude or [])
+            if _is_excluded(fp, root, ex)
         )
-        pending.append((file_path, original_path))
+        if any(_is_excluded(fp, root, ex) for ex in (exclude or [])):
+            continue
+        op = str(fp) if not path_prefix else str(Path(path_prefix) / fp.relative_to(root))
+        pending.append((fp, op))
 
-    with stats_lock:
-        stats["checked"] = len(pending)
-    with all_paths_lock:
-        all_paths.extend(p[1] for p in pending)
+    total = len(pending)
+    log.info(f"Arquivos  : {total} encontrados")
 
-    total_files = len(pending)
-    done_count  = 0
-    done_lock   = threading.Lock()
+    stats = {"uploaded": 0, "registered": 0, "skipped": 0, "errors": 0}
+    lock  = threading.Lock()
+    all_paths = [op for _, op in pending]
 
-    # Barra de progresso geral
     overall = tqdm(
-        total=total_files,
-        unit="arq",
-        desc="Progresso",
+        total=total, unit="arq", desc="Progresso", position=0, leave=True,
         bar_format="  {desc}: {percentage:5.1f}%  {n_fmt}/{total_fmt}  [{elapsed}<{remaining}]",
-        position=0,
-        leave=True,
     )
 
-    def process_file(file_path: Path, original_path: str):
-        nonlocal done_count
-        stat  = file_path.stat()
+    def process(fp: Path, op: str):
+        stat  = fp.stat()
         size  = stat.st_size
         mtime = stat.st_mtime
         try:
-            sha256 = sha256_file(file_path)
-            check  = check_file(server, label, original_path, sha256, size, mtime)
+            sha256 = sha256_file(fp)
+            check  = check_file(server, label, version_key, op, sha256, size, mtime)
 
             if not check["needs_upload"]:
-                log.info(f"SKIP   {original_path}")
-                with stats_lock:
-                    stats["skipped"] += 1
+                log.info(f"SKIP   {op}")
+                with lock: stats["skipped"] += 1
+            elif check.get("content_exists"):
+                log.info(f"REG    {op}  ({fmt_size(size)})  [conteudo ja no storage]")
+                if not dry_run:
+                    register_file(server, label, version_key, op, mtime, sha256)
+                    with lock: stats["registered"] += 1
             else:
-                log.info(f"UPLOAD {original_path}  ({fmt_size(size)})  [{check['reason']}]")
-
-                if dry_run:
-                    log.info("  [dry-run] upload nao realizado")
-                else:
-                    upload_file(server, file_path, label, original_path, mtime)
-                    with stats_lock:
-                        stats["uploaded"] += 1
+                log.info(f"UPLOAD {op}  ({fmt_size(size)})")
+                if not dry_run:
+                    upload_file(server, fp, label, version_key, op, mtime)
+                    with lock: stats["uploaded"] += 1
 
         except requests.RequestException as e:
-            log.error(f"  ERRO em {original_path}: {e}")
-            with stats_lock:
-                stats["errors"] += 1
+            log.error(f"  ERRO em {op}: {e}")
+            with lock: stats["errors"] += 1
         finally:
-            with done_lock:
-                done_count += 1
-                overall.update(1)
+            overall.update(1)
+            with lock:
                 overall.set_description(
-                    f"Progresso  ✓{stats['uploaded']} ↷{stats['skipped']} ✗{stats['errors']}"
+                    f"Progresso  ↑{stats['uploaded']} ⊕{stats['registered']} "
+                    f"↷{stats['skipped']} ✗{stats['errors']}"
                 )
 
-    effective_workers = 1 if dry_run else workers
-    if effective_workers > 1:
-        log.info(f"Workers   : {effective_workers} threads paralelas")
+    effective = 1 if dry_run else workers
+    if effective > 1:
+        log.info(f"Workers   : {effective} threads paralelas")
 
-    with ThreadPoolExecutor(max_workers=effective_workers) as pool:
-        futures = {pool.submit(process_file, fp, op): op for fp, op in pending}
+    with ThreadPoolExecutor(max_workers=effective) as pool:
+        futures = {pool.submit(process, fp, op): op for fp, op in pending}
         for future in as_completed(futures):
-            exc = future.exception()
-            if exc:
+            if exc := future.exception():
                 log.error(f"  ERRO inesperado: {exc}")
-                with stats_lock:
-                    stats["errors"] += 1
+                with lock: stats["errors"] += 1
 
     overall.close()
 
     if not dry_run:
         try:
-            result = sync_with_server(server, label, all_paths)
+            result = sync_version(server, label, version_key, all_paths)
             removed = result.get("deleted_count", 0)
-            stats["removed"] = removed
+            stats["marked_deleted"] = removed
             if removed:
-                log.info(f"SYNC   {removed} arquivo(s) removido(s) de [{label}]:")
-                for p in result.get("deleted", []):
-                    log.info(f"  - {p}")
-            else:
-                log.info(f"SYNC   Nenhum arquivo removido de [{label}]")
+                log.info(f"SYNC   {removed} arquivo(s) marcado(s) como deletado(s)")
         except requests.RequestException as e:
             log.error(f"SYNC   Erro: {e}")
-    else:
-        log.info("SYNC   [dry-run] nao executado")
+
+        status = "failed" if stats["errors"] else "done"
+        finish_version(server, label, version_key, status)
 
     log.info("")
-    log.info("=" * 50)
+    log.info("=" * 55)
     log.info(f"  Backup      : [{label}]")
-    log.info(f"  Verificados : {stats['checked']}")
+    log.info(f"  Versao      : {version_key}")
+    log.info(f"  Verificados : {total}")
     log.info(f"  Enviados    : {stats['uploaded']}")
+    log.info(f"  Registrados : {stats['registered']}  (delta — sem re-upload)")
     log.info(f"  Ignorados   : {stats['skipped']}")
+    log.info(f"  Deletados   : {stats.get('marked_deleted', 0)}")
     log.info(f"  Erros       : {stats['errors']}")
-    log.info(f"  Removidos   : {stats.get('removed', 0)}")
-    log.info("=" * 50)
-
+    log.info("=" * 55)
     return stats
+
+def _is_excluded(fp: Path, root: Path, ex: str) -> bool:
+    try:
+        fp.relative_to((root / ex).resolve()); return True
+    except ValueError:
+        return False
 
 
 # -- List backups -------------------------------------------------------------
-def list_backups(server: str = DEFAULT_SERVER, client_name: Optional[str] = None):
+def list_backups(server=DEFAULT_SERVER, client_name=None):
     params = {}
-    if client_name:
-        params["client_name"] = client_name
-
-    resp = requests.get(f"{server}/backups", headers=build_headers(), params=params, timeout=10)
-    resp.raise_for_status()
-    backups = resp.json()
-
+    if client_name: params["client_name"] = client_name
+    r = requests.get(f"{server}/backups", headers=build_headers(), params=params, timeout=10)
+    r.raise_for_status()
+    backups = r.json()
     if not backups:
-        log.info("Nenhum backup encontrado.")
-        return
-
+        log.info("Nenhum backup encontrado."); return
     log.info("")
-    log.info(f"{'LABEL':30}  {'CLIENTE':20}  {'STATUS':8}  {'ARQUIVOS':>8}  {'TAMANHO':>10}  ULTIMO RUN")
-    log.info("-" * 105)
+    log.info(f"{'LABEL':30}  {'CLIENTE':20}  {'VERSOES':>7}  {'ARQUIVOS':>8}  {'TAMANHO':>10}  ULTIMA VERSAO")
+    log.info("-" * 110)
     for b in backups:
-        label      = b["label"][:30]
-        client     = (b.get("client_name") or "-")[:20]
-        status     = b["status"]
-        files      = b["file_count"]
-        size       = fmt_size(b["total_size_bytes"])
-        last_run   = (b.get("last_run_at") or b["created_at"])[:19]
-        log.info(f"{label:30}  {client:20}  {status:8}  {files:>8}  {size:>10}  {last_run}")
+        log.info(
+            f"{b['label'][:30]:30}  {(b.get('client_name') or '-')[:20]:20}  "
+            f"{b['version_count']:>7}  {b['file_count']:>8}  "
+            f"{fmt_size(b['total_size_bytes']):>10}  {(b.get('last_version') or '-')[:19]}"
+        )
+    log.info("")
+
+
+# -- List versions ------------------------------------------------------------
+def list_versions(label, server=DEFAULT_SERVER):
+    r = requests.get(f"{server}/backups/{label}/versions",
+                     headers=build_headers(), timeout=10)
+    r.raise_for_status()
+    versions = r.json()
+    if not versions:
+        log.info(f"Nenhuma versao encontrada em [{label}]."); return
+    log.info("")
+    log.info(f"Versoes de [{label}]:")
+    log.info(f"  {'VERSAO':22}  {'STATUS':8}  {'ARQUIVOS':>8}  {'DELETADOS':>9}  {'TAMANHO':>10}")
+    log.info("  " + "-" * 65)
+    for v in versions:
+        log.info(
+            f"  {v['version_key']:22}  {v['status']:8}  "
+            f"{v['file_count']:>8}  {v['deleted_count']:>9}  "
+            f"{fmt_size(v['total_size_bytes']):>10}"
+        )
     log.info("")
 
 
 # -- Restore ------------------------------------------------------------------
-def restore(
-    destination: str,
-    label: str,
-    server: str = DEFAULT_SERVER,
-    path_prefix: Optional[str] = None,
-    dry_run: bool = False,
-    overwrite: bool = False,
-):
+def restore(destination, label, version_key, server=DEFAULT_SERVER,
+            path_prefix=None, dry_run=False, overwrite=False):
     dest_root = Path(destination)
     dest_root.mkdir(parents=True, exist_ok=True)
 
     log.info(f"Backup      : [{label}]")
+    log.info(f"Versao      : {version_key}")
     log.info(f"Destino     : {dest_root}")
 
-    params = {"backup_label": label}
-    if path_prefix:
-        params["path_prefix"] = path_prefix
+    params = {"backup_label": label, "version_key": version_key}
+    if path_prefix: params["path_prefix"] = path_prefix
 
     try:
-        resp = requests.get(f"{server}/files", headers=build_headers(), params=params, timeout=10)
-        resp.raise_for_status()
-        files = resp.json()
+        r = requests.get(f"{server}/files", headers=build_headers(), params=params, timeout=10)
+        r.raise_for_status()
+        files = r.json()
     except requests.RequestException as e:
-        log.error(f"Erro ao buscar arquivos de [{label}]: {e}")
-        sys.exit(1)
+        log.error(f"Erro ao buscar arquivos: {e}"); sys.exit(1)
 
     if not files:
-        log.info("Nenhum arquivo encontrado neste backup.")
-        return
+        log.info("Nenhum arquivo ativo nesta versao."); return
 
-    log.info(f"{len(files)} arquivo(s) no backup [{label}].")
+    log.info(f"{len(files)} arquivo(s) encontrado(s).")
     stats = {"restored": 0, "skipped": 0, "errors": 0}
 
     for record in files:
@@ -376,143 +352,181 @@ def restore(
         sha256        = record["sha256"]
         size          = record["size"]
 
-        if path_prefix and original_path.startswith(path_prefix):
-            relative = original_path[len(path_prefix):].lstrip("/")
-        else:
-            relative = original_path.lstrip("/")
-
+        relative = (original_path[len(path_prefix):].lstrip("/")
+                    if path_prefix and original_path.startswith(path_prefix)
+                    else original_path.lstrip("/"))
         dest_file = dest_root / relative
 
         if dest_file.exists() and not overwrite:
-            if sha256_file(dest_file) == sha256:
-                log.info(f"SKIP   {relative}  [identico]")
-            else:
-                log.info(f"DIFF   {relative}  [modificado localmente — use --overwrite]")
-            stats["skipped"] += 1
-            continue
+            match = sha256_file(dest_file) == sha256
+            log.info(f"{'SKIP' if match else 'DIFF'}   {relative}  "
+                     f"{'[identico]' if match else '[modificado — use --overwrite]'}")
+            stats["skipped"] += 1; continue
 
         log.info(f"DOWN   {relative}  ({fmt_size(size)})")
-
         if dry_run:
-            log.info("  [dry-run] download nao realizado")
-            continue
+            log.info("  [dry-run] download nao realizado"); continue
 
         try:
-            resp = requests.get(
-                f"{server}/files/{file_id}/download",
-                headers=build_headers(), stream=True, timeout=120,
-            )
-            resp.raise_for_status()
-
+            r = requests.get(f"{server}/files/{file_id}/download",
+                             headers=build_headers(), stream=True, timeout=120)
+            r.raise_for_status()
             dest_file.parent.mkdir(parents=True, exist_ok=True)
-            total = int(resp.headers.get("Content-Length", size))
-            bar = tqdm(
-                total=total, unit="B", unit_scale=True, unit_divisor=1024,
-                desc=f"  {Path(relative).name[:40]}", leave=False,
-                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}]",
-            )
+            total = int(r.headers.get("Content-Length", size))
+            bar = tqdm(total=total, unit="B", unit_scale=True, unit_divisor=1024,
+                       desc=f"  {Path(relative).name[:40]}", leave=False,
+                       bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}]")
             with open(dest_file, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=65536):
-                    f.write(chunk)
-                    bar.update(len(chunk))
+                for chunk in r.iter_content(chunk_size=65536):
+                    f.write(chunk); bar.update(len(chunk))
             bar.close()
 
             if sha256_file(dest_file) != sha256:
                 log.error(f"  INTEGRIDADE FALHOU — {relative} removido")
-                dest_file.unlink()
-                stats["errors"] += 1
-                continue
-
+                dest_file.unlink(); stats["errors"] += 1; continue
             stats["restored"] += 1
 
         except requests.RequestException as e:
-            log.error(f"  ERRO ao baixar {relative}: {e}")
-            stats["errors"] += 1
+            log.error(f"  ERRO: {e}"); stats["errors"] += 1
 
     log.info("")
-    log.info("=" * 50)
-    log.info(f"  Backup      : [{label}]")
+    log.info("=" * 55)
+    log.info(f"  Versao      : {version_key}")
     log.info(f"  Restaurados : {stats['restored']}")
     log.info(f"  Ignorados   : {stats['skipped']}")
     log.info(f"  Erros       : {stats['errors']}")
-    log.info("=" * 50)
+    log.info("=" * 55)
 
-    return stats
+
+# -- Cleanup ------------------------------------------------------------------
+def cleanup_label(label, keep, server=DEFAULT_SERVER):
+    """Executa cleanup em um label especifico."""
+    r = requests.post(
+        f"{server}/backups/{label}/cleanup",
+        json={"backup_label": label, "keep": keep},
+        headers=build_headers(), timeout=30,
+    )
+    r.raise_for_status()
+    result = r.json()
+    removed = result.get("versions_removed", [])
+    storage = result.get("storage_files_removed", 0)
+    log.info(f"  [{label}]  mantidas={result['kept']}  "
+             f"removidas={len(removed)}  storage={storage} arquivo(s) apagado(s)")
+    for v in removed:
+        log.info(f"    - {v}")
+    return result
+
+
+def cleanup(label=None, keep=5, server=DEFAULT_SERVER):
+    """
+    Executa cleanup em um label especifico ou em TODOS os labels.
+    Se label=None, busca todos os labels do servidor e limpa cada um.
+    """
+    if label:
+        labels = [label]
+    else:
+        r = requests.get(f"{server}/backups", headers=build_headers(), timeout=10)
+        r.raise_for_status()
+        labels = [b["label"] for b in r.json()]
+        if not labels:
+            log.info("Nenhum backup encontrado."); return
+        log.info(f"Cleanup em todos os labels ({len(labels)} encontrados), keep={keep}")
+
+    total_versions = 0
+    total_storage  = 0
+    log.info("")
+    for lbl in labels:
+        try:
+            result = cleanup_label(lbl, keep, server)
+            total_versions += len(result.get("versions_removed", []))
+            total_storage  += result.get("storage_files_removed", 0)
+        except requests.RequestException as e:
+            log.error(f"  [{lbl}]  ERRO: {e}")
+
+    if len(labels) > 1:
+        log.info("")
+        log.info("=" * 50)
+        log.info(f"  Labels processados : {len(labels)}")
+        log.info(f"  Versoes removidas  : {total_versions}")
+        log.info(f"  Arquivos do storage: {total_storage}")
+        log.info("=" * 50)
 
 
 # -- CLI ----------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Cliente de backup para Raspberry Pi")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(description="Backup Files — Raspberry Pi v2.0")
+    sub = parser.add_subparsers(dest="command", required=True)
 
-    # -- backup ---------------------------------------------------------------
-    p_backup = subparsers.add_parser("backup", help="Envia arquivos para o servidor")
-    p_backup.add_argument("directory", help="Diretorio a fazer backup")
-    p_backup.add_argument("--label", required=True, help="Identificador unico do backup (ex: notebook-joao)")
-    p_backup.add_argument("--server", default=DEFAULT_SERVER)
-    p_backup.add_argument("--prefix", default=None, help="Prefixo de path no servidor")
-    p_backup.add_argument("--client", default=None, help="Nome do cliente (padrao: hostname)")
-    p_backup.add_argument("--exclude", metavar="PASTA", nargs="+", default=[], help="Subpastas a ignorar")
-    p_backup.add_argument("--workers", type=int, default=4, help="Numero de uploads paralelos (padrao: 4)")
-    p_backup.add_argument("--dry-run", action="store_true", help="Apenas verifica, nao envia")
+    # backup
+    pb = sub.add_parser("backup", help="Cria nova versao de backup")
+    pb.add_argument("directory")
+    pb.add_argument("--label", required=True)
+    pb.add_argument("--server", default=DEFAULT_SERVER)
+    pb.add_argument("--prefix", default=None)
+    pb.add_argument("--client", default=None)
+    pb.add_argument("--exclude", nargs="+", default=[])
+    pb.add_argument("--workers", type=int, default=4)
+    pb.add_argument("--dry-run", action="store_true")
 
-    # -- backups --------------------------------------------------------------
-    p_list = subparsers.add_parser("backups", help="Lista todos os backups disponiveis")
-    p_list.add_argument("--server", default=DEFAULT_SERVER)
-    p_list.add_argument("--client", default=None, help="Filtrar por nome do cliente")
+    # backups
+    pl = sub.add_parser("backups", help="Lista todos os backups")
+    pl.add_argument("--server", default=DEFAULT_SERVER)
+    pl.add_argument("--client", default=None)
 
-    # -- restore --------------------------------------------------------------
-    p_restore = subparsers.add_parser("restore", help="Restaura arquivos de um backup")
-    p_restore.add_argument("destination", help="Pasta de destino")
-    p_restore.add_argument("--label", required=True, help="Identificador do backup a restaurar")
-    p_restore.add_argument("--server", default=DEFAULT_SERVER)
-    p_restore.add_argument("--prefix", default=None, help="Restaurar apenas arquivos com esse prefixo")
-    p_restore.add_argument("--overwrite", action="store_true", help="Sobrescreve arquivos existentes")
-    p_restore.add_argument("--dry-run", action="store_true", help="Apenas lista, nao baixa")
+    # versions
+    pv = sub.add_parser("versions", help="Lista versoes de um backup")
+    pv.add_argument("--label", required=True)
+    pv.add_argument("--server", default=DEFAULT_SERVER)
+
+    # restore
+    pr = sub.add_parser("restore", help="Restaura uma versao especifica")
+    pr.add_argument("destination")
+    pr.add_argument("--label", required=True)
+    pr.add_argument("--version", required=True, dest="version_key",
+                    help="Chave da versao (ex: 2026-04-25T10:42:31)")
+    pr.add_argument("--server", default=DEFAULT_SERVER)
+    pr.add_argument("--prefix", default=None)
+    pr.add_argument("--overwrite", action="store_true")
+    pr.add_argument("--dry-run", action="store_true")
+
+    # cleanup
+    pc = sub.add_parser("cleanup", help="Remove versoes antigas de um ou todos os backups")
+    grp = pc.add_mutually_exclusive_group()
+    grp.add_argument("--label", default=None, help="Label especifico a limpar")
+    grp.add_argument("--all", action="store_true", help="Limpar todos os labels de uma vez")
+    pc.add_argument("--keep", type=int, default=5,
+                    help="Quantas versoes manter por label (padrao: 5)")
+    pc.add_argument("--server", default=DEFAULT_SERVER)
 
     args = parser.parse_args()
 
     if args.command == "backup":
-        log.info(f"Comando  : BACKUP")
-        log.info(f"Servidor : {args.server}")
-        log.info(f"Label    : [{args.label}]")
-        log.info(f"Diretorio: {args.directory}")
-        if args.exclude:
-            log.info(f"Excluindo: {', '.join(args.exclude)}")
-        if args.dry_run:
-            log.info("Modo     : DRY RUN")
-        log.info(f"Workers  : {args.workers}")
-        backup_directory(
-            directory=args.directory,
-            label=args.label,
-            server=args.server,
-            dry_run=args.dry_run,
-            path_prefix=args.prefix,
-            exclude=args.exclude,
-            client_name=args.client,
-            workers=args.workers,
-        )
+        log.info(f"Comando  : BACKUP  label=[{args.label}]")
+        backup_directory(args.directory, args.label, args.server,
+                         args.dry_run, args.prefix, args.exclude,
+                         args.client, args.workers)
 
     elif args.command == "backups":
-        log.info(f"Comando  : BACKUPS")
-        log.info(f"Servidor : {args.server}")
-        list_backups(server=args.server, client_name=args.client)
+        list_backups(args.server, args.client)
+
+    elif args.command == "versions":
+        list_versions(args.label, args.server)
 
     elif args.command == "restore":
-        log.info(f"Comando  : RESTORE")
-        log.info(f"Servidor : {args.server}")
-        log.info(f"Label    : [{args.label}]")
-        log.info(f"Destino  : {args.destination}")
-        if args.dry_run:
-            log.info("Modo     : DRY RUN")
-        restore(
-            destination=args.destination,
-            label=args.label,
-            server=args.server,
-            path_prefix=args.prefix,
-            dry_run=args.dry_run,
-            overwrite=args.overwrite,
-        )
+        log.info(f"Comando  : RESTORE  label=[{args.label}]  versao={args.version_key}")
+        restore(args.destination, args.label, args.version_key,
+                args.server, args.prefix, args.dry_run, args.overwrite)
+
+    elif args.command == "cleanup":
+        if getattr(args, 'all', False):
+            log.info(f"Comando  : CLEANUP  todos os labels  keep={args.keep}")
+            cleanup(label=None, keep=args.keep, server=args.server)
+        elif args.label:
+            log.info(f"Comando  : CLEANUP  label=[{args.label}]  keep={args.keep}")
+            cleanup(label=args.label, keep=args.keep, server=args.server)
+        else:
+            log.error("Informe --label <nome> ou --all")
+            sys.exit(1)
 
 
 if __name__ == "__main__":
