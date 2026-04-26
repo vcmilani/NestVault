@@ -11,8 +11,8 @@ Otimizacoes de performance:
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Header
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, Field
+from typing import Optional, Literal
 import os, hashlib, secrets, base64, tempfile, shutil
 from pathlib import Path
 from datetime import datetime
@@ -52,25 +52,83 @@ def require_api_key(x_api_key: Optional[str] = Header(None)):
         raise HTTPException(401, "API key invalida")
 
 
-# -- Schemas ------------------------------------------------------------------
+# -- Schemas: Requests --------------------------------------------------------
 class BackupCreate(BaseModel):
     label: str
     client_name: Optional[str] = None
     prefix: Optional[str] = None
 
 class VersionCreate(BaseModel):
-    version_key: str
+    version_key: str = Field(..., description="ISO datetime: 2026-04-25T10:42:31")
 
 class VersionFinish(BaseModel):
-    status: str = "done"
+    status: Literal["done", "failed"] = "done"
 
 class CheckRequest(BaseModel):
     backup_label: str
     version_key: str
     original_path: str
-    sha256: str
-    size: int
+    sha256: str = Field(..., min_length=64, max_length=64)
+    size: int = Field(..., ge=0)
     mtime: float
+
+class SyncRequest(BaseModel):
+    backup_label: str
+    version_key: str
+    existing_paths: list[str]
+
+class CleanupRequest(BaseModel):
+    backup_label: str
+    keep: int = Field(5, ge=0, description="Quantas versoes manter")
+
+
+# -- Schemas: Responses -------------------------------------------------------
+class HealthResponse(BaseModel):
+    status: Literal["ok"]
+    version: str
+    time: str
+
+class BackupInfo(BaseModel):
+    """Detalhes de um backup com agregados da ultima versao 'done'."""
+    id: int
+    label: str
+    client_name: Optional[str] = None
+    prefix: Optional[str] = None
+    status: str
+    created_at: str
+    last_version: Optional[str] = None
+    version_count: int
+    file_count: int
+    total_size_bytes: int
+
+class BackupCreatedResponse(BaseModel):
+    created: bool
+    backup: BackupInfo
+
+class BackupDeletedResponse(BaseModel):
+    status: Literal["deleted"]
+    label: str
+
+class VersionInfo(BaseModel):
+    """Detalhes de uma versao especifica."""
+    id: int
+    version_key: str
+    backup_label: str
+    status: Literal["running", "done", "failed"]
+    created_at: str
+    finished_at: Optional[str] = None
+    file_count: int
+    deleted_count: int
+    total_size_bytes: int
+
+class VersionCreatedResponse(BaseModel):
+    created: bool
+    version: VersionInfo
+
+class VersionDeletedResponse(BaseModel):
+    status: Literal["deleted"]
+    version_key: str
+    files_removed_from_storage: int
 
 class CheckResponse(BaseModel):
     needs_upload: bool
@@ -78,18 +136,29 @@ class CheckResponse(BaseModel):
     reason: str
     file_id: Optional[int] = None
 
-class SyncRequest(BaseModel):
-    backup_label: str
-    version_key: str
-    existing_paths: list[str]
+class UploadResponse(BaseModel):
+    status: Literal["registered"]
+    file_id: int
+    sha256: str
+    uploaded: bool = Field(..., description="True se o conteudo foi enviado, False se apenas registrado")
 
 class SyncResponse(BaseModel):
     marked_deleted: list[str]
     deleted_count: int
 
-class CleanupRequest(BaseModel):
-    backup_label: str
-    keep: int = 5
+class FileInfo(BaseModel):
+    id: int
+    original_path: str
+    sha256: str
+    size: int
+    mtime: float
+    status: Literal["active", "deleted"]
+    created_at: str
+
+class CleanupResponse(BaseModel):
+    kept: int
+    versions_removed: list[str]
+    storage_files_removed: int
 
 
 # -- Helpers ------------------------------------------------------------------
@@ -142,7 +211,7 @@ def _get_version_or_404(label: str, version_key: str, db: Session) -> BackupVers
     return v
 
 
-def _version_stats(v: BackupVersion, db: Session) -> dict:
+def _version_stats(v: BackupVersion, db: Session) -> VersionInfo:
     """Stats agregados via SQL — sem carregar VersionFiles."""
     counts = (
         db.query(VersionFile.status, func.count(VersionFile.id))
@@ -162,20 +231,20 @@ def _version_stats(v: BackupVersion, db: Session) -> dict:
         .scalar()
     ) or 0
 
-    return {
-        "id": v.id,
-        "version_key": v.version_key,
-        "backup_label": v.backup_label,
-        "status": v.status,
-        "created_at": str(v.created_at),
-        "finished_at": str(v.finished_at) if v.finished_at else None,
-        "file_count": active_count,
-        "deleted_count": deleted_count,
-        "total_size_bytes": int(total_size),
-    }
+    return VersionInfo(
+        id=v.id,
+        version_key=v.version_key,
+        backup_label=v.backup_label,
+        status=v.status,
+        created_at=str(v.created_at),
+        finished_at=str(v.finished_at) if v.finished_at else None,
+        file_count=active_count,
+        deleted_count=deleted_count,
+        total_size_bytes=int(total_size),
+    )
 
 
-def _backup_info(b: BackupID, db: Session) -> dict:
+def _backup_info(b: BackupID, db: Session) -> BackupInfo:
     """Stats agregados — sem carregar todas as versoes."""
     # Total de versoes done + ultima versao em uma query
     done_versions = (
@@ -206,18 +275,18 @@ def _backup_info(b: BackupID, db: Session) -> dict:
             .scalar() or 0
         )
 
-    return {
-        "id": b.id,
-        "label": b.label,
-        "client_name": b.client_name,
-        "prefix": b.prefix,
-        "status": b.status,
-        "created_at": str(b.created_at),
-        "last_version": latest_key,
-        "version_count": version_count,
-        "file_count": file_count,
-        "total_size_bytes": int(total_size),
-    }
+    return BackupInfo(
+        id=b.id,
+        label=b.label,
+        client_name=b.client_name,
+        prefix=b.prefix,
+        status=b.status,
+        created_at=str(b.created_at),
+        last_version=latest_key,
+        version_count=version_count,
+        file_count=file_count,
+        total_size_bytes=int(total_size),
+    )
 
 
 def _cleanup_orphan_contents(db: Session) -> int:
@@ -252,23 +321,23 @@ def dashboard():
     return HTMLResponse(index.read_text(encoding="utf-8"))
 
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse)
 def health():
-    return {"status": "ok", "version": "2.1.0", "time": datetime.utcnow().isoformat()}
+    return HealthResponse(status="ok", version="2.1.0", time=datetime.utcnow().isoformat())
 
 
 # -- Backups ------------------------------------------------------------------
-@app.post("/backups", dependencies=[Depends(require_api_key)])
+@app.post("/backups", response_model=BackupCreatedResponse, dependencies=[Depends(require_api_key)])
 def create_backup(req: BackupCreate, db: Session = Depends(get_db)):
     existing = db.query(BackupID).filter(BackupID.label == req.label).first()
     if existing:
-        return {"created": False, "backup": _backup_info(existing, db)}
+        return BackupCreatedResponse(created=False, backup=_backup_info(existing, db))
     b = BackupID(label=req.label, client_name=req.client_name, prefix=req.prefix)
     db.add(b); db.commit(); db.refresh(b)
-    return {"created": True, "backup": _backup_info(b, db)}
+    return BackupCreatedResponse(created=True, backup=_backup_info(b, db))
 
 
-@app.get("/backups", dependencies=[Depends(require_api_key)])
+@app.get("/backups", response_model=list[BackupInfo], dependencies=[Depends(require_api_key)])
 def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db)):
     """
     Lista backups com stats — usa uma unica query agregada
@@ -281,12 +350,12 @@ def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db
     return [_backup_info(b, db) for b in backups]
 
 
-@app.get("/backups/{label}", dependencies=[Depends(require_api_key)])
+@app.get("/backups/{label}", response_model=BackupInfo, dependencies=[Depends(require_api_key)])
 def get_backup(label: str, db: Session = Depends(get_db)):
     return _backup_info(_get_backup_or_404(label, db), db)
 
 
-@app.delete("/backups/{label}", dependencies=[Depends(require_api_key)])
+@app.delete("/backups/{label}", response_model=BackupDeletedResponse, dependencies=[Depends(require_api_key)])
 def delete_backup(label: str, db: Session = Depends(get_db)):
     b = _get_backup_or_404(label, db)
     # Cascade da relationship cuida dos VersionFiles automaticamente
@@ -296,11 +365,11 @@ def delete_backup(label: str, db: Session = Depends(get_db)):
     db.delete(b)
     db.commit()
     _cleanup_orphan_contents(db)
-    return {"status": "deleted", "label": label}
+    return BackupDeletedResponse(status="deleted", label=label)
 
 
 # -- Versions -----------------------------------------------------------------
-@app.post("/backups/{label}/versions", dependencies=[Depends(require_api_key)])
+@app.post("/backups/{label}/versions", response_model=VersionCreatedResponse, dependencies=[Depends(require_api_key)])
 def create_version(label: str, req: VersionCreate, db: Session = Depends(get_db)):
     _get_backup_or_404(label, db)
     existing = (db.query(BackupVersion)
@@ -308,13 +377,13 @@ def create_version(label: str, req: VersionCreate, db: Session = Depends(get_db)
                         BackupVersion.version_key  == req.version_key)
                 .first())
     if existing:
-        return {"created": False, "version": _version_stats(existing, db)}
+        return VersionCreatedResponse(created=False, version=_version_stats(existing, db))
     v = BackupVersion(backup_label=label, version_key=req.version_key)
     db.add(v); db.commit(); db.refresh(v)
-    return {"created": True, "version": _version_stats(v, db)}
+    return VersionCreatedResponse(created=True, version=_version_stats(v, db))
 
 
-@app.get("/backups/{label}/versions", dependencies=[Depends(require_api_key)])
+@app.get("/backups/{label}/versions", response_model=list[VersionInfo], dependencies=[Depends(require_api_key)])
 def list_versions(label: str, db: Session = Depends(get_db)):
     """Lista versoes com stats agregados — uma query por versao via _version_stats."""
     _get_backup_or_404(label, db)
@@ -325,12 +394,12 @@ def list_versions(label: str, db: Session = Depends(get_db)):
     return [_version_stats(v, db) for v in versions]
 
 
-@app.get("/backups/{label}/versions/{version_key}", dependencies=[Depends(require_api_key)])
+@app.get("/backups/{label}/versions/{version_key}", response_model=VersionInfo, dependencies=[Depends(require_api_key)])
 def get_version(label: str, version_key: str, db: Session = Depends(get_db)):
     return _version_stats(_get_version_or_404(label, version_key, db), db)
 
 
-@app.patch("/backups/{label}/versions/{version_key}", dependencies=[Depends(require_api_key)])
+@app.patch("/backups/{label}/versions/{version_key}", response_model=VersionInfo, dependencies=[Depends(require_api_key)])
 def finish_version(label: str, version_key: str, req: VersionFinish, db: Session = Depends(get_db)):
     v = _get_version_or_404(label, version_key, db)
     v.status = req.status
@@ -339,13 +408,17 @@ def finish_version(label: str, version_key: str, req: VersionFinish, db: Session
     return _version_stats(v, db)
 
 
-@app.delete("/backups/{label}/versions/{version_key}", dependencies=[Depends(require_api_key)])
+@app.delete("/backups/{label}/versions/{version_key}", response_model=VersionDeletedResponse, dependencies=[Depends(require_api_key)])
 def delete_version(label: str, version_key: str, db: Session = Depends(get_db)):
     v = _get_version_or_404(label, version_key, db)
     db.delete(v)
     db.commit()
     removed = _cleanup_orphan_contents(db)
-    return {"status": "deleted", "version_key": version_key, "files_removed_from_storage": removed}
+    return VersionDeletedResponse(
+        status="deleted",
+        version_key=version_key,
+        files_removed_from_storage=removed,
+    )
 
 
 # -- Check --------------------------------------------------------------------
@@ -377,7 +450,7 @@ def check_file(req: CheckRequest, db: Session = Depends(get_db)):
 
 
 # -- Upload -------------------------------------------------------------------
-@app.post("/upload", dependencies=[Depends(require_api_key)])
+@app.post("/upload", response_model=UploadResponse, dependencies=[Depends(require_api_key)])
 def upload_file(
     file: UploadFile = File(None),
     backup_label:  str           = Header(..., alias="X-Backup-Label"),
@@ -442,8 +515,12 @@ def upload_file(
 
     db.commit()
     db.refresh(vf)
-    return {"status": "registered", "file_id": vf.id, "sha256": sha256,
-            "uploaded": not bool(content_sha256)}
+    return UploadResponse(
+        status="registered",
+        file_id=vf.id,
+        sha256=sha256,
+        uploaded=not bool(content_sha256),
+    )
 
 
 # -- Sync ---------------------------------------------------------------------
@@ -476,7 +553,7 @@ def sync(req: SyncRequest, db: Session = Depends(get_db)):
 
 
 # -- Files --------------------------------------------------------------------
-@app.get("/files", dependencies=[Depends(require_api_key)])
+@app.get("/files", response_model=list[FileInfo], dependencies=[Depends(require_api_key)])
 def list_files(
     backup_label: str,
     version_key: str,
@@ -505,15 +582,15 @@ def list_files(
 
     rows = q.order_by(VersionFile.original_path).all()
     return [
-        {
-            "id": r.id,
-            "original_path": r.original_path,
-            "sha256": r.sha256,
-            "size": r.size or 0,
-            "mtime": r.mtime,
-            "status": r.status,
-            "created_at": str(r.created_at),
-        }
+        FileInfo(
+            id=r.id,
+            original_path=r.original_path,
+            sha256=r.sha256,
+            size=r.size or 0,
+            mtime=r.mtime,
+            status=r.status,
+            created_at=str(r.created_at),
+        )
         for r in rows
     ]
 
@@ -537,7 +614,7 @@ def download_file(file_id: int, db: Session = Depends(get_db)):
 
 
 # -- Cleanup ------------------------------------------------------------------
-@app.post("/backups/{label}/cleanup", dependencies=[Depends(require_api_key)])
+@app.post("/backups/{label}/cleanup", response_model=CleanupResponse, dependencies=[Depends(require_api_key)])
 def cleanup_versions(label: str, req: CleanupRequest, db: Session = Depends(get_db)):
     _get_backup_or_404(label, db)
     done_versions = (db.query(BackupVersion.id, BackupVersion.version_key)
@@ -547,7 +624,7 @@ def cleanup_versions(label: str, req: CleanupRequest, db: Session = Depends(get_
                      .all())
     to_delete = done_versions[req.keep:]
     if not to_delete:
-        return {"kept": req.keep, "versions_removed": [], "storage_files_removed": 0}
+        return CleanupResponse(kept=req.keep, versions_removed=[], storage_files_removed=0)
 
     ids_to_delete = [v[0] for v in to_delete]
     keys_removed  = [v[1] for v in to_delete]
@@ -558,8 +635,8 @@ def cleanup_versions(label: str, req: CleanupRequest, db: Session = Depends(get_
     )
     db.commit()
     orphans_removed = _cleanup_orphan_contents(db)
-    return {
-        "kept": req.keep,
-        "versions_removed": keys_removed,
-        "storage_files_removed": orphans_removed,
-    }
+    return CleanupResponse(
+        kept=req.keep,
+        versions_removed=keys_removed,
+        storage_files_removed=orphans_removed,
+    )
