@@ -514,6 +514,241 @@ O conteúdo de cada arquivo é armazenado **uma única vez**, independente de qu
 
 ---
 
+## 📐 Contrato da API (Schemas)
+
+Todos os endpoints possuem **schemas Pydantic explícitos** para entrada e saída. O Swagger UI (`/docs`) mostra todos os formatos detalhadamente, e o `openapi.json` pode ser usado para gerar clientes em outras linguagens.
+
+### Convenções gerais
+
+- Datas e horários: strings ISO 8601 (`2026-04-25T10:42:31`)
+- Tamanhos: sempre em bytes
+- SHA-256: string hexadecimal de 64 caracteres
+- Campos enumerados usam `Literal` (validação estrita do valor)
+
+---
+
+### Schemas de Request
+
+#### `BackupCreate`
+```json
+{
+  "label": "notebook-joao",        // obrigatório, único
+  "client_name": "notebook-joao",  // opcional
+  "prefix": "/home/joao/docs"      // opcional
+}
+```
+
+#### `VersionCreate`
+```json
+{
+  "version_key": "2026-04-25T10:42:31"  // ISO datetime
+}
+```
+
+#### `VersionFinish`
+```json
+{
+  "status": "done"  // "done" | "failed"
+}
+```
+
+#### `CheckRequest`
+```json
+{
+  "backup_label": "notebook-joao",
+  "version_key":  "2026-04-25T10:42:31",
+  "original_path": "/home/joao/docs/relatorio.pdf",
+  "sha256": "abc123...",      // exatamente 64 chars
+  "size":   204800,           // bytes, >= 0
+  "mtime":  1713700000.0      // epoch float
+}
+```
+
+#### `SyncRequest`
+```json
+{
+  "backup_label":   "notebook-joao",
+  "version_key":    "2026-04-25T10:42:31",
+  "existing_paths": ["/home/joao/docs/a.pdf", "/home/joao/docs/b.pdf"]
+}
+```
+
+#### `CleanupRequest`
+```json
+{
+  "backup_label": "notebook-joao",
+  "keep": 5      // >= 0
+}
+```
+
+---
+
+### Schemas de Response
+
+#### `HealthResponse`
+```json
+{
+  "status":  "ok",
+  "version": "2.1.0",
+  "time":    "2026-04-25T10:42:31.123456"
+}
+```
+
+#### `BackupInfo`
+Stats agregados refletem a **última versão `done`** do backup.
+```json
+{
+  "id": 1,
+  "label": "notebook-joao",
+  "client_name": "notebook-joao",
+  "prefix": "/home/joao",
+  "status": "active",
+  "created_at": "2026-04-01 00:00:00",
+  "last_version": "2026-04-25T10:42:31",
+  "version_count": 8,
+  "file_count": 142,
+  "total_size_bytes": 1503238553
+}
+```
+
+#### `BackupCreatedResponse`
+```json
+{
+  "created": true,    // false se já existia (idempotente)
+  "backup":  { /* BackupInfo */ }
+}
+```
+
+#### `BackupDeletedResponse`
+```json
+{
+  "status": "deleted",
+  "label":  "notebook-joao"
+}
+```
+
+#### `VersionInfo`
+```json
+{
+  "id": 42,
+  "version_key": "2026-04-25T10:42:31",
+  "backup_label": "notebook-joao",
+  "status": "done",                         // "running" | "done" | "failed"
+  "created_at": "2026-04-25 10:42:31",
+  "finished_at": "2026-04-25 10:45:12",
+  "file_count": 142,                        // arquivos active
+  "deleted_count": 1,                       // arquivos marcados como deleted
+  "total_size_bytes": 1503238553
+}
+```
+
+#### `VersionCreatedResponse`
+```json
+{
+  "created": true,
+  "version": { /* VersionInfo */ }
+}
+```
+
+#### `VersionDeletedResponse`
+```json
+{
+  "status": "deleted",
+  "version_key": "2026-04-10T02:00:00",
+  "files_removed_from_storage": 4   // contents órfãos removidos
+}
+```
+
+#### `CheckResponse`
+```json
+{
+  "needs_upload": true,
+  "content_exists": false,           // se true, cliente pode pular o body do upload
+  "reason": "Upload necessario",
+  "file_id": null                    // não null se já estava registrado
+}
+```
+
+#### `UploadResponse`
+```json
+{
+  "status": "registered",
+  "file_id": 1234,
+  "sha256": "abc123...",
+  "uploaded": true   // false = só registrou (conteúdo já estava no storage)
+}
+```
+
+#### `SyncResponse`
+```json
+{
+  "marked_deleted": ["/home/joao/docs/antigo.pdf"],
+  "deleted_count": 1
+}
+```
+
+#### `FileInfo`
+```json
+{
+  "id": 1234,
+  "original_path": "/home/joao/docs/relatorio.pdf",
+  "sha256": "abc123...",
+  "size": 204800,
+  "mtime": 1713700000.0,
+  "status": "active",                       // "active" | "deleted"
+  "created_at": "2026-04-25 10:42:35"
+}
+```
+
+#### `CleanupResponse`
+```json
+{
+  "kept": 5,
+  "versions_removed": ["2026-04-10T02:00:00", "2026-04-03T02:00:00"],
+  "storage_files_removed": 4
+}
+```
+
+---
+
+### Mapeamento Endpoint → Schemas
+
+| Endpoint | Request | Response |
+|---|---|---|
+| `GET /health` | — | `HealthResponse` |
+| `POST /backups` | `BackupCreate` | `BackupCreatedResponse` |
+| `GET /backups` | — | `list[BackupInfo]` |
+| `GET /backups/{label}` | — | `BackupInfo` |
+| `DELETE /backups/{label}` | — | `BackupDeletedResponse` |
+| `POST /backups/{label}/versions` | `VersionCreate` | `VersionCreatedResponse` |
+| `GET /backups/{label}/versions` | — | `list[VersionInfo]` |
+| `GET /backups/{label}/versions/{key}` | — | `VersionInfo` |
+| `PATCH /backups/{label}/versions/{key}` | `VersionFinish` | `VersionInfo` |
+| `DELETE /backups/{label}/versions/{key}` | — | `VersionDeletedResponse` |
+| `POST /backups/{label}/cleanup` | `CleanupRequest` | `CleanupResponse` |
+| `POST /check` | `CheckRequest` | `CheckResponse` |
+| `POST /upload` | multipart + headers | `UploadResponse` |
+| `POST /sync` | `SyncRequest` | `SyncResponse` |
+| `GET /files` | query: `backup_label`, `version_key`, `include_deleted` | `list[FileInfo]` |
+| `GET /files/{id}/download` | — | binary stream |
+
+---
+
+### Headers especiais
+
+Endpoints que usam headers customizados:
+
+| Header | Endpoint | Descrição |
+|---|---|---|
+| `X-API-Key` | todos (se autenticação ativa) | Chave de autenticação |
+| `X-Backup-Label` | `POST /upload` | Label do backup |
+| `X-Version-Key` | `POST /upload` | Chave da versão |
+| `X-Original-Path` | `POST /upload` | Path original (base64-encoded) |
+| `X-Mtime` | `POST /upload` | Modification time (epoch float) |
+| `X-Content-Sha256` | `POST /upload` | SHA-256 do conteúdo (modo "só registrar", sem body) |
+
+---
+
 ## 📊 Documentação automática
 
 Com o servidor rodando:
