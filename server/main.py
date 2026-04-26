@@ -617,12 +617,13 @@ def download_file(file_id: int, db: Session = Depends(get_db)):
 @app.post("/backups/{label}/cleanup", response_model=CleanupResponse, dependencies=[Depends(require_api_key)])
 def cleanup_versions(label: str, req: CleanupRequest, db: Session = Depends(get_db)):
     _get_backup_or_404(label, db)
-    done_versions = (db.query(BackupVersion.id, BackupVersion.version_key)
-                     .filter(BackupVersion.backup_label == label,
-                             BackupVersion.status       == "done")
-                     .order_by(BackupVersion.version_key.desc())
-                     .all())
-    to_delete = done_versions[req.keep:]
+    # Considera TODAS as versoes (done, failed, running) ordenadas por data desc.
+    # As `keep` mais recentes sao mantidas independente do status.
+    all_versions = (db.query(BackupVersion.id, BackupVersion.version_key)
+                    .filter(BackupVersion.backup_label == label)
+                    .order_by(BackupVersion.version_key.desc())
+                    .all())
+    to_delete = all_versions[req.keep:]
     if not to_delete:
         return CleanupResponse(kept=req.keep, versions_removed=[], storage_files_removed=0)
 
