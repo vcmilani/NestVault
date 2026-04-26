@@ -51,10 +51,14 @@ IGNORED_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 
 
 # -- Helpers ------------------------------------------------------------------
+# Buffer maior reduz overhead de syscalls em arquivos grandes
+CHUNK_SIZE = 1024 * 1024  # 1 MB
+
 def sha256_file(path: Path) -> str:
+    """Calcula sha256 lendo o arquivo em chunks. Single-pass, baixa memoria."""
     h = hashlib.sha256()
-    with open(path, "rb") as f:
-        while chunk := f.read(65536):
+    with open(path, "rb", buffering=0) as f:
+        while chunk := f.read(CHUNK_SIZE):
             h.update(chunk)
     return h.hexdigest()
 
@@ -80,34 +84,38 @@ def now_key() -> str:
 
 # -- API calls ----------------------------------------------------------------
 def ensure_backup(server, label, client_name, prefix):
-    r = requests.post(f"{server}/backups",
+    r = _session.post(f"{server}/backups",
                       json={"label": label, "client_name": client_name, "prefix": prefix},
                       headers=build_headers(), timeout=10)
     r.raise_for_status(); return r.json()
 
 def create_version(server, label, version_key):
-    r = requests.post(f"{server}/backups/{label}/versions",
+    r = _session.post(f"{server}/backups/{label}/versions",
                       json={"version_key": version_key},
                       headers=build_headers(), timeout=10)
     r.raise_for_status(); return r.json()
 
 def finish_version(server, label, version_key, status="done"):
-    r = requests.patch(f"{server}/backups/{label}/versions/{version_key}",
+    r = _session.patch(f"{server}/backups/{label}/versions/{version_key}",
                        json={"status": status},
                        headers=build_headers(), timeout=10)
     r.raise_for_status()
 
 def check_file(server, label, version_key, original_path, sha256, size, mtime):
-    r = requests.post(f"{server}/check",
+    r = _session.post(f"{server}/check",
                       json={"backup_label": label, "version_key": version_key,
                             "original_path": original_path,
                             "sha256": sha256, "size": size, "mtime": mtime},
                       headers=build_headers(), timeout=10)
     r.raise_for_status(); return r.json()
 
+# Sessao HTTP reutilizada — evita TCP handshake a cada request
+_session = requests.Session()
+_session.headers.update({"Connection": "keep-alive"})
+
 def register_file(server, label, version_key, original_path, mtime, sha256):
     """Registra arquivo cujo conteudo ja existe no storage (sem upload)."""
-    r = requests.post(
+    r = _session.post(
         f"{server}/upload",
         headers=build_headers({
             "X-Backup-Label":   label,
@@ -131,7 +139,7 @@ def upload_file(server, local_path: Path, label, version_key, original_path, mti
             bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}]",
         )
         monitor = MultipartEncoderMonitor(encoder, lambda m: bar.update(m.bytes_read - bar.n))
-        r = requests.post(
+        r = _session.post(
             f"{server}/upload",
             data=monitor,
             headers=build_headers({
@@ -147,7 +155,7 @@ def upload_file(server, local_path: Path, label, version_key, original_path, mti
     r.raise_for_status(); return r.json()
 
 def sync_version(server, label, version_key, existing_paths):
-    r = requests.post(f"{server}/sync",
+    r = _session.post(f"{server}/sync",
                       json={"backup_label": label, "version_key": version_key,
                             "existing_paths": existing_paths},
                       headers=build_headers(), timeout=30)
@@ -282,7 +290,7 @@ def _is_excluded(fp: Path, root: Path, ex: str) -> bool:
 def list_backups(server=DEFAULT_SERVER, client_name=None):
     params = {}
     if client_name: params["client_name"] = client_name
-    r = requests.get(f"{server}/backups", headers=build_headers(), params=params, timeout=10)
+    r = _session.get(f"{server}/backups", headers=build_headers(), params=params, timeout=10)
     r.raise_for_status()
     backups = r.json()
     if not backups:
@@ -301,7 +309,7 @@ def list_backups(server=DEFAULT_SERVER, client_name=None):
 
 # -- List versions ------------------------------------------------------------
 def list_versions(label, server=DEFAULT_SERVER):
-    r = requests.get(f"{server}/backups/{label}/versions",
+    r = _session.get(f"{server}/backups/{label}/versions",
                      headers=build_headers(), timeout=10)
     r.raise_for_status()
     versions = r.json()
@@ -334,7 +342,7 @@ def restore(destination, label, version_key, server=DEFAULT_SERVER,
     if path_prefix: params["path_prefix"] = path_prefix
 
     try:
-        r = requests.get(f"{server}/files", headers=build_headers(), params=params, timeout=10)
+        r = _session.get(f"{server}/files", headers=build_headers(), params=params, timeout=10)
         r.raise_for_status()
         files = r.json()
     except requests.RequestException as e:
@@ -368,7 +376,7 @@ def restore(destination, label, version_key, server=DEFAULT_SERVER,
             log.info("  [dry-run] download nao realizado"); continue
 
         try:
-            r = requests.get(f"{server}/files/{file_id}/download",
+            r = _session.get(f"{server}/files/{file_id}/download",
                              headers=build_headers(), stream=True, timeout=120)
             r.raise_for_status()
             dest_file.parent.mkdir(parents=True, exist_ok=True)
@@ -401,7 +409,7 @@ def restore(destination, label, version_key, server=DEFAULT_SERVER,
 # -- Cleanup ------------------------------------------------------------------
 def cleanup_label(label, keep, server=DEFAULT_SERVER):
     """Executa cleanup em um label especifico."""
-    r = requests.post(
+    r = _session.post(
         f"{server}/backups/{label}/cleanup",
         json={"backup_label": label, "keep": keep},
         headers=build_headers(), timeout=30,
@@ -425,7 +433,7 @@ def cleanup(label=None, keep=5, server=DEFAULT_SERVER):
     if label:
         labels = [label]
     else:
-        r = requests.get(f"{server}/backups", headers=build_headers(), timeout=10)
+        r = _session.get(f"{server}/backups", headers=build_headers(), timeout=10)
         r.raise_for_status()
         labels = [b["label"] for b in r.json()]
         if not labels:
