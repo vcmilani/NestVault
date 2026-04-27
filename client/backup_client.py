@@ -20,7 +20,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from tqdm import tqdm
-from requests_toolbelt import MultipartEncoder, MultipartEncoderMonitor
 
 # -- Config -------------------------------------------------------------------
 DEFAULT_SERVER = "http://localhost:8000"
@@ -128,31 +127,59 @@ def register_file(server, label, version_key, original_path, mtime, sha256):
     )
     r.raise_for_status(); return r.json()
 
+class _ProgressReader:
+    """
+    Wrapper leve em torno de um arquivo aberto.
+    Intercepta read() para atualizar a barra de progresso.
+    Sem overhead de encoding MIME — stream binario puro.
+    """
+    def __init__(self, path: Path, bar: tqdm):
+        self._f   = open(path, "rb", buffering=0)
+        self._bar = bar
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self._f.read(size)
+        if chunk:
+            self._bar.update(len(chunk))
+        return chunk
+
+    def close(self):
+        self._f.close()
+
+
 def upload_file(server, local_path: Path, label, version_key, original_path, mtime):
-    """Faz upload do conteudo e registra o arquivo na versao."""
+    """
+    Upload de arquivo como stream binario puro (sem multipart).
+    O body da request E o arquivo diretamente — sem encoding MIME.
+    A barra de progresso e atualizada via _ProgressReader com overhead minimo.
+    """
     file_size = local_path.stat().st_size
-    with open(local_path, "rb") as f:
-        encoder = MultipartEncoder(fields={"file": (local_path.name, f, "application/octet-stream")})
-        bar = tqdm(
-            total=file_size, unit="B", unit_scale=True, unit_divisor=1024,
-            desc=f"  {local_path.name[:40]}", leave=False,
-            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}]",
-        )
-        monitor = MultipartEncoderMonitor(encoder, lambda m: bar.update(m.bytes_read - bar.n))
+    bar = tqdm(
+        total=file_size, unit="B", unit_scale=True, unit_divisor=1024,
+        desc=f"  {local_path.name[:40]}", leave=False,
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}]",
+    )
+    reader = _ProgressReader(local_path, bar)
+    try:
         r = _session.post(
             f"{server}/upload",
-            data=monitor,
+            data=reader,
             headers=build_headers({
                 "X-Backup-Label":  label,
                 "X-Version-Key":   version_key,
                 "X-Original-Path": encode_path(original_path),
                 "X-Mtime":         str(mtime),
-                "Content-Type":    monitor.content_type,
+                "Content-Type":    "application/octet-stream",
+                "Content-Length":  str(file_size),
             }),
             timeout=120,
         )
+    finally:
         bar.close()
-    r.raise_for_status(); return r.json()
+        reader.close()
+    r.raise_for_status()
+    return r.json()
+
 
 def sync_version(server, label, version_key, existing_paths):
     r = _session.post(f"{server}/sync",

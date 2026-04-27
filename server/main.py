@@ -8,12 +8,12 @@ Otimizacoes de performance:
 - Cleanup de orfaos em uma unica query
 """
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Header
+from fastapi import FastAPI, Request, HTTPException, Depends, Header
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
-import os, hashlib, secrets, base64, tempfile, shutil
+import os, hashlib, secrets, base64, shutil
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
@@ -168,29 +168,24 @@ def _content_path(sha256: str) -> Path:
     return dest
 
 
-def _stream_upload_to_disk(upload: UploadFile) -> tuple[str, int, Path]:
+async def _stream_request_to_disk(request: Request) -> tuple[str, int, Path]:
     """
-    Faz streaming do upload para um arquivo temporario calculando o sha256
-    durante a leitura. Retorna (sha256, size, temp_path).
-    Single-pass: nao carrega o arquivo na memoria.
+    Faz streaming do body raw da request para disco calculando sha256 em paralelo.
+    Sem multipart — o body e o arquivo diretamente (binario puro).
+    Retorna (sha256, size, tmp_path).
     """
-    h = hashlib.sha256()
+    h    = hashlib.sha256()
     size = 0
-    tmp = tempfile.NamedTemporaryFile(delete=False, dir=STORAGE_DIR, prefix="upload_")
+    tmp_path = STORAGE_DIR / f"_tmp_{os.urandom(8).hex()}"
     try:
-        while True:
-            chunk = upload.file.read(CHUNK_SIZE)
-            if not chunk:
-                break
-            h.update(chunk)
-            tmp.write(chunk)
-            size += len(chunk)
-        tmp.flush()
-        tmp.close()
-        return h.hexdigest(), size, Path(tmp.name)
+        with open(tmp_path, "wb", buffering=0) as f:
+            async for chunk in request.stream():
+                h.update(chunk)
+                f.write(chunk)
+                size += len(chunk)
+        return h.hexdigest(), size, tmp_path
     except Exception:
-        tmp.close()
-        Path(tmp.name).unlink(missing_ok=True)
+        tmp_path.unlink(missing_ok=True)
         raise
 
 
@@ -451,17 +446,20 @@ def check_file(req: CheckRequest, db: Session = Depends(get_db)):
 
 # -- Upload -------------------------------------------------------------------
 @app.post("/upload", response_model=UploadResponse, dependencies=[Depends(require_api_key)])
-def upload_file(
-    file: UploadFile = File(None),
-    backup_label:  str           = Header(..., alias="X-Backup-Label"),
-    version_key:   str           = Header(..., alias="X-Version-Key"),
-    original_path: str           = Header(..., alias="X-Original-Path"),
-    mtime:         float         = Header(..., alias="X-Mtime"),
+async def upload_file(
+    request: Request,
+    backup_label:   str           = Header(..., alias="X-Backup-Label"),
+    version_key:    str           = Header(..., alias="X-Version-Key"),
+    original_path:  str           = Header(..., alias="X-Original-Path"),
+    mtime:          float         = Header(..., alias="X-Mtime"),
     content_sha256: Optional[str] = Header(None, alias="X-Content-Sha256"),
     db: Session = Depends(get_db),
 ):
     """
-    Streaming upload — nao carrega o arquivo na RAM.
+    Stream binario puro — sem multipart.
+    O body da request E o arquivo diretamente. Sem encoding/decoding MIME.
+    Metadados vao nos headers X-*.
+    Modo "so registrar": enviar X-Content-Sha256 sem body (content_exists=True no /check).
     """
     v = _get_version_or_404(backup_label, version_key, db)
 
@@ -470,26 +468,21 @@ def upload_file(
     except Exception:
         pass
 
-    # Modo "so registrar" — content_exists no /check
-    if content_sha256 and not file:
+    # Modo "so registrar" — conteudo ja existe no storage
+    if content_sha256:
         fc = db.query(FileContent).filter(FileContent.sha256 == content_sha256).first()
         if not fc:
             raise HTTPException(400, f"Conteudo sha256={content_sha256} nao encontrado no storage")
         sha256 = content_sha256
     else:
-        if not file:
-            raise HTTPException(400, "Body do arquivo obrigatorio quando conteudo nao existe no storage")
-
-        # Stream para temp file calculando hash em paralelo
-        sha256, size, tmp_path = _stream_upload_to_disk(file)
+        # Stream binario puro para disco + hash em paralelo
+        sha256, size, tmp_path = await _stream_request_to_disk(request)
 
         try:
             fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
             if fc:
-                # Conteudo ja existia — descarta o temp
                 tmp_path.unlink(missing_ok=True)
             else:
-                # Move atomico para o destino final
                 dest = _content_path(sha256)
                 shutil.move(str(tmp_path), str(dest))
                 fc = FileContent(sha256=sha256, stored_at=str(dest), size=size)

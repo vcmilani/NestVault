@@ -4,7 +4,7 @@ Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **iso
 
 Cada execução de backup cria uma nova versão dentro do label. O servidor armazena o conteúdo físico apenas uma vez por sha256 — versões diferentes que compartilham arquivos idênticos não duplicam o storage. Arquivos deletados são marcados na versão, nunca apagados do storage diretamente.
 
-> **v2.1** — otimizações de performance: streaming upload, queries agregadas, WAL no SQLite, índices compostos, session HTTP reutilizada no cliente.
+> **v2.1** — upload por stream binário puro (sem multipart), queries agregadas, WAL no SQLite, índices compostos, session HTTP reutilizada no cliente. Dependência `requests-toolbelt` removida.
 
 ---
 
@@ -151,6 +151,8 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+> Dependências do cliente: `requests` e `tqdm` apenas. `requests-toolbelt` não é mais necessário.
 
 ### 2. Configurar API key
 
@@ -436,15 +438,16 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 
 | Componente | Otimização | Ganho típico |
 |---|---|---|
-| **Upload** | Streaming para temp file (não carrega na RAM) | ✅ Arquivos grandes não travam mais a Pi |
-| **Hash** | Calculado em paralelo com a escrita do stream | ~50% mais rápido |
+| **Upload (protocolo)** | Stream binário puro — sem multipart/MIME | Elimina encoding no cliente e parsing no servidor |
+| **Upload (memória)** | Stream para disco via `request.stream()` | Arquivos grandes não travam a Pi |
+| **Upload (hash)** | SHA-256 calculado em paralelo com a escrita | Single-pass — sem segunda leitura do arquivo |
+| **Cliente** | `_ProgressReader` leve + `Session` HTTP reutilizada | Sem overhead de toolbelt, TCP keep-alive |
 | **Stats** | Queries agregadas (`func.count`, `func.sum`) | 10x+ mais rápido em backups grandes |
 | **`/files`** | JOIN explícito ao invés de lazy load | Elimina N+1 queries |
 | **Cleanup** | Subquery `WHERE NOT IN` em vez de loop | 100x+ mais rápido |
 | **Delete** | Cascade automático via SQLAlchemy | Bulk delete |
 | **SQLite** | WAL mode + cache 64MB + mmap 256MB | Leituras paralelas com escritas |
 | **Índices** | Compostos em `(version_id, status)` etc. | Queries do dashboard rápidas |
-| **Cliente** | Buffer 1MB + `Session` HTTP reutilizada | TCP keep-alive elimina handshakes |
 
 ---
 
@@ -595,7 +598,7 @@ Todos os endpoints possuem **schemas Pydantic explícitos** para entrada e saíd
 ```
 
 #### `BackupInfo`
-Stats agregados refletem a **última versão `done`** do backup.
+Stats agregados refletem a **última versão** do backup (qualquer status).
 ```json
 {
   "id": 1,
@@ -727,7 +730,7 @@ Stats agregados refletem a **última versão `done`** do backup.
 | `DELETE /backups/{label}/versions/{key}` | — | `VersionDeletedResponse` |
 | `POST /backups/{label}/cleanup` | `CleanupRequest` | `CleanupResponse` |
 | `POST /check` | `CheckRequest` | `CheckResponse` |
-| `POST /upload` | multipart + headers | `UploadResponse` |
+| `POST /upload` | binary stream + headers `X-*` | `UploadResponse` |
 | `POST /sync` | `SyncRequest` | `SyncResponse` |
 | `GET /files` | query: `backup_label`, `version_key`, `include_deleted` | `list[FileInfo]` |
 | `GET /files/{id}/download` | — | binary stream |
