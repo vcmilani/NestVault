@@ -78,7 +78,7 @@ def fmt_size(size: int) -> str:
     return f"{size:.1f} PB"
 
 def now_key() -> str:
-    return datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    return datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S")
 
 
 # -- API calls ----------------------------------------------------------------
