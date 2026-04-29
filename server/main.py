@@ -117,6 +117,7 @@ class VersionInfo(BaseModel):
     status: Literal["running", "done", "failed"]
     created_at: str
     finished_at: Optional[str] = None
+    duration_seconds: Optional[float] = Field(None, description="Duracao do backup em segundos")
     file_count: int
     deleted_count: int
     total_size_bytes: int
@@ -226,6 +227,10 @@ def _version_stats(v: BackupVersion, db: Session) -> VersionInfo:
         .scalar()
     ) or 0
 
+    duration = None
+    if v.finished_at and v.created_at:
+        duration = round((v.finished_at - v.created_at).total_seconds(), 1)
+
     return VersionInfo(
         id=v.id,
         version_key=v.version_key,
@@ -233,6 +238,7 @@ def _version_stats(v: BackupVersion, db: Session) -> VersionInfo:
         status=v.status,
         created_at=str(v.created_at),
         finished_at=str(v.finished_at) if v.finished_at else None,
+        duration_seconds=duration,
         file_count=active_count,
         deleted_count=deleted_count,
         total_size_bytes=int(total_size),

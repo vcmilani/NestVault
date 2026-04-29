@@ -344,13 +344,22 @@ def list_versions(label, server=DEFAULT_SERVER):
         log.info(f"Nenhuma versao encontrada em [{label}]."); return
     log.info("")
     log.info(f"Versoes de [{label}]:")
-    log.info(f"  {'VERSAO':22}  {'STATUS':8}  {'ARQUIVOS':>8}  {'DELETADOS':>9}  {'TAMANHO':>10}")
-    log.info("  " + "-" * 65)
+    log.info(f"  {'VERSAO':22}  {'STATUS':8}  {'ARQUIVOS':>8}  {'DELETADOS':>9}  {'TAMANHO':>10}  {'DURACAO':>10}")
+    log.info("  " + "-" * 80)
     for v in versions:
+        dur = v.get("duration_seconds")
+        if dur is None:
+            dur_str = "—"
+        elif dur < 60:
+            dur_str = f"{dur:.0f}s"
+        elif dur < 3600:
+            dur_str = f"{dur/60:.1f}min"
+        else:
+            dur_str = f"{dur/3600:.1f}h"
         log.info(
             f"  {v['version_key']:22}  {v['status']:8}  "
             f"{v['file_count']:>8}  {v['deleted_count']:>9}  "
-            f"{fmt_size(v['total_size_bytes']):>10}"
+            f"{fmt_size(v['total_size_bytes']):>10}  {dur_str:>10}"
         )
     log.info("")
 

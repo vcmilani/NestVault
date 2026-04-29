@@ -176,6 +176,13 @@
 
   const H = () => ({'X-API-Key': API_KEY});
 
+  const fmtDuration = s => {
+    if (s === null || s === undefined) return '—';
+    if (s < 60)    return s.toFixed(0) + 's';
+    if (s < 3600)  return (s / 60).toFixed(1) + 'min';
+    return (s / 3600).toFixed(1) + 'h';
+  };
+
   const fmtSize = b => {
     const u = ['B','KB','MB','GB','TB'];
     for (const unit of u) { if (b < 1024) return b.toFixed(1)+' '+unit; b /= 1024; }
@@ -335,10 +342,11 @@
           <td class="num-cell">${v.file_count}</td>
           <td class="num-cell dim-cell">${v.deleted_count} deletados</td>
           <td class="size-cell">${fmtSize(v.total_size_bytes)}</td>
+          <td class="num-cell dim-cell">${fmtDuration(v.duration_seconds)}</td>
           <td class="date-cell">${fmtDate(v.created_at)}</td>
         </tr>
         <tr class="files-row" id="frow-${esc(vid)}" style="display:${isExp?'':'none'}">
-          <td colspan="6">
+          <td colspan="7">
             <div class="files-container">
               <div class="files-inner" id="finner-${esc(vid)}">
                 <div class="loading">Carregando</div>
@@ -355,6 +363,7 @@
           <th style="text-align:right">Arquivos</th>
           <th style="text-align:right">Deletados</th>
           <th style="text-align:right">Tamanho</th>
+          <th style="text-align:right">Duração</th>
           <th>Criada em</th>
         </tr></thead>
         <tbody>${rows}</tbody>
