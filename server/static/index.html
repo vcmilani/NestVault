@@ -573,7 +573,7 @@
     if (!resp.ok) { showError('Servidor indisponível'); return; }
     const test = await fetch('/backups', {headers: H()});
     if (test.status === 401) { showLogin(); }
-    else { loadAll(); setInterval(loadAll, 30000); }
+    else { loadAll(); }
   }
   init();
 </script>
