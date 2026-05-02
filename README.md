@@ -1,9 +1,11 @@
-# 🗄️ Backup Files — Raspberry Pi  `v2.3`
+# 🗄️ Backup Files — Raspberry Pi  `v2.4`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
 Cada execução de backup cria uma nova versão dentro do label. O servidor armazena o conteúdo físico apenas uma vez por sha256 — versões diferentes que compartilham arquivos idênticos não duplicam o storage.
 
+> **v2.4** — comparação entre versões no dashboard: selecione duas versões de um backup e veja exatamente quais arquivos foram adicionados, removidos ou modificados.
+>
 > **v2.3** — limpeza automática por espaço em disco: ao finalizar cada backup, o servidor verifica o espaço livre no filesystem onde o storage está montado. Se menor que 5%, versões antigas são apagadas automaticamente, mantendo sempre ao menos 1 versão por label.
 >
 > **v2.2** — remoção do conceito de soft-delete: arquivos ausentes em uma versão simplesmente não aparecem nela. Cada versão é um snapshot completo e independente.
@@ -478,11 +480,19 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 - **Stats globais** — total de backups, versões, arquivos, storage total
 - **Tabela de backups** — clique em um label para expandir as versões
 - **Versões** — clique em uma versão para ver os arquivos
+- **Comparação de versões** — selecione duas versões com as checkboxes e clique em ⇄ Comparar: veja arquivos adicionados, removidos, modificados e o delta de tamanho de cada um
 - **Auto-refresh** a cada 30 segundos
 
 ---
 
 ## ⚡ Otimizações
+
+### v2.4
+
+| Componente | Mudança |
+|---|---|
+| **Comparação de versões** | Endpoint `GET /backups/{label}/compare` retorna diff completo (adicionados, removidos, modificados) entre duas versões via 2 queries SQL + set operations em Python |
+| **Dashboard** | Checkboxes nas versões + painel de diff com resumo e tabelas por categoria (adicionados, removidos, modificados) |
 
 ### v2.3
 
@@ -568,6 +578,7 @@ O conteúdo de cada arquivo é armazenado **uma única vez**, independente de qu
 | `PATCH` | `/backups/{label}/versions/{key}` | Finaliza versão (done/failed) |
 | `DELETE` | `/backups/{label}/versions/{key}` | Remove versão |
 | `POST` | `/backups/{label}/cleanup` | Mantém apenas `keep` versões mais recentes |
+| `GET` | `/backups/{label}/compare` | Diff de arquivos entre duas versões (`?v1=...&v2=...`) |
 
 ### Arquivos
 
@@ -775,6 +786,30 @@ Stats agregados refletem a **última versão** do backup (qualquer status).
 }
 ```
 
+#### `CompareResponse`
+```json
+{
+  "label": "notebook-joao",
+  "v1": "2026-04-24T02:00:00",
+  "v2": "2026-04-25T10:42:31",
+  "added": [
+    { "original_path": "/home/joao/docs/novo.pdf", "sha256": "abc...", "size": 40960, "mtime": 1713800000.0 }
+  ],
+  "deleted": [
+    { "original_path": "/home/joao/docs/velho.txt", "sha256": "def...", "size": 1024, "mtime": 1713700000.0 }
+  ],
+  "modified": [
+    {
+      "original_path": "/home/joao/docs/relatorio.pdf",
+      "v1_sha256": "aaa...", "v2_sha256": "bbb...",
+      "v1_size": 204800, "v2_size": 215040,
+      "size_delta": 10240
+    }
+  ],
+  "summary_unchanged": 139
+}
+```
+
 ---
 
 ### Mapeamento Endpoint → Schemas
@@ -792,6 +827,7 @@ Stats agregados refletem a **última versão** do backup (qualquer status).
 | `PATCH /backups/{label}/versions/{key}` | `VersionFinish` | `VersionInfo` |
 | `DELETE /backups/{label}/versions/{key}` | — | `VersionDeletedResponse` |
 | `POST /backups/{label}/cleanup` | `CleanupRequest` | `CleanupResponse` |
+| `GET /backups/{label}/compare` | query: `v1`, `v2` | `CompareResponse` |
 | `POST /check` | `CheckRequest` | `CheckResponse` |
 | `POST /upload` | binary stream + headers `X-*` | `UploadResponse` |
 | `POST /sync` | `SyncRequest` | `SyncResponse` |

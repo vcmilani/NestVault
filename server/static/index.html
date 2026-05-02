@@ -114,6 +114,34 @@
   .login-btn:hover{opacity:.85}
   .login-error{margin-top:12px;font-size:11px;color:var(--red);min-height:16px}
 
+  /* Compare */
+  .cmp-btn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:3px 10px;font-family:var(--mono);font-size:10px;cursor:pointer;letter-spacing:.06em;transition:all .15s;opacity:.4;pointer-events:none}
+  .cmp-btn.active{opacity:1;border-color:var(--blue);color:var(--blue);pointer-events:auto}
+  .cmp-btn.active:hover{border-color:var(--amber);color:var(--amber)}
+  .version-cb{accent-color:var(--amber);cursor:pointer;width:12px;height:12px}
+  .diff-row td{padding:0}
+  .diff-container{border-top:2px solid var(--blue);background:var(--bg)}
+  .diff-head{padding:10px 18px;background:var(--bg2);border-bottom:1px solid var(--border);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--blue);display:flex;align-items:center;justify-content:space-between;gap:16px}
+  .diff-summary{display:flex;gap:10px;flex-wrap:wrap}
+  .diff-tag{padding:2px 8px;font-size:10px;letter-spacing:.06em}
+  .diff-tag-add{background:var(--green-dim);color:var(--green)}
+  .diff-tag-del{background:var(--red-dim);color:var(--red)}
+  .diff-tag-mod{background:var(--amber-dim);color:var(--amber)}
+  .diff-tag-unch{background:var(--bg3);color:var(--text-dim);border:1px solid var(--border)}
+  .diff-close{background:none;border:none;color:var(--text-dim);font-size:14px;cursor:pointer;padding:0 4px;line-height:1}
+  .diff-close:hover{color:var(--text)}
+  .diff-section{border-bottom:1px solid var(--border)}
+  .diff-section:last-child{border-bottom:none}
+  .diff-section-title{padding:8px 18px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);background:var(--bg3);cursor:pointer;display:flex;align-items:center;gap:8px;user-select:none}
+  .diff-section-title .chevron{color:var(--text-mute);font-size:10px;transition:transform .2s;display:inline-block}
+  .diff-section-title.open .chevron{transform:rotate(90deg);color:var(--amber)}
+  .diff-section-body{display:none}
+  .diff-section-body.open{display:block}
+  .diff-add td:first-child{color:var(--green)}
+  .diff-del td:first-child{color:var(--red)}
+  .diff-mod td:first-child{color:var(--amber)}
+  .delta-pos{color:var(--green)}.delta-neg{color:var(--red)}
+
   ::-webkit-scrollbar{width:6px;height:6px}
   ::-webkit-scrollbar-track{background:var(--bg)}
   ::-webkit-scrollbar-thumb{background:var(--border2)}
@@ -172,6 +200,7 @@
   let API_KEY = localStorage.getItem('backupApiKey') || '';
   let expandedLabel = null;
   let expandedVersion = {};  // label -> version_key
+  let checkedVersions = {};  // label -> Set of version_keys (max 2)
 
   const H = () => ({'X-API-Key': API_KEY});
 
@@ -330,12 +359,18 @@
     if (!versions.length) { el.innerHTML='<div class="empty">Nenhuma versão encontrada</div>'; return; }
 
     const curVer = expandedVersion[label];
+    const curChecked = checkedVersions[label] || new Set();
     const rows = versions.map(v => {
       const isExp = v.version_key === curVer;
+      const isChk = curChecked.has(v.version_key);
       const vid = `${label}__${v.version_key}`;
       return `
         <tr class="row-version ${isExp?'expanded':''}"
             onclick="toggleFiles('${esc(label)}','${esc(v.version_key)}',this)">
+          <td style="width:28px;padding-left:18px">
+            <input type="checkbox" class="version-cb" ${isChk?'checked':''}
+              onclick="event.stopPropagation();toggleVersionCheck('${esc(label)}','${esc(v.version_key)}',this)">
+          </td>
           <td><span class="chevron">▶</span>${esc(v.version_key)}</td>
           <td>${badge(v.status)}</td>
           <td class="num-cell">${v.file_count}</td>
@@ -344,7 +379,7 @@
           <td class="date-cell">${fmtDate(v.created_at)}</td>
         </tr>
         <tr class="files-row" id="frow-${esc(vid)}" style="display:${isExp?'':'none'}">
-          <td colspan="7">
+          <td colspan="8">
             <div class="files-container">
               <div class="files-inner" id="finner-${esc(vid)}">
                 <div class="loading">Carregando</div>
@@ -354,16 +389,26 @@
         </tr>`;
     }).join('');
 
+    const hasTwoChecked = curChecked.size === 2;
     el.innerHTML = `
+      <div style="padding:8px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+        <span style="font-size:10px;color:var(--text-mute);letter-spacing:.08em">Selecione 2 versões para comparar</span>
+        <button class="cmp-btn ${hasTwoChecked?'active':''}" id="cmpbtn-${esc(label)}"
+          onclick="compareVersions('${esc(label)}')">⇄ Comparar selecionadas</button>
+      </div>
       <table>
         <thead><tr>
+          <th style="width:28px"></th>
           <th>Versão</th><th>Status</th>
           <th style="text-align:right">Arquivos</th>
           <th style="text-align:right">Tamanho</th>
           <th style="text-align:right">Duração</th>
           <th>Criada em</th>
         </tr></thead>
-        <tbody>${rows}</tbody>
+        <tbody>
+          ${rows}
+          <tr class="diff-row" id="diffrow-${esc(label)}" style="display:none"><td colspan="8"></td></tr>
+        </tbody>
       </table>`;
 
     if (curVer) {
@@ -428,6 +473,98 @@
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
+  }
+
+  // -- Compare ----------------------------------------------------------------
+  function toggleVersionCheck(label, version_key, cb) {
+    if (!checkedVersions[label]) checkedVersions[label] = new Set();
+    const set = checkedVersions[label];
+    if (cb.checked) {
+      if (set.size >= 2) { cb.checked = false; return; }
+      set.add(version_key);
+    } else {
+      set.delete(version_key);
+    }
+    const btn = document.getElementById(`cmpbtn-${label}`);
+    if (btn) btn.classList.toggle('active', set.size === 2);
+  }
+
+  async function compareVersions(label) {
+    const set = checkedVersions[label];
+    if (!set || set.size !== 2) return;
+    const [v1, v2] = [...set].sort();
+    const diffrow = document.getElementById(`diffrow-${label}`);
+    diffrow.style.display = '';
+    diffrow.querySelector('td').innerHTML = '<div class="diff-container"><div class="loading">Carregando comparação</div></div>';
+    try {
+      const url = `/backups/${encodeURIComponent(label)}/compare?v1=${encodeURIComponent(v1)}&v2=${encodeURIComponent(v2)}`;
+      const r = await fetch(url, {headers: H()});
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      renderComparison(label, data);
+    } catch(e) {
+      diffrow.querySelector('td').innerHTML =
+        `<div class="diff-container"><div class="empty">Erro: ${esc(e.message)}</div></div>`;
+    }
+  }
+
+  function closeDiff(label) {
+    const diffrow = document.getElementById(`diffrow-${label}`);
+    if (diffrow) diffrow.style.display = 'none';
+  }
+
+  function toggleDiffSection(el) {
+    el.classList.toggle('open');
+    el.nextElementSibling.classList.toggle('open');
+  }
+
+  function renderComparison(label, data) {
+    const diffrow = document.getElementById(`diffrow-${label}`);
+    const nAdd = data.added.length, nDel = data.deleted.length;
+    const nMod = data.modified.length, nUnch = data.summary_unchanged;
+
+    const fileRow = (f, cls) =>
+      `<tr class="${cls}"><td class="path-cell" title="${esc(f.original_path)}">${esc(f.original_path)}</td><td class="size-cell">${fmtSize(f.size)}</td><td class="hash-cell">${f.sha256.slice(0,16)}…</td></tr>`;
+
+    const modRow = m => {
+      const delta = m.size_delta;
+      const dcls = delta > 0 ? 'delta-pos' : delta < 0 ? 'delta-neg' : '';
+      const dsign = delta > 0 ? '+' : '';
+      return `<tr class="diff-mod"><td class="path-cell" title="${esc(m.original_path)}">${esc(m.original_path)}</td><td class="size-cell">${fmtSize(m.v2_size)}</td><td class="${dcls}">${dsign}${fmtSize(Math.abs(delta))}</td><td class="hash-cell">${m.v2_sha256.slice(0,16)}…</td></tr>`;
+    };
+
+    const section = (title, tag, rows, cols) => rows.length === 0 ? '' : `
+      <div class="diff-section">
+        <div class="diff-section-title open" onclick="toggleDiffSection(this)">
+          <span class="chevron">▶</span>
+          <span class="diff-tag ${tag}">${title}</span>
+          <span style="color:var(--text-mute)">${rows.length} arquivo(s)</span>
+        </div>
+        <div class="diff-section-body open">
+          <table><thead><tr>${cols}</tr></thead><tbody>${rows.join('')}</tbody></table>
+        </div>
+      </div>`;
+
+    const thBase = '<th>Path original</th><th style="text-align:right">Tamanho</th><th>SHA-256</th>';
+    const thMod  = '<th>Path original</th><th style="text-align:right">Tamanho novo</th><th>Delta</th><th>SHA-256 novo</th>';
+
+    diffrow.querySelector('td').innerHTML = `
+      <div class="diff-container">
+        <div class="diff-head">
+          <span>⇄ ${esc(data.v1)} → ${esc(data.v2)}</span>
+          <div class="diff-summary">
+            <span class="diff-tag diff-tag-add">+${nAdd} adicionado${nAdd!==1?'s':''}</span>
+            <span class="diff-tag diff-tag-del">−${nDel} removido${nDel!==1?'s':''}</span>
+            <span class="diff-tag diff-tag-mod">~${nMod} modificado${nMod!==1?'s':''}</span>
+            <span class="diff-tag diff-tag-unch">${nUnch} igual${nUnch!==1?'is':''}</span>
+          </div>
+          <button class="diff-close" onclick="closeDiff('${esc(label)}')" title="Fechar">✕</button>
+        </div>
+        ${section('Adicionados','diff-tag-add', data.added.map(f=>fileRow(f,'diff-add')), thBase)}
+        ${section('Removidos','diff-tag-del', data.deleted.map(f=>fileRow(f,'diff-del')), thBase)}
+        ${section('Modificados','diff-tag-mod', data.modified.map(m=>modRow(m)), thMod)}
+        ${nAdd===0&&nDel===0&&nMod===0?'<div class="empty">Versões idênticas — nenhuma diferença encontrada</div>':''}
+      </div>`;
   }
 
   // Init
