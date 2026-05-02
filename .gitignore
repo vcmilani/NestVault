@@ -22,3 +22,4 @@ __pycache__/
 
 # macOS
 .DS_Store
+server/.DS_Store
