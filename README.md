@@ -1,9 +1,11 @@
-# 🗄️ Backup Files — Raspberry Pi  `v2.2`
+# 🗄️ Backup Files — Raspberry Pi  `v2.3`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
 Cada execução de backup cria uma nova versão dentro do label. O servidor armazena o conteúdo físico apenas uma vez por sha256 — versões diferentes que compartilham arquivos idênticos não duplicam o storage.
 
+> **v2.3** — limpeza automática por espaço em disco: ao finalizar cada backup, o servidor verifica o espaço livre no filesystem onde o storage está montado. Se menor que 5%, versões antigas são apagadas automaticamente, mantendo sempre ao menos 1 versão por label.
+>
 > **v2.2** — remoção do conceito de soft-delete: arquivos ausentes em uma versão simplesmente não aparecem nela. Cada versão é um snapshot completo e independente.
 >
 > **v2.1** — upload por stream binário puro (sem multipart), queries agregadas, WAL no SQLite, índices compostos, session HTTP reutilizada no cliente. Dependência `requests-toolbelt` removida.
@@ -411,6 +413,32 @@ Cleanup em todos os labels (3 encontrados), keep=5
 
 ---
 
+### Limpeza automática por espaço em disco
+
+O servidor verifica automaticamente o espaço livre **ao finalizar cada backup** (status → `done`). Se o espaço livre no disco estiver abaixo de **5%**, versões antigas são apagadas até que o espaço seja normalizado.
+
+**Comportamento:**
+
+- Verifica o espaço do filesystem onde `STORAGE_DIR` está montado — funciona corretamente com discos secundários (ex: `/mnt/hd-externo`)
+- Apaga as versões mais antigas primeiro, distribuindo entre todos os labels
+- **Nunca apaga a versão mais recente** de cada label — cada label sempre terá ao menos 1 versão
+- Após cada deleção, reavalia o espaço e para assim que atingir 5%
+- Registra no terminal do servidor cada versão apagada e o espaço livre atualizado
+
+**Logs de exemplo:**
+
+```
+[auto-cleanup] Espaço livre: 3.2% — abaixo de 5%, iniciando limpeza...
+[auto-cleanup] Removida notebook-joao/2026-03-01T02:00:00 — 4 arquivo(s) do storage — livre: 3.8%
+[auto-cleanup] Removida servidor-web/2026-03-05T03:00:00 — 2 arquivo(s) do storage — livre: 4.3%
+[auto-cleanup] Removida notebook-joao/2026-03-08T02:00:00 — 7 arquivo(s) do storage — livre: 5.1%
+[auto-cleanup] Espaço normalizado (5.1%), encerrando.
+```
+
+> Essa limpeza é um mecanismo de segurança para evitar disco cheio. Para controle previsível de retenção, use o comando [`cleanup`](#cleanup) agendado via cron.
+
+---
+
 ### Agendar com cron
 
 ```cron
@@ -455,6 +483,12 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 ---
 
 ## ⚡ Otimizações
+
+### v2.3
+
+| Componente | Mudança |
+|---|---|
+| **Auto-cleanup de disco** | Ao finalizar backup, verifica espaço livre no filesystem do storage e apaga versões antigas se `< 5%` livre, mantendo sempre 1 por label |
 
 ### v2.2
 
