@@ -76,7 +76,7 @@
   .dim-cell{color:var(--text-dim)}
   .badge{display:inline-block;padding:2px 7px;font-size:10px;letter-spacing:.06em;text-transform:uppercase}
   .badge-active,.badge-done{background:var(--green-dim);color:var(--green)}
-  .badge-deleted,.badge-failed{background:var(--red-dim);color:var(--red)}
+  .badge-failed{background:var(--red-dim);color:var(--red)}
   .badge-running{background:var(--amber-dim);color:var(--amber)}
 
   /* Versions sub-table */
@@ -97,7 +97,6 @@
   .files-inner table td{font-size:11px;padding:8px 14px 8px 52px}
   .path-cell{max-width:480px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
   .hash-cell{color:var(--text-mute);font-size:10px}
-  .deleted-file td{opacity:.45}
   .empty{padding:32px;text-align:center;color:var(--text-mute);font-size:11px}
   .loading{padding:40px;text-align:center;color:var(--text-mute);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
   .loading::after{content:'...';animation:dots 1.2s steps(4,end) infinite}
@@ -125,7 +124,7 @@
 <header>
   <div class="logo">
     <div class="logo-icon">◈</div>
-    <div><div class="logo-text">Backup Files</div><div class="logo-sub">Raspberry Pi · v2.0</div></div>
+    <div><div class="logo-text">Backup Files</div><div class="logo-sub">Raspberry Pi · v2.2</div></div>
   </div>
   <div class="header-right">
     <div class="status-dot" id="statusDot"></div>
@@ -340,7 +339,6 @@
           <td><span class="chevron">▶</span>${esc(v.version_key)}</td>
           <td>${badge(v.status)}</td>
           <td class="num-cell">${v.file_count}</td>
-          <td class="num-cell dim-cell">${v.deleted_count} deletados</td>
           <td class="size-cell">${fmtSize(v.total_size_bytes)}</td>
           <td class="num-cell dim-cell">${fmtDuration(v.duration_seconds)}</td>
           <td class="date-cell">${fmtDate(v.created_at)}</td>
@@ -361,7 +359,6 @@
         <thead><tr>
           <th>Versão</th><th>Status</th>
           <th style="text-align:right">Arquivos</th>
-          <th style="text-align:right">Deletados</th>
           <th style="text-align:right">Tamanho</th>
           <th style="text-align:right">Duração</th>
           <th>Criada em</th>
@@ -400,7 +397,7 @@
 
   async function loadFiles(label, version_key, vid) {
     try {
-      const url = `/files?backup_label=${encodeURIComponent(label)}&version_key=${encodeURIComponent(version_key)}&include_deleted=true`;
+      const url = `/files?backup_label=${encodeURIComponent(label)}&version_key=${encodeURIComponent(version_key)}`;
       const r = await fetch(url, {headers: H()});
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const files = await r.json();
@@ -415,10 +412,9 @@
     const el = document.getElementById(`finner-${vid}`);
     if (!files.length) { el.innerHTML='<div class="empty">Nenhum arquivo nesta versão</div>'; return; }
     const rows = files.map(f => `
-      <tr class="${f.status==='deleted'?'deleted-file':''}">
+      <tr>
         <td class="path-cell" title="${esc(f.original_path)}">${esc(f.original_path)}</td>
         <td class="size-cell">${fmtSize(f.size)}</td>
-        <td>${badge(f.status)}</td>
         <td class="hash-cell">${f.sha256.slice(0,16)}…</td>
         <td class="date-cell">${fmtDate(f.created_at)}</td>
       </tr>`).join('');
@@ -427,7 +423,6 @@
         <thead><tr>
           <th>Path original</th>
           <th style="text-align:right">Tamanho</th>
-          <th>Status</th>
           <th>SHA-256</th>
           <th>Adicionado em</th>
         </tr></thead>

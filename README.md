@@ -1,9 +1,11 @@
-# 🗄️ Backup Files — Raspberry Pi  `v2.1`
+# 🗄️ Backup Files — Raspberry Pi  `v2.2`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
-Cada execução de backup cria uma nova versão dentro do label. O servidor armazena o conteúdo físico apenas uma vez por sha256 — versões diferentes que compartilham arquivos idênticos não duplicam o storage. Arquivos deletados são marcados na versão, nunca apagados do storage diretamente.
+Cada execução de backup cria uma nova versão dentro do label. O servidor armazena o conteúdo físico apenas uma vez por sha256 — versões diferentes que compartilham arquivos idênticos não duplicam o storage.
 
+> **v2.2** — remoção do conceito de soft-delete: arquivos ausentes em uma versão simplesmente não aparecem nela. Cada versão é um snapshot completo e independente.
+>
 > **v2.1** — upload por stream binário puro (sem multipart), queries agregadas, WAL no SQLite, índices compostos, session HTTP reutilizada no cliente. Dependência `requests-toolbelt` removida.
 
 ---
@@ -27,37 +29,30 @@ backup_system/
 
 ---
 
-## ⚠️ Atualizando da v2.0 para v2.1
+## ⚠️ Atualizando da v2.1 para v2.2
 
-A v2.1 adiciona índices novos e usa WAL mode no SQLite — o schema é compatível, mas precisa criar os índices.
+A v2.2 remove a coluna `status` e o índice `idx_version_status` da tabela `version_files`.
 
 ### Opção 1 — recomendada: migração in-place
-
-Faça backup do banco antes:
 
 ```bash
 # Pare o serviço primeiro
 sudo systemctl stop backup-server
 
 # Backup do banco
-cp /mnt/hd-externo/backup.db /mnt/hd-externo/backup.db.bak.v2.0
+cp /mnt/hd-externo/backup.db /mnt/hd-externo/backup.db.bak.v2.1
 
-# Aplica os novos índices e WAL mode
+# Remove registros com status="deleted" (já sem utilidade) e a coluna
 sqlite3 /mnt/hd-externo/backup.db <<SQL
-PRAGMA journal_mode=WAL;
-CREATE INDEX IF NOT EXISTS idx_label_status_key ON backup_versions(backup_label, status, version_key);
-CREATE INDEX IF NOT EXISTS idx_version_status ON version_files(version_id, status);
-CREATE INDEX IF NOT EXISTS idx_sha256 ON version_files(sha256);
-CREATE INDEX IF NOT EXISTS ix_backup_ids_client_name ON backup_ids(client_name);
-CREATE INDEX IF NOT EXISTS ix_backup_versions_status ON backup_versions(status);
-ANALYZE;
+DELETE FROM version_files WHERE status = 'deleted';
+DROP INDEX IF EXISTS idx_version_status;
+ALTER TABLE version_files DROP COLUMN status;
+VACUUM;
 SQL
 
 # Atualiza o código e reinicia
 cd /home/pi/backup_system
 git pull   # ou copie os arquivos manualmente
-source server/.venv/bin/activate
-pip install -r server/requirements.txt
 sudo systemctl start backup-server
 ```
 
@@ -72,16 +67,42 @@ rm -rf /mnt/hd-externo/backups/_content
 sudo systemctl start backup-server
 ```
 
-O `init_db()` na inicialização cria as tabelas com todos os novos índices.
+O `init_db()` na inicialização cria as tabelas com o schema atualizado.
 
 ### Verificar se a migração funcionou
 
 ```bash
-sqlite3 /mnt/hd-externo/backup.db "PRAGMA journal_mode;"
-# Deve retornar: wal
+sqlite3 /mnt/hd-externo/backup.db ".schema version_files"
+# Não deve conter a coluna "status"
 
 sqlite3 /mnt/hd-externo/backup.db ".indexes"
-# Deve listar idx_label_status_key, idx_version_status, idx_sha256, etc.
+# Não deve listar idx_version_status
+```
+
+---
+
+## ⚠️ Atualizando da v2.0 para v2.1
+
+A v2.1 adiciona índices novos e usa WAL mode no SQLite — o schema é compatível, mas precisa criar os índices.
+
+```bash
+sudo systemctl stop backup-server
+cp /mnt/hd-externo/backup.db /mnt/hd-externo/backup.db.bak.v2.0
+
+sqlite3 /mnt/hd-externo/backup.db <<SQL
+PRAGMA journal_mode=WAL;
+CREATE INDEX IF NOT EXISTS idx_label_status_key ON backup_versions(backup_label, status, version_key);
+CREATE INDEX IF NOT EXISTS idx_sha256 ON version_files(sha256);
+CREATE INDEX IF NOT EXISTS ix_backup_ids_client_name ON backup_ids(client_name);
+CREATE INDEX IF NOT EXISTS ix_backup_versions_status ON backup_versions(status);
+ANALYZE;
+SQL
+
+cd /home/pi/backup_system
+git pull
+source server/.venv/bin/activate
+pip install -r server/requirements.txt
+sudo systemctl start backup-server
 ```
 
 ---
@@ -229,7 +250,6 @@ python backup_client.py backup ~/documentos \
   Enviados    : 3    ← conteúdo novo, upload completo
   Registrados : 12   ← conteúdo já no storage, só registrou
   Ignorados   : 127  ← idênticos à versão anterior
-  Deletados   : 1    ← marcados como deleted nesta versão
   Erros       : 0
 =======================================================
 ```
@@ -276,7 +296,7 @@ projeto-alpha                   notebook-joao              12       891      4.7
 
 ### versions
 
-Lista todas as versões de um backup, com contagem de arquivos ativos, deletados e tamanho.
+Lista todas as versões de um backup, com contagem de arquivos e tamanho.
 
 ```bash
 python backup_client.py versions \
@@ -293,18 +313,18 @@ Exemplo de saída:
 
 ```
 Versoes de [notebook-joao]:
-  VERSAO                  STATUS    ARQUIVOS  DELETADOS     TAMANHO
-  -----------------------------------------------------------------
-  2026-04-25T10:42:31     done           142          1      1.4 GB
-  2026-04-24T02:00:00     done           141          0      1.4 GB
-  2026-04-23T02:00:00     done           139          3      1.3 GB
+  VERSAO                  STATUS    ARQUIVOS     TAMANHO    DURACAO
+  ----------------------------------------------------------------------
+  2026-04-25T10:42:31     done           142      1.4 GB        42s
+  2026-04-24T02:00:00     done           141      1.4 GB        38s
+  2026-04-23T02:00:00     done           139      1.3 GB        41s
 ```
 
 ---
 
 ### restore
 
-Baixa os arquivos de uma **versão específica** e reconstrói a estrutura de pastas no destino. Apenas arquivos com status `active` são restaurados — deletados são ignorados.
+Baixa os arquivos de uma **versão específica** e reconstrói a estrutura de pastas no destino.
 
 ```bash
 # Restaurar uma versão específica
@@ -429,12 +449,25 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 
 - **Stats globais** — total de backups, versões, arquivos, storage total
 - **Tabela de backups** — clique em um label para expandir as versões
-- **Versões** — clique em uma versão para ver os arquivos, incluindo os marcados como `deleted` (em cinza)
+- **Versões** — clique em uma versão para ver os arquivos
 - **Auto-refresh** a cada 30 segundos
 
 ---
 
-## ⚡ Otimizações da v2.1
+## ⚡ Otimizações
+
+### v2.2
+
+| Componente | Mudança |
+|---|---|
+| **Modelo de dados** | Removido soft-delete — cada versão é um snapshot completo |
+| **`version_files`** | Coluna `status` e índice `idx_version_status` removidos |
+| **`/sync`** | Simplificado — apenas confirma sincronização, sem UPDATE em massa |
+| **`/files`** | Removido parâmetro `include_deleted` |
+| **`FileInfo`** | Removido campo `status` |
+| **`VersionInfo`** | Removido campo `deleted_count` |
+
+### v2.1
 
 | Componente | Otimização | Ganho típico |
 |---|---|---|
@@ -447,7 +480,6 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 | **Cleanup** | Subquery `WHERE NOT IN` em vez de loop | 100x+ mais rápido |
 | **Delete** | Cascade automático via SQLAlchemy | Bulk delete |
 | **SQLite** | WAL mode + cache 64MB + mmap 256MB | Leituras paralelas com escritas |
-| **Índices** | Compostos em `(version_id, status)` etc. | Queries do dashboard rápidas |
 
 ---
 
@@ -456,7 +488,7 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 ```
 BackupID (label)
   └── BackupVersion (version_key = datetime ISO)
-        └── VersionFile (original_path, sha256, status = active | deleted)
+        └── VersionFile (original_path, sha256, mtime)
                 └── FileContent (sha256, stored_at) ← arquivo físico único por conteúdo
 ```
 
@@ -509,7 +541,7 @@ O conteúdo de cada arquivo é armazenado **uma única vez**, independente de qu
 |--------|----------|-----------|
 | `POST` | `/check` | Verifica se arquivo precisa upload |
 | `POST` | `/upload` | Registra arquivo na versão |
-| `POST` | `/sync` | Marca como deleted arquivos ausentes no cliente |
+| `POST` | `/sync` | Confirma sincronização da versão com o cliente |
 | `GET` | `/files` | Lista arquivos de uma versão |
 | `GET` | `/files/{id}/download` | Faz download |
 
@@ -592,7 +624,7 @@ Todos os endpoints possuem **schemas Pydantic explícitos** para entrada e saíd
 ```json
 {
   "status":  "ok",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "time":    "2026-04-25T10:42:31.123456"
 }
 ```
@@ -639,8 +671,7 @@ Stats agregados refletem a **última versão** do backup (qualquer status).
   "status": "done",                         // "running" | "done" | "failed"
   "created_at": "2026-04-25 10:42:31",
   "finished_at": "2026-04-25 10:45:12",
-  "file_count": 142,                        // arquivos active
-  "deleted_count": 1,                       // arquivos marcados como deleted
+  "file_count": 142,
   "total_size_bytes": 1503238553
 }
 ```
@@ -685,8 +716,7 @@ Stats agregados refletem a **última versão** do backup (qualquer status).
 #### `SyncResponse`
 ```json
 {
-  "marked_deleted": ["/home/joao/docs/antigo.pdf"],
-  "deleted_count": 1
+  "synced": true
 }
 ```
 
@@ -698,7 +728,6 @@ Stats agregados refletem a **última versão** do backup (qualquer status).
   "sha256": "abc123...",
   "size": 204800,
   "mtime": 1713700000.0,
-  "status": "active",                       // "active" | "deleted"
   "created_at": "2026-04-25 10:42:35"
 }
 ```
@@ -732,7 +761,7 @@ Stats agregados refletem a **última versão** do backup (qualquer status).
 | `POST /check` | `CheckRequest` | `CheckResponse` |
 | `POST /upload` | binary stream + headers `X-*` | `UploadResponse` |
 | `POST /sync` | `SyncRequest` | `SyncResponse` |
-| `GET /files` | query: `backup_label`, `version_key`, `include_deleted` | `list[FileInfo]` |
+| `GET /files` | query: `backup_label`, `version_key` | `list[FileInfo]` |
 | `GET /files/{id}/download` | — | binary stream |
 
 ---

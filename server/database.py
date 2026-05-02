@@ -1,5 +1,5 @@
 """
-Models do banco de dados — v2.1
+Models do banco de dados — v2.2
 Ajustes de performance:
 - WAL mode no SQLite (escritas nao bloqueiam leituras)
 - Indices em colunas usadas em filtros e joins
@@ -86,7 +86,6 @@ class VersionFile(Base):
     __tablename__ = "version_files"
     __table_args__ = (
         UniqueConstraint("version_id", "original_path", name="uq_version_path"),
-        Index("idx_version_status", "version_id", "status"),
         Index("idx_sha256", "sha256"),
     )
 
@@ -95,7 +94,6 @@ class VersionFile(Base):
     original_path = Column(String, nullable=False, index=True)
     sha256        = Column(String(64), ForeignKey("file_contents.sha256"), nullable=False)
     mtime         = Column(Float, nullable=False)
-    status        = Column(String, default="active")
     created_at    = Column(DateTime, default=datetime.utcnow)
 
     version = relationship("BackupVersion", back_populates="files")
