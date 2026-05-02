@@ -280,6 +280,54 @@ def _backup_info(b: BackupID, db: Session) -> BackupInfo:
     )
 
 
+def _get_disk_free_percent() -> float:
+    usage = shutil.disk_usage(STORAGE_DIR)
+    return usage.free / usage.total * 100
+
+
+def _auto_cleanup_if_needed(db: Session) -> None:
+    free_pct = _get_disk_free_percent()
+    if free_pct >= 5.0:
+        return
+
+    print(f"[auto-cleanup] Espaço livre: {free_pct:.1f}% — abaixo de 5%, iniciando limpeza...")
+
+    # Labels com >= 2 versões "done" (as que têm algo a deletar)
+    labels_with_versions = (
+        db.query(BackupVersion.backup_label)
+        .filter(BackupVersion.status == "done")
+        .group_by(BackupVersion.backup_label)
+        .having(func.count(BackupVersion.id) >= 2)
+        .all()
+    )
+
+    # Monta fila de versões deletáveis: todas exceto a mais recente de cada label
+    deletable: list[BackupVersion] = []
+    for (label,) in labels_with_versions:
+        versions = (
+            db.query(BackupVersion)
+            .filter(BackupVersion.backup_label == label, BackupVersion.status == "done")
+            .order_by(BackupVersion.version_key.asc())
+            .all()
+        )
+        deletable.extend(versions[:-1])  # mantém sempre a última
+
+    deletable.sort(key=lambda v: v.version_key)  # mais antigas primeiro
+
+    for v in deletable:
+        label, key = v.backup_label, v.version_key
+        db.delete(v)
+        db.commit()
+        removed = _cleanup_orphan_contents(db)
+        free_pct = _get_disk_free_percent()
+        print(f"[auto-cleanup] Removida {label}/{key} — {removed} arquivo(s) do storage — livre: {free_pct:.1f}%")
+        if free_pct >= 5.0:
+            print(f"[auto-cleanup] Espaço normalizado ({free_pct:.1f}%), encerrando.")
+            return
+
+    print(f"[auto-cleanup] Concluído. Livre: {free_pct:.1f}% — todas as labels com 1 versão.")
+
+
 def _cleanup_orphan_contents(db: Session) -> int:
     """
     Remove FileContents nao referenciados por nenhum VersionFile.
@@ -396,6 +444,8 @@ def finish_version(label: str, version_key: str, req: VersionFinish, db: Session
     v.status = req.status
     v.finished_at = datetime.utcnow()
     db.commit()
+    if req.status == "done":
+        _auto_cleanup_if_needed(db)
     return _version_stats(v, db)
 
 
