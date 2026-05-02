@@ -188,10 +188,37 @@ def sync_version(server, label, version_key, existing_paths):
     r.raise_for_status(); return r.json()
 
 
+def _fetch_prev_cache(server, label) -> dict:
+    """
+    Busca arquivos da última versão 'done' para evitar recalcular sha256
+    de arquivos com mtime+size inalterados.
+    Retorna {original_path: FileInfo} ou {} em caso de erro/ausência.
+    """
+    try:
+        r = _session.get(f"{server}/backups/{label}/versions",
+                         headers=build_headers(), timeout=10)
+        if not r.ok:
+            return {}
+        last_done = next((v for v in r.json() if v["status"] == "done"), None)
+        if not last_done:
+            return {}
+        r2 = _session.get(
+            f"{server}/files",
+            headers=build_headers(),
+            params={"backup_label": label, "version_key": last_done["version_key"]},
+            timeout=30,
+        )
+        if not r2.ok:
+            return {}
+        return {f["original_path"]: f for f in r2.json()}
+    except requests.RequestException:
+        return {}
+
+
 # -- Backup -------------------------------------------------------------------
 def backup_directory(
     directory, label, server=DEFAULT_SERVER, dry_run=False,
-    path_prefix=None, exclude=None, client_name=None, workers=4,
+    path_prefix=None, exclude=None, client_name=None, workers=4, verbose=False,
 ):
     root = Path(directory).resolve()
     if not root.exists():
@@ -200,22 +227,25 @@ def backup_directory(
     client_name = client_name or socket.gethostname()
     version_key = now_key()
 
+    if verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+
     if not dry_run:
         ensure_backup(server, label, client_name, path_prefix)
         create_version(server, label, version_key)
         log.info(f"Backup    : [{label}]")
         log.info(f"Versao    : {version_key}")
 
+    # Cache da versão anterior para evitar leitura de disco em arquivos inalterados
+    prev_cache = _fetch_prev_cache(server, label) if not dry_run else {}
+    if prev_cache:
+        log.info(f"Cache     : {len(prev_cache)} arquivo(s) da versao anterior carregados")
+
     # Coleta arquivos
     pending = []
     for fp in sorted(root.rglob("*")):
         if not fp.is_file() or fp.name in IGNORED_NAMES:
             continue
-        excluded = any(
-            (lambda ex_path: True if fp == fp else False)(None)
-            for ex in (exclude or [])
-            if _is_excluded(fp, root, ex)
-        )
         if any(_is_excluded(fp, root, ex) for ex in (exclude or [])):
             continue
         op = str(fp) if not path_prefix else str(Path(path_prefix) / fp.relative_to(root))
@@ -224,7 +254,7 @@ def backup_directory(
     total = len(pending)
     log.info(f"Arquivos  : {total} encontrados")
 
-    stats = {"uploaded": 0, "registered": 0, "skipped": 0, "errors": 0}
+    stats = {"uploaded": 0, "registered": 0, "fast": 0, "skipped": 0, "errors": 0}
     lock  = threading.Lock()
     all_paths = [op for _, op in pending]
 
@@ -238,22 +268,31 @@ def backup_directory(
         size  = stat.st_size
         mtime = stat.st_mtime
         try:
+            # Cache hit: mtime e size inalterados → registrar sem ler o disco
+            cached = prev_cache.get(op)
+            if cached and cached["mtime"] == mtime and cached["size"] == size:
+                log.debug(f"FAST   {op}  ({fmt_size(size)})  [mtime+size ok, sem leitura de disco]")
+                if not dry_run:
+                    register_file(server, label, version_key, op, mtime, cached["sha256"])
+                with lock: stats["fast"] += 1
+                return
+
             sha256 = sha256_file(fp)
             check  = check_file(server, label, version_key, op, sha256, size, mtime)
 
             if not check["needs_upload"]:
-                log.info(f"SKIP   {op}")
+                log.debug(f"SKIP   {op}")
                 with lock: stats["skipped"] += 1
             elif check.get("content_exists"):
                 log.info(f"REG    {op}  ({fmt_size(size)})  [conteudo ja no storage]")
                 if not dry_run:
                     register_file(server, label, version_key, op, mtime, sha256)
-                    with lock: stats["registered"] += 1
+                with lock: stats["registered"] += 1
             else:
                 log.info(f"UPLOAD {op}  ({fmt_size(size)})")
                 if not dry_run:
                     upload_file(server, fp, label, version_key, op, mtime)
-                    with lock: stats["uploaded"] += 1
+                with lock: stats["uploaded"] += 1
 
         except requests.RequestException as e:
             log.error(f"  ERRO em {op}: {e}")
@@ -263,7 +302,7 @@ def backup_directory(
             with lock:
                 overall.set_description(
                     f"Progresso  ↑{stats['uploaded']} ⊕{stats['registered']} "
-                    f"↷{stats['skipped']} ✗{stats['errors']}"
+                    f"⚡{stats['fast']} ✗{stats['errors']}"
                 )
 
     effective = 1 if dry_run else workers
@@ -294,8 +333,9 @@ def backup_directory(
     log.info(f"  Versao      : {version_key}")
     log.info(f"  Verificados : {total}")
     log.info(f"  Enviados    : {stats['uploaded']}")
-    log.info(f"  Registrados : {stats['registered']}  (delta — sem re-upload)")
-    log.info(f"  Ignorados   : {stats['skipped']}")
+    log.info(f"  Registrados : {stats['registered']}  (conteudo ja no storage)")
+    log.info(f"  Cacheados   : {stats['fast']}  (mtime+size ok, sem leitura de disco)")
+    log.info(f"  Ignorados   : {stats['skipped']}  (retomada de backup interrompido)")
     log.info(f"  Erros       : {stats['errors']}")
     log.info("=" * 55)
     return stats
@@ -505,6 +545,7 @@ def main():
     pb.add_argument("--exclude", nargs="+", default=[])
     pb.add_argument("--workers", type=int, default=4)
     pb.add_argument("--dry-run", action="store_true")
+    pb.add_argument("--verbose", action="store_true", help="Mostra logs de arquivos cacheados e ignorados")
 
     # backups
     pl = sub.add_parser("backups", help="Lista todos os backups")
@@ -542,7 +583,7 @@ def main():
         log.info(f"Comando  : BACKUP  label=[{args.label}]")
         backup_directory(args.directory, args.label, args.server,
                          args.dry_run, args.prefix, args.exclude,
-                         args.client, args.workers)
+                         args.client, args.workers, args.verbose)
 
     elif args.command == "backups":
         list_backups(args.server, args.client)

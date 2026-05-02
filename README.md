@@ -4,7 +4,7 @@ Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **iso
 
 Cada execução de backup cria uma nova versão dentro do label. O servidor armazena o conteúdo físico apenas uma vez por sha256 — versões diferentes que compartilham arquivos idênticos não duplicam o storage.
 
-> **v2.4** — comparação entre versões no dashboard: selecione duas versões de um backup e veja exatamente quais arquivos foram adicionados, removidos ou modificados.
+> **v2.4** — comparação entre versões no dashboard (adicionados, removidos, modificados); cache mtime+size no client elimina leitura de disco para arquivos inalterados; auto-refresh removido do dashboard.
 >
 > **v2.3** — limpeza automática por espaço em disco: ao finalizar cada backup, o servidor verifica o espaço livre no filesystem onde o storage está montado. Se menor que 5%, versões antigas são apagadas automaticamente, mantendo sempre ao menos 1 versão por label.
 >
@@ -243,6 +243,7 @@ python backup_client.py backup ~/documentos \
 | `--exclude` | | Subpastas a ignorar — aceita múltiplos valores |
 | `--workers` | | Uploads paralelos (padrão: `4`) |
 | `--dry-run` | | Apenas verifica, não envia |
+| `--verbose` | | Logs detalhados (arquivos cacheados e ignorados) |
 
 **Resumo ao final do backup:**
 
@@ -253,7 +254,8 @@ python backup_client.py backup ~/documentos \
   Verificados : 142
   Enviados    : 3    ← conteúdo novo, upload completo
   Registrados : 12   ← conteúdo já no storage, só registrou
-  Ignorados   : 127  ← idênticos à versão anterior
+  Cacheados   : 126  ← mtime+size inalterados, sem leitura de disco
+  Ignorados   : 1    ← retomada de backup interrompido
   Erros       : 0
 =======================================================
 ```
@@ -481,7 +483,6 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 - **Tabela de backups** — clique em um label para expandir as versões
 - **Versões** — clique em uma versão para ver os arquivos
 - **Comparação de versões** — selecione duas versões com as checkboxes e clique em ⇄ Comparar: veja arquivos adicionados, removidos, modificados e o delta de tamanho de cada um
-- **Auto-refresh** a cada 30 segundos
 
 ---
 
@@ -492,7 +493,9 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 | Componente | Mudança |
 |---|---|
 | **Comparação de versões** | Endpoint `GET /backups/{label}/compare` retorna diff completo (adicionados, removidos, modificados) entre duas versões via 2 queries SQL + set operations em Python |
-| **Dashboard** | Checkboxes nas versões + painel de diff com resumo e tabelas por categoria (adicionados, removidos, modificados) |
+| **Dashboard** | Checkboxes nas versões + painel de diff; auto-refresh removido (apenas refresh manual) |
+| **Client — cache mtime+size** | Antes de calcular SHA-256, verifica mtime e size contra a versão anterior. Se idênticos, registra o arquivo direto com o hash cacheado — sem leitura de disco |
+| **Client — `--verbose`** | Flag que ativa logs DEBUG mostrando cada arquivo cacheado ou ignorado |
 
 ### v2.3
 
