@@ -158,6 +158,29 @@ class CleanupResponse(BaseModel):
     versions_removed: list[str]
     storage_files_removed: int
 
+class CompareFileEntry(BaseModel):
+    original_path: str
+    sha256: str
+    size: int
+    mtime: float
+
+class CompareModifiedEntry(BaseModel):
+    original_path: str
+    v1_sha256: str
+    v2_sha256: str
+    v1_size: int
+    v2_size: int
+    size_delta: int
+
+class CompareResponse(BaseModel):
+    label: str
+    v1: str
+    v2: str
+    added: list[CompareFileEntry]
+    deleted: list[CompareFileEntry]
+    modified: list[CompareModifiedEntry]
+    summary_unchanged: int
+
 
 # -- Helpers ------------------------------------------------------------------
 def _content_path(sha256: str) -> Path:
@@ -618,6 +641,57 @@ def download_file(file_id: int, db: Session = Depends(get_db)):
     if not p.exists():
         raise HTTPException(410, "Conteudo fisico nao encontrado")
     return FileResponse(p, filename=Path(row.original_path).name)
+
+
+# -- Compare ------------------------------------------------------------------
+@app.get("/backups/{label}/compare", response_model=CompareResponse, dependencies=[Depends(require_api_key)])
+def compare_versions(label: str, v1: str, v2: str, db: Session = Depends(get_db)):
+    """Compara arquivos entre duas versoes. v1 = base, v2 = nova. Duas queries SQL + diff em Python."""
+    ver1 = _get_version_or_404(label, v1, db)
+    ver2 = _get_version_or_404(label, v2, db)
+
+    def _load_files(version_id):
+        rows = (db.query(
+                    VersionFile.original_path,
+                    VersionFile.sha256,
+                    VersionFile.mtime,
+                    FileContent.size,
+                )
+                .outerjoin(FileContent, FileContent.sha256 == VersionFile.sha256)
+                .filter(VersionFile.version_id == version_id)
+                .all())
+        return {r.original_path: r for r in rows}
+
+    files1 = _load_files(ver1.id)
+    files2 = _load_files(ver2.id)
+    paths1, paths2 = set(files1), set(files2)
+
+    added = [
+        CompareFileEntry(original_path=p, sha256=files2[p].sha256,
+                         size=files2[p].size or 0, mtime=files2[p].mtime)
+        for p in sorted(paths2 - paths1)
+    ]
+    deleted = [
+        CompareFileEntry(original_path=p, sha256=files1[p].sha256,
+                         size=files1[p].size or 0, mtime=files1[p].mtime)
+        for p in sorted(paths1 - paths2)
+    ]
+    modified, unchanged = [], 0
+    for p in sorted(paths1 & paths2):
+        f1, f2 = files1[p], files2[p]
+        if f1.sha256 != f2.sha256:
+            modified.append(CompareModifiedEntry(
+                original_path=p,
+                v1_sha256=f1.sha256, v2_sha256=f2.sha256,
+                v1_size=f1.size or 0, v2_size=f2.size or 0,
+                size_delta=(f2.size or 0) - (f1.size or 0),
+            ))
+        else:
+            unchanged += 1
+
+    return CompareResponse(label=label, v1=v1, v2=v2,
+                           added=added, deleted=deleted, modified=modified,
+                           summary_unchanged=unchanged)
 
 
 # -- Cleanup ------------------------------------------------------------------
