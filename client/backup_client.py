@@ -1,8 +1,7 @@
 """
-Backup Files — Raspberry Pi  v2.0
+Backup Files — Raspberry Pi  v2.2
 Cada execucao de backup cria uma nova versao dentro do label.
 Conteudo identico e armazenado uma unica vez no servidor (deduplicacao por sha256).
-Arquivos deletados sao marcados na versao, nao apagados do storage.
 
 Uso:
     python backup_client.py backup ~/docs --label "notebook" --server http://192.168.1.100:8000
@@ -282,11 +281,7 @@ def backup_directory(
 
     if not dry_run:
         try:
-            result = sync_version(server, label, version_key, all_paths)
-            removed = result.get("deleted_count", 0)
-            stats["marked_deleted"] = removed
-            if removed:
-                log.info(f"SYNC   {removed} arquivo(s) marcado(s) como deletado(s)")
+            sync_version(server, label, version_key, all_paths)
         except requests.RequestException as e:
             log.error(f"SYNC   Erro: {e}")
 
@@ -301,7 +296,6 @@ def backup_directory(
     log.info(f"  Enviados    : {stats['uploaded']}")
     log.info(f"  Registrados : {stats['registered']}  (delta — sem re-upload)")
     log.info(f"  Ignorados   : {stats['skipped']}")
-    log.info(f"  Deletados   : {stats.get('marked_deleted', 0)}")
     log.info(f"  Erros       : {stats['errors']}")
     log.info("=" * 55)
     return stats
@@ -344,8 +338,8 @@ def list_versions(label, server=DEFAULT_SERVER):
         log.info(f"Nenhuma versao encontrada em [{label}]."); return
     log.info("")
     log.info(f"Versoes de [{label}]:")
-    log.info(f"  {'VERSAO':22}  {'STATUS':8}  {'ARQUIVOS':>8}  {'DELETADOS':>9}  {'TAMANHO':>10}  {'DURACAO':>10}")
-    log.info("  " + "-" * 80)
+    log.info(f"  {'VERSAO':22}  {'STATUS':8}  {'ARQUIVOS':>8}  {'TAMANHO':>10}  {'DURACAO':>10}")
+    log.info("  " + "-" * 70)
     for v in versions:
         dur = v.get("duration_seconds")
         if dur is None:
@@ -358,7 +352,7 @@ def list_versions(label, server=DEFAULT_SERVER):
             dur_str = f"{dur/3600:.1f}h"
         log.info(
             f"  {v['version_key']:22}  {v['status']:8}  "
-            f"{v['file_count']:>8}  {v['deleted_count']:>9}  "
+            f"{v['file_count']:>8}  "
             f"{fmt_size(v['total_size_bytes']):>10}  {dur_str:>10}"
         )
     log.info("")
@@ -498,7 +492,7 @@ def cleanup(label=None, keep=5, server=DEFAULT_SERVER):
 
 # -- CLI ----------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Backup Files — Raspberry Pi v2.0")
+    parser = argparse.ArgumentParser(description="Backup Files — Raspberry Pi v2.2")
     sub = parser.add_subparsers(dest="command", required=True)
 
     # backup

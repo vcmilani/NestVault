@@ -1,5 +1,5 @@
 """
-Backup Files — Raspberry Pi  v2.1
+Backup Files — Raspberry Pi  v2.2
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -18,8 +18,8 @@ from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 
-from sqlalchemy import func, select, and_
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from database import init_db, get_db, BackupID, BackupVersion, FileContent, VersionFile
 
@@ -33,7 +33,7 @@ AUTH_ENABLED = bool(API_KEY)
 # Buffer de leitura/escrita - 1 MB e bem mais rapido que 64KB no I/O
 CHUNK_SIZE = 1024 * 1024
 
-app = FastAPI(title="Backup Files — Raspberry Pi", version="2.1.0")
+app = FastAPI(title="Backup Files — Raspberry Pi", version="2.2.0")
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -119,7 +119,6 @@ class VersionInfo(BaseModel):
     finished_at: Optional[str] = None
     duration_seconds: Optional[float] = Field(None, description="Duracao do backup em segundos")
     file_count: int
-    deleted_count: int
     total_size_bytes: int
 
 class VersionCreatedResponse(BaseModel):
@@ -144,8 +143,7 @@ class UploadResponse(BaseModel):
     uploaded: bool = Field(..., description="True se o conteudo foi enviado, False se apenas registrado")
 
 class SyncResponse(BaseModel):
-    marked_deleted: list[str]
-    deleted_count: int
+    synced: bool
 
 class FileInfo(BaseModel):
     id: int
@@ -153,7 +151,6 @@ class FileInfo(BaseModel):
     sha256: str
     size: int
     mtime: float
-    status: Literal["active", "deleted"]
     created_at: str
 
 class CleanupResponse(BaseModel):
@@ -209,21 +206,17 @@ def _get_version_or_404(label: str, version_key: str, db: Session) -> BackupVers
 
 def _version_stats(v: BackupVersion, db: Session) -> VersionInfo:
     """Stats agregados via SQL — sem carregar VersionFiles."""
-    counts = (
-        db.query(VersionFile.status, func.count(VersionFile.id))
+    file_count = (
+        db.query(func.count(VersionFile.id))
         .filter(VersionFile.version_id == v.id)
-        .group_by(VersionFile.status)
-        .all()
-    )
-    counts_dict = dict(counts)
-    active_count  = counts_dict.get("active", 0)
-    deleted_count = counts_dict.get("deleted", 0)
+        .scalar()
+    ) or 0
 
     # Tamanho total via JOIN agregado — uma unica query
     total_size = (
         db.query(func.coalesce(func.sum(FileContent.size), 0))
         .join(VersionFile, VersionFile.sha256 == FileContent.sha256)
-        .filter(VersionFile.version_id == v.id, VersionFile.status == "active")
+        .filter(VersionFile.version_id == v.id)
         .scalar()
     ) or 0
 
@@ -239,8 +232,7 @@ def _version_stats(v: BackupVersion, db: Session) -> VersionInfo:
         created_at=str(v.created_at),
         finished_at=str(v.finished_at) if v.finished_at else None,
         duration_seconds=duration,
-        file_count=active_count,
-        deleted_count=deleted_count,
+        file_count=file_count,
         total_size_bytes=int(total_size),
     )
 
@@ -264,15 +256,13 @@ def _backup_info(b: BackupID, db: Session) -> BackupInfo:
     if latest_id:
         file_count = (
             db.query(func.count(VersionFile.id))
-            .filter(VersionFile.version_id == latest_id,
-                    VersionFile.status     == "active")
+            .filter(VersionFile.version_id == latest_id)
             .scalar() or 0
         )
         total_size = (
             db.query(func.coalesce(func.sum(FileContent.size), 0))
             .join(VersionFile, VersionFile.sha256 == FileContent.sha256)
-            .filter(VersionFile.version_id == latest_id,
-                    VersionFile.status     == "active")
+            .filter(VersionFile.version_id == latest_id)
             .scalar() or 0
         )
 
@@ -324,7 +314,7 @@ def dashboard():
 
 @app.get("/health", response_model=HealthResponse)
 def health():
-    return HealthResponse(status="ok", version="2.1.0", time=datetime.utcnow().isoformat())
+    return HealthResponse(status="ok", version="2.2.0", time=datetime.utcnow().isoformat())
 
 
 # -- Backups ------------------------------------------------------------------
@@ -506,10 +496,9 @@ async def upload_file(
     if vf:
         vf.sha256 = sha256
         vf.mtime  = mtime
-        vf.status = "active"
     else:
         vf = VersionFile(version_id=v.id, original_path=original_path,
-                         sha256=sha256, mtime=mtime, status="active")
+                         sha256=sha256, mtime=mtime)
         db.add(vf)
 
     db.commit()
@@ -525,30 +514,9 @@ async def upload_file(
 # -- Sync ---------------------------------------------------------------------
 @app.post("/sync", response_model=SyncResponse, dependencies=[Depends(require_api_key)])
 def sync(req: SyncRequest, db: Session = Depends(get_db)):
-    """
-    Marca como deleted via UPDATE em massa quando possivel.
-    Pega so os paths para retornar a lista — nao carrega VersionFiles inteiros.
-    """
-    v = _get_version_or_404(req.backup_label, req.version_key, db)
-    client_set = set(req.existing_paths)
-
-    # Busca apenas (id, original_path) — leve
-    rows = (db.query(VersionFile.id, VersionFile.original_path)
-            .filter(VersionFile.version_id == v.id,
-                    VersionFile.status     == "active")
-            .all())
-
-    to_mark = [r[0] for r in rows if r[1] not in client_set]
-    marked  = [r[1] for r in rows if r[1] not in client_set]
-
-    if to_mark:
-        # UPDATE em massa
-        db.query(VersionFile).filter(VersionFile.id.in_(to_mark)).update(
-            {VersionFile.status: "deleted"}, synchronize_session=False
-        )
-        db.commit()
-
-    return SyncResponse(marked_deleted=marked, deleted_count=len(marked))
+    """Confirma que a versao foi sincronizada com o cliente."""
+    _get_version_or_404(req.backup_label, req.version_key, db)
+    return SyncResponse(synced=True)
 
 
 # -- Files --------------------------------------------------------------------
@@ -556,30 +524,24 @@ def sync(req: SyncRequest, db: Session = Depends(get_db)):
 def list_files(
     backup_label: str,
     version_key: str,
-    include_deleted: bool = False,
     db: Session = Depends(get_db),
 ):
-    """
-    Lista arquivos com size — usa JOIN explicito em vez de lazy load (N+1).
-    """
+    """Lista arquivos com size — usa JOIN explicito em vez de lazy load (N+1)."""
     v = _get_version_or_404(backup_label, version_key, db)
 
-    q = (db.query(
-            VersionFile.id,
-            VersionFile.original_path,
-            VersionFile.sha256,
-            VersionFile.mtime,
-            VersionFile.status,
-            VersionFile.created_at,
-            FileContent.size,
-        )
-        .outerjoin(FileContent, FileContent.sha256 == VersionFile.sha256)
-        .filter(VersionFile.version_id == v.id))
+    rows = (db.query(
+                VersionFile.id,
+                VersionFile.original_path,
+                VersionFile.sha256,
+                VersionFile.mtime,
+                VersionFile.created_at,
+                FileContent.size,
+            )
+            .outerjoin(FileContent, FileContent.sha256 == VersionFile.sha256)
+            .filter(VersionFile.version_id == v.id)
+            .order_by(VersionFile.original_path)
+            .all())
 
-    if not include_deleted:
-        q = q.filter(VersionFile.status == "active")
-
-    rows = q.order_by(VersionFile.original_path).all()
     return [
         FileInfo(
             id=r.id,
@@ -587,7 +549,6 @@ def list_files(
             sha256=r.sha256,
             size=r.size or 0,
             mtime=r.mtime,
-            status=r.status,
             created_at=str(r.created_at),
         )
         for r in rows
@@ -597,15 +558,12 @@ def list_files(
 @app.get("/files/{file_id}/download", dependencies=[Depends(require_api_key)])
 def download_file(file_id: int, db: Session = Depends(get_db)):
     """Uma unica query com JOIN."""
-    row = (db.query(VersionFile.status, VersionFile.original_path,
-                    FileContent.stored_at)
+    row = (db.query(VersionFile.original_path, FileContent.stored_at)
            .join(FileContent, FileContent.sha256 == VersionFile.sha256)
            .filter(VersionFile.id == file_id)
            .first())
     if not row:
         raise HTTPException(404, "Arquivo nao encontrado")
-    if row.status == "deleted":
-        raise HTTPException(410, "Arquivo marcado como deletado nesta versao")
     p = Path(row.stored_at)
     if not p.exists():
         raise HTTPException(410, "Conteudo fisico nao encontrado")
