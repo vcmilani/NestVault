@@ -180,6 +180,18 @@ def upload_file(server, local_path: Path, label, version_key, original_path, mti
     return r.json()
 
 
+def delete_label_api(server, label):
+    r = _session.delete(f"{server}/backups/{label}", headers=build_headers(), timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
+def force_cleanup_orphans_api(server):
+    r = _session.post(f"{server}/maintenance/cleanup-orphans", headers=build_headers(), timeout=60)
+    r.raise_for_status()
+    return r.json()
+
+
 def sync_version(server, label, version_key, existing_paths):
     r = _session.post(f"{server}/sync",
                       json={"backup_label": label, "version_key": version_key,
@@ -530,9 +542,37 @@ def cleanup(label=None, keep=5, server=DEFAULT_SERVER):
         log.info("=" * 50)
 
 
+# -- Delete label -------------------------------------------------------------
+def delete_label(label, server=DEFAULT_SERVER, force=False):
+    if not force:
+        confirm = input(f"Tem certeza que deseja excluir o label [{label}] e TODAS as suas versoes? [s/N] ")
+        if confirm.strip().lower() not in ("s", "sim"):
+            log.info("Operacao cancelada.")
+            return
+    try:
+        delete_label_api(server, label)
+        log.info(f"Label [{label}] excluido. Limpeza dos arquivos iniciada em background.")
+    except requests.RequestException as e:
+        log.error(f"Erro ao excluir label: {e}")
+        sys.exit(1)
+
+
+# -- Cleanup orphans ----------------------------------------------------------
+def cleanup_orphans(server=DEFAULT_SERVER):
+    log.info("Iniciando limpeza forcada de arquivos orfaos...")
+    try:
+        result = force_cleanup_orphans_api(server)
+        files = result.get("files_removed", 0)
+        freed = result.get("bytes_freed", 0)
+        log.info(f"Limpeza concluida: {files} arquivo(s) removido(s), {fmt_size(freed)} liberados")
+    except requests.RequestException as e:
+        log.error(f"Erro na limpeza: {e}")
+        sys.exit(1)
+
+
 # -- CLI ----------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Backup Files — Raspberry Pi v2.2")
+    parser = argparse.ArgumentParser(description="Backup Files — Raspberry Pi v2.5")
     sub = parser.add_subparsers(dest="command", required=True)
 
     # backup
@@ -577,6 +617,16 @@ def main():
                     help="Quantas versoes manter por label (padrao: 5)")
     pc.add_argument("--server", default=DEFAULT_SERVER)
 
+    # delete-label
+    pdl = sub.add_parser("delete-label", help="Exclui um label e todas as suas versoes")
+    pdl.add_argument("--label", required=True, help="Label a excluir")
+    pdl.add_argument("--server", default=DEFAULT_SERVER)
+    pdl.add_argument("--force", action="store_true", help="Sem confirmacao interativa")
+
+    # cleanup-orphans
+    pco = sub.add_parser("cleanup-orphans", help="Forca limpeza de arquivos sem backup associado")
+    pco.add_argument("--server", default=DEFAULT_SERVER)
+
     args = parser.parse_args()
 
     if args.command == "backup":
@@ -606,6 +656,14 @@ def main():
         else:
             log.error("Informe --label <nome> ou --all")
             sys.exit(1)
+
+    elif args.command == "delete-label":
+        log.info(f"Comando  : DELETE-LABEL  label=[{args.label}]")
+        delete_label(args.label, args.server, args.force)
+
+    elif args.command == "cleanup-orphans":
+        log.info("Comando  : CLEANUP-ORPHANS")
+        cleanup_orphans(args.server)
 
 
 if __name__ == "__main__":
