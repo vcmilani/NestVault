@@ -1,9 +1,11 @@
-# 🗄️ Backup Files — Raspberry Pi  `v2.4`
+# 🗄️ Backup Files — Raspberry Pi  `v2.5`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
 Cada execução de backup cria uma nova versão dentro do label. O servidor armazena o conteúdo físico apenas uma vez por sha256 — versões diferentes que compartilham arquivos idênticos não duplicam o storage.
 
+> **v2.5** — limpeza de arquivos ao deletar label ou versão agora é assíncrona (retorna imediatamente ao cliente); verificação de espaço em disco ao finalizar backup também é assíncrona; novo endpoint `POST /maintenance/cleanup-orphans` para limpeza forçada; novos comandos `delete-label` e `cleanup-orphans` no cliente.
+>
 > **v2.4** — comparação entre versões no dashboard (adicionados, removidos, modificados); cache mtime+size no client elimina leitura de disco para arquivos inalterados; auto-refresh removido do dashboard.
 >
 > **v2.3** — limpeza automática por espaço em disco: ao finalizar cada backup, o servidor verifica o espaço livre no filesystem onde o storage está montado. Se menor que 5%, versões antigas são apagadas automaticamente, mantendo sempre ao menos 1 versão por label.
@@ -191,7 +193,7 @@ export BACKUP_API_KEY="uma-chave-secreta-forte-aqui"
 
 ## 🚀 Comandos
 
-O cliente possui cinco subcomandos: `backup`, `backups`, `versions`, `restore` e `cleanup`.
+O cliente possui sete subcomandos: `backup`, `backups`, `versions`, `restore`, `cleanup`, `delete-label` e `cleanup-orphans`.
 
 ---
 
@@ -417,9 +419,60 @@ Cleanup em todos os labels (3 encontrados), keep=5
 
 ---
 
+### delete-label
+
+Exclui permanentemente um label e **todas as suas versões**. Os arquivos físicos órfãos são apagados do storage em background pelo servidor — o cliente recebe a confirmação imediatamente.
+
+```bash
+# Com confirmação interativa (padrão)
+python backup_client.py delete-label \
+  --label "notebook-joao" \
+  --server http://192.168.1.100:8000
+
+# Sem confirmação — para uso em scripts
+python backup_client.py delete-label \
+  --label "notebook-joao" \
+  --server http://192.168.1.100:8000 \
+  --force
+```
+
+| Opção | Obrigatório | Descrição |
+|-------|:-----------:|-----------|
+| `--label` | ✅ | Label a excluir |
+| `--server` | | URL do servidor |
+| `--force` | | Pula a confirmação interativa |
+
+> ⚠️ Operação irreversível. Use `--force` apenas em scripts onde a confirmação não é possível.
+
+---
+
+### cleanup-orphans
+
+Força a limpeza imediata de arquivos físicos que não estão mais referenciados por nenhuma versão ativa. Útil após deleções em massa ou para liberar espaço rapidamente.
+
+```bash
+python backup_client.py cleanup-orphans \
+  --server http://192.168.1.100:8000
+```
+
+| Opção | Descrição |
+|-------|-----------|
+| `--server` | URL do servidor |
+
+Exemplo de saída:
+
+```
+Iniciando limpeza forcada de arquivos orfaos...
+Limpeza concluida: 14 arquivo(s) removido(s), 312.4 MB liberados
+```
+
+---
+
 ### Limpeza automática por espaço em disco
 
-O servidor verifica automaticamente o espaço livre **ao finalizar cada backup** (status → `done`). Se o espaço livre no disco estiver abaixo de **5%**, versões antigas são apagadas até que o espaço seja normalizado.
+O servidor verifica automaticamente o espaço livre **ao finalizar cada backup** (status → `done`). Se o espaço livre no disco estiver abaixo de **5%**, versões antigas são apagadas até que o espaço seja normalizado. Essa verificação ocorre **em background** — o cliente recebe a confirmação do backup imediatamente, sem esperar o scan de disco.
+
+Da mesma forma, ao excluir um label (`DELETE /backups/{label}`) ou uma versão (`DELETE /backups/{label}/versions/{key}`), a remoção dos registros no banco é imediata, mas a limpeza dos arquivos físicos órfãos ocorre em background.
 
 **Comportamento:**
 
@@ -487,6 +540,17 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 ---
 
 ## ⚡ Otimizações
+
+### v2.5
+
+| Componente | Mudança |
+|---|---|
+| **Delete label (server)** | Limpeza de arquivos órfãos movida para `BackgroundTasks` — resposta imediata ao cliente |
+| **Delete versão (server)** | Idem — `files_removed_from_storage` retorna `0` (limpeza ocorre em background) |
+| **Finalizar backup (server)** | Verificação de espaço em disco (`_auto_cleanup_if_needed`) movida para background |
+| **`POST /maintenance/cleanup-orphans`** | Novo endpoint para limpeza forçada e síncrona de arquivos sem referência |
+| **Client — `delete-label`** | Novo comando para excluir label com confirmação interativa ou `--force` |
+| **Client — `cleanup-orphans`** | Novo comando que chama o endpoint de limpeza e exibe arquivos removidos e bytes liberados |
 
 ### v2.4
 
@@ -594,6 +658,14 @@ O conteúdo de cada arquivo é armazenado **uma única vez**, independente de qu
 | `GET` | `/files/{id}/download` | Faz download |
 
 > Paths com caracteres especiais são transmitidos em **base64** no header `X-Original-Path`.
+
+### Manutenção
+
+| Método | Endpoint | Descrição |
+|--------|----------|-----------|
+| `POST` | `/maintenance/cleanup-orphans` | Remove todos os arquivos físicos não referenciados por nenhuma versão |
+
+> Retorna `{ "files_removed": N, "bytes_freed": N }`. Útil após deleções em massa ou para liberar espaço imediatamente. Operação **síncrona** — aguarda a conclusão antes de responder.
 
 ---
 
@@ -789,6 +861,14 @@ Stats agregados refletem a **última versão** do backup (qualquer status).
 }
 ```
 
+#### `OrphanCleanupResponse`
+```json
+{
+  "files_removed": 14,
+  "bytes_freed": 327680000
+}
+```
+
 #### `CompareResponse`
 ```json
 {
@@ -836,6 +916,7 @@ Stats agregados refletem a **última versão** do backup (qualquer status).
 | `POST /sync` | `SyncRequest` | `SyncResponse` |
 | `GET /files` | query: `backup_label`, `version_key` | `list[FileInfo]` |
 | `GET /files/{id}/download` | — | binary stream |
+| `POST /maintenance/cleanup-orphans` | — | `OrphanCleanupResponse` |
 
 ---
 

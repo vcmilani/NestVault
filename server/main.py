@@ -1,14 +1,15 @@
 """
-Backup Files — Raspberry Pi  v2.2
+Backup Files — Raspberry Pi  v2.5
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
 - Queries agregadas (func.count, func.sum) em vez de carregar entidades
 - Indices no banco + WAL mode
 - Cleanup de orfaos em uma unica query
+- Limpeza de arquivos ao deletar label/versao feita em background (nao bloqueia o cliente)
 """
 
-from fastapi import FastAPI, Request, HTTPException, Depends, Header
+from fastapi import FastAPI, Request, HTTPException, Depends, Header, BackgroundTasks
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -21,7 +22,7 @@ from collections import defaultdict
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from database import init_db, get_db, BackupID, BackupVersion, FileContent, VersionFile
+from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, VersionFile
 
 # -- Config -------------------------------------------------------------------
 STORAGE_DIR = Path(os.getenv("STORAGE_DIR", "./storage"))
@@ -33,7 +34,7 @@ AUTH_ENABLED = bool(API_KEY)
 # Buffer de leitura/escrita - 1 MB e bem mais rapido que 64KB no I/O
 CHUNK_SIZE = 1024 * 1024
 
-app = FastAPI(title="Backup Files — Raspberry Pi", version="2.2.0")
+app = FastAPI(title="Backup Files — Raspberry Pi", version="2.5.0")
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -157,6 +158,10 @@ class CleanupResponse(BaseModel):
     kept: int
     versions_removed: list[str]
     storage_files_removed: int
+
+class OrphanCleanupResponse(BaseModel):
+    files_removed: int
+    bytes_freed: int
 
 class CompareFileEntry(BaseModel):
     original_path: str
@@ -341,7 +346,7 @@ def _auto_cleanup_if_needed(db: Session) -> None:
         label, key = v.backup_label, v.version_key
         db.delete(v)
         db.commit()
-        removed = _cleanup_orphan_contents(db)
+        removed, _ = _cleanup_orphan_contents(db)
         free_pct = _get_disk_free_percent()
         print(f"[auto-cleanup] Removida {label}/{key} — {removed} arquivo(s) do storage — livre: {free_pct:.1f}%")
         if free_pct >= 5.0:
@@ -351,12 +356,12 @@ def _auto_cleanup_if_needed(db: Session) -> None:
     print(f"[auto-cleanup] Concluído. Livre: {free_pct:.1f}% — todas as labels com 1 versão.")
 
 
-def _cleanup_orphan_contents(db: Session) -> int:
+def _cleanup_orphan_contents(db: Session) -> tuple[int, int]:
     """
     Remove FileContents nao referenciados por nenhum VersionFile.
     Usa subquery em vez de N+1 queries.
+    Retorna (arquivos_removidos, bytes_liberados).
     """
-    # Subquery: shas que ainda tem referencias
     used_shas = db.query(VersionFile.sha256).distinct().subquery()
     orphans = (
         db.query(FileContent)
@@ -364,14 +369,36 @@ def _cleanup_orphan_contents(db: Session) -> int:
         .all()
     )
     removed = 0
+    bytes_freed = 0
     for fc in orphans:
         p = Path(fc.stored_at)
         if p.exists():
             p.unlink()
+        bytes_freed += fc.size
         db.delete(fc)
         removed += 1
     db.commit()
-    return removed
+    return removed, bytes_freed
+
+
+def _bg_cleanup_orphan_contents() -> None:
+    """Background task: cria sua propria sessao DB e limpa conteudos orfaos."""
+    db = SessionLocal()
+    try:
+        count, _ = _cleanup_orphan_contents(db)
+        if count:
+            print(f"[bg-cleanup] {count} arquivo(s) orfao(s) removido(s) do storage")
+    finally:
+        db.close()
+
+
+def _bg_auto_cleanup() -> None:
+    """Background task: cria sua propria sessao DB e executa auto-cleanup se necessario."""
+    db = SessionLocal()
+    try:
+        _auto_cleanup_if_needed(db)
+    finally:
+        db.close()
 
 
 # -- Dashboard ----------------------------------------------------------------
@@ -385,7 +412,7 @@ def dashboard():
 
 @app.get("/health", response_model=HealthResponse)
 def health():
-    return HealthResponse(status="ok", version="2.2.0", time=datetime.utcnow().isoformat())
+    return HealthResponse(status="ok", version="2.5.0", time=datetime.utcnow().isoformat())
 
 
 # -- Backups ------------------------------------------------------------------
@@ -418,7 +445,7 @@ def get_backup(label: str, db: Session = Depends(get_db)):
 
 
 @app.delete("/backups/{label}", response_model=BackupDeletedResponse, dependencies=[Depends(require_api_key)])
-def delete_backup(label: str, db: Session = Depends(get_db)):
+def delete_backup(label: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     b = _get_backup_or_404(label, db)
     # Cascade da relationship cuida dos VersionFiles automaticamente
     db.query(BackupVersion).filter(BackupVersion.backup_label == label).delete(
@@ -426,7 +453,7 @@ def delete_backup(label: str, db: Session = Depends(get_db)):
     )
     db.delete(b)
     db.commit()
-    _cleanup_orphan_contents(db)
+    background_tasks.add_task(_bg_cleanup_orphan_contents)
     return BackupDeletedResponse(status="deleted", label=label)
 
 
@@ -462,26 +489,26 @@ def get_version(label: str, version_key: str, db: Session = Depends(get_db)):
 
 
 @app.patch("/backups/{label}/versions/{version_key}", response_model=VersionInfo, dependencies=[Depends(require_api_key)])
-def finish_version(label: str, version_key: str, req: VersionFinish, db: Session = Depends(get_db)):
+def finish_version(label: str, version_key: str, req: VersionFinish, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     v = _get_version_or_404(label, version_key, db)
     v.status = req.status
     v.finished_at = datetime.utcnow()
     db.commit()
     if req.status == "done":
-        _auto_cleanup_if_needed(db)
+        background_tasks.add_task(_bg_auto_cleanup)
     return _version_stats(v, db)
 
 
 @app.delete("/backups/{label}/versions/{version_key}", response_model=VersionDeletedResponse, dependencies=[Depends(require_api_key)])
-def delete_version(label: str, version_key: str, db: Session = Depends(get_db)):
+def delete_version(label: str, version_key: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     v = _get_version_or_404(label, version_key, db)
     db.delete(v)
     db.commit()
-    removed = _cleanup_orphan_contents(db)
+    background_tasks.add_task(_bg_cleanup_orphan_contents)
     return VersionDeletedResponse(
         status="deleted",
         version_key=version_key,
-        files_removed_from_storage=removed,
+        files_removed_from_storage=0,
     )
 
 
@@ -694,6 +721,14 @@ def compare_versions(label: str, v1: str, v2: str, db: Session = Depends(get_db)
                            summary_unchanged=unchanged)
 
 
+# -- Maintenance --------------------------------------------------------------
+@app.post("/maintenance/cleanup-orphans", response_model=OrphanCleanupResponse, dependencies=[Depends(require_api_key)])
+def force_cleanup_orphans(db: Session = Depends(get_db)):
+    """Remove todos os FileContents nao referenciados por nenhuma versao ativa."""
+    files_removed, bytes_freed = _cleanup_orphan_contents(db)
+    return OrphanCleanupResponse(files_removed=files_removed, bytes_freed=bytes_freed)
+
+
 # -- Cleanup ------------------------------------------------------------------
 @app.post("/backups/{label}/cleanup", response_model=CleanupResponse, dependencies=[Depends(require_api_key)])
 def cleanup_versions(label: str, req: CleanupRequest, db: Session = Depends(get_db)):
@@ -716,7 +751,7 @@ def cleanup_versions(label: str, req: CleanupRequest, db: Session = Depends(get_
         synchronize_session=False
     )
     db.commit()
-    orphans_removed = _cleanup_orphan_contents(db)
+    orphans_removed, _ = _cleanup_orphan_contents(db)
     return CleanupResponse(
         kept=req.keep,
         versions_removed=keys_removed,
