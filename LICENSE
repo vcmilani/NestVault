@@ -1,0 +1,74 @@
+Creative Commons Attribution-NonCommercial 4.0 International License (CC BY-NC 4.0)
+
+Copyright (c) 2026 vcmilani
+Project: backup_files — Raspberry Pi Backup System with Versioning and Deduplication
+Repository: https://github.com/vcmilani/backup_files
+
+=============================================================================
+
+You are free to:
+
+  Share  — copy and redistribute the material in any medium or format
+  Adapt  — remix, transform, and build upon the material
+
+Under the following terms:
+
+  Attribution      — You must give appropriate credit to the original author
+                     (vcmilani), provide a link to this license, and indicate
+                     if changes were made. You may do so in any reasonable
+                     manner, but not in any way that suggests the licensor
+                     endorses you or your use.
+
+  NonCommercial    — You may NOT use the material for commercial purposes.
+                     This includes, but is not limited to:
+                       • Selling this software or derivatives of it
+                       • Using this software as part of a paid product or
+                         service
+                       • Deploying this software within a for-profit
+                         organization for business operations
+                       • Offering this software as a hosted/SaaS solution
+                         for profit
+
+  No additional    — You may not apply legal terms or technological measures
+  restrictions       that legally restrict others from doing anything the
+                     license permits.
+
+=============================================================================
+
+PERMITTED USES (examples):
+
+  ✔ Personal backup of your own files at home
+  ✔ Learning, studying, and experimentation
+  ✔ Academic or research purposes (non-commercial)
+  ✔ Modification and redistribution under the same license
+  ✔ Use within non-profit organizations (not generating revenue)
+
+PROHIBITED USES (examples):
+
+  ✗ Selling this software or a modified version of it
+  ✗ Offering backup-as-a-service commercially based on this code
+  ✗ Integrating into a commercial product or platform
+  ✗ Corporate internal deployment for business operations
+  ✗ Any use that generates direct or indirect financial benefit
+
+=============================================================================
+
+NOTICES:
+
+  No warranties are given. The license may not give you all of the
+  permissions necessary for your intended use. Other rights such as
+  publicity, privacy, or moral rights may limit how you use the material.
+
+  The author provides this software "as is", without warranty of any kind,
+  express or implied, including but not limited to the warranties of
+  merchantability, fitness for a particular purpose, and non-infringement.
+  In no event shall the author be liable for any claim, damages, or other
+  liability arising from the use of this software.
+
+=============================================================================
+
+Full license text available at:
+https://creativecommons.org/licenses/by-nc/4.0/legalcode
+
+Summary available at:
+https://creativecommons.org/licenses/by-nc/4.0/
