@@ -34,7 +34,7 @@ AUTH_ENABLED = bool(API_KEY)
 # Buffer de leitura/escrita - 1 MB e bem mais rapido que 64KB no I/O
 CHUNK_SIZE = 1024 * 1024
 
-app = FastAPI(title="Backup Files — Raspberry Pi", version="2.5.0")
+app = FastAPI(title="Backup Files — Raspberry Pi", version="2.6.0")
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -72,6 +72,23 @@ class CheckRequest(BaseModel):
     sha256: str = Field(..., min_length=64, max_length=64)
     size: int = Field(..., ge=0)
     mtime: float
+
+class CheckBatchItem(BaseModel):
+    original_path: str
+    sha256: str = Field(..., min_length=64, max_length=64)
+    size: int = Field(..., ge=0)
+    mtime: float
+
+class CheckBatchRequest(BaseModel):
+    backup_label: str
+    version_key: str
+    files: list[CheckBatchItem] = Field(..., min_length=1, max_length=500)
+
+class CheckBatchResultItem(BaseModel):
+    needs_upload: bool
+    content_exists: bool
+    reason: str
+    file_id: Optional[int] = None
 
 class SyncRequest(BaseModel):
     backup_label: str
@@ -412,7 +429,7 @@ def dashboard():
 
 @app.get("/health", response_model=HealthResponse)
 def health():
-    return HealthResponse(status="ok", version="2.5.0", time=datetime.utcnow().isoformat())
+    return HealthResponse(status="ok", version="2.6.0", time=datetime.utcnow().isoformat())
 
 
 # -- Backups ------------------------------------------------------------------
@@ -538,6 +555,34 @@ def check_file(req: CheckRequest, db: Session = Depends(get_db)):
         content_exists=content_exists,
         reason="Conteudo ja no storage — apenas registrar" if content_exists else "Upload necessario",
     )
+
+
+# -- Check batch --------------------------------------------------------------
+@app.post("/check/batch", response_model=list[CheckBatchResultItem], dependencies=[Depends(require_api_key)])
+def check_batch(req: CheckBatchRequest, db: Session = Depends(get_db)):
+    """Verifica N arquivos em uma unica request. Resultados na mesma ordem da entrada."""
+    v = _get_version_or_404(req.backup_label, req.version_key, db)
+    results: list[CheckBatchResultItem] = []
+    for item in req.files:
+        vf = (db.query(VersionFile.id)
+              .filter(VersionFile.version_id    == v.id,
+                      VersionFile.original_path == item.original_path,
+                      VersionFile.sha256        == item.sha256)
+              .first())
+        if vf:
+            results.append(CheckBatchResultItem(
+                needs_upload=False, content_exists=True,
+                reason="Ja registrado nesta versao", file_id=vf[0]))
+            continue
+        content_exists = db.query(FileContent.sha256).filter(
+            FileContent.sha256 == item.sha256
+        ).first() is not None
+        results.append(CheckBatchResultItem(
+            needs_upload=True,
+            content_exists=content_exists,
+            reason="Conteudo ja no storage — apenas registrar" if content_exists else "Upload necessario",
+        ))
+    return results
 
 
 # -- Upload -------------------------------------------------------------------

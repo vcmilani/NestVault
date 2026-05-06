@@ -180,6 +180,30 @@ def upload_file(server, local_path: Path, label, version_key, original_path, mti
     return r.json()
 
 
+def check_batch(server, label, version_key, items: list[dict]) -> list[dict]:
+    """Verifica N arquivos em uma unica request. items: lista de dicts com original_path, sha256, size, mtime."""
+    r = _session.post(
+        f"{server}/check/batch",
+        json={"backup_label": label, "version_key": version_key, "files": items},
+        headers=build_headers(),
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _server_supports_batch(server: str) -> bool:
+    try:
+        r = _session.get(f"{server}/health", headers=build_headers(), timeout=5)
+        if not r.ok:
+            return False
+        parts = r.json().get("version", "0.0.0").split(".")
+        major, minor = int(parts[0]), int(parts[1])
+        return (major, minor) >= (2, 6)
+    except Exception:
+        return False
+
+
 def delete_label_api(server, label):
     r = _session.delete(f"{server}/backups/{label}", headers=build_headers(), timeout=30)
     r.raise_for_status()
@@ -228,9 +252,15 @@ def _fetch_prev_cache(server, label) -> dict:
 
 
 # -- Backup -------------------------------------------------------------------
+def _chunked(lst: list, n: int):
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
+
+
 def backup_directory(
     directory, label, server=DEFAULT_SERVER, dry_run=False,
     path_prefix=None, exclude=None, client_name=None, workers=4, verbose=False,
+    batch_size=100,
 ):
     root = Path(directory).resolve()
     if not root.exists():
@@ -270,63 +300,173 @@ def backup_directory(
     lock  = threading.Lock()
     all_paths = [op for _, op in pending]
 
+    use_batch = not dry_run and _server_supports_batch(server)
+    if use_batch:
+        log.info(f"Modo      : batch ({batch_size} arquivos/request)")
+    effective = 1 if dry_run else workers
+    if effective > 1:
+        log.info(f"Workers   : {effective} threads paralelas")
+
     overall = tqdm(
         total=total, unit="arq", desc="Progresso", position=0, leave=True,
         bar_format="  {desc}: {percentage:5.1f}%  {n_fmt}/{total_fmt}  [{elapsed}<{remaining}]",
     )
 
-    def process(fp: Path, op: str):
-        stat  = fp.stat()
-        size  = stat.st_size
-        mtime = stat.st_mtime
-        try:
-            # Cache hit: mtime e size inalterados → registrar sem ler o disco
+    def _update_bar():
+        overall.update(1)
+        with lock:
+            overall.set_description(
+                f"Progresso  ↑{stats['uploaded']} ⊕{stats['registered']} "
+                f"⚡{stats['fast']} ✗{stats['errors']}"
+            )
+
+    if use_batch:
+        # ------------------------------------------------------------------ #
+        # Fase 1 — cache hits + hashing paralelo + verificação em lote        #
+        # ------------------------------------------------------------------ #
+        fast_files   = []   # (fp, op, mtime, sha256) — cache hit
+        pending_hash = []   # (fp, op, mtime, size) — precisam de sha256
+
+        for fp, op in pending:
+            stat  = fp.stat()
+            size  = stat.st_size
+            mtime = stat.st_mtime
             cached = prev_cache.get(op)
             if cached and cached["mtime"] == mtime and cached["size"] == size:
-                log.debug(f"FAST   {op}  ({fmt_size(size)})  [mtime+size ok, sem leitura de disco]")
-                if not dry_run:
-                    register_file(server, label, version_key, op, mtime, cached["sha256"])
-                with lock: stats["fast"] += 1
-                return
-
-            sha256 = sha256_file(fp)
-            check  = check_file(server, label, version_key, op, sha256, size, mtime)
-
-            if not check["needs_upload"]:
-                log.debug(f"SKIP   {op}")
-                with lock: stats["skipped"] += 1
-            elif check.get("content_exists"):
-                log.info(f"REG    {op}  ({fmt_size(size)})  [conteudo ja no storage]")
-                if not dry_run:
-                    register_file(server, label, version_key, op, mtime, sha256)
-                with lock: stats["registered"] += 1
+                fast_files.append((fp, op, mtime, cached["sha256"]))
             else:
-                log.info(f"UPLOAD {op}  ({fmt_size(size)})")
-                if not dry_run:
-                    upload_file(server, fp, label, version_key, op, mtime)
-                with lock: stats["uploaded"] += 1
+                pending_hash.append((fp, op, mtime, size))
 
-        except requests.RequestException as e:
-            log.error(f"  ERRO em {op}: {e}")
-            with lock: stats["errors"] += 1
-        finally:
-            overall.update(1)
-            with lock:
-                overall.set_description(
-                    f"Progresso  ↑{stats['uploaded']} ⊕{stats['registered']} "
-                    f"⚡{stats['fast']} ✗{stats['errors']}"
-                )
+        # Hashing em paralelo
+        hashed: dict[str, tuple[str, int, float]] = {}  # op -> (sha256, size, mtime)
+        if pending_hash:
+            with ThreadPoolExecutor(max_workers=effective) as pool:
+                def _hash(item):
+                    fp, op, mtime, size = item
+                    return op, sha256_file(fp), size, mtime
+                for op, sha256, size, mtime in pool.map(_hash, pending_hash):
+                    hashed[op] = (sha256, size, mtime)
 
-    effective = 1 if dry_run else workers
-    if effective > 1:
-        log.info(f"Workers   : {effective} threads paralelas")
+        # Verificação em lote
+        # action_map: op -> ("skip"|"register"|"upload", sha256, size, mtime, fp)
+        action_map: dict[str, tuple] = {}
 
-    with ThreadPoolExecutor(max_workers=effective) as pool:
-        futures = {pool.submit(process, fp, op): op for fp, op in pending}
-        for future in as_completed(futures):
-            if exc := future.exception():
-                log.error(f"  ERRO inesperado: {exc}")
+        fp_map = {o: f for f, o, *_ in pending_hash}
+        items_to_check = [
+            {"original_path": op, "sha256": sha256, "size": size, "mtime": mtime}
+            for op, (sha256, size, mtime) in hashed.items()
+        ]
+        for batch in _chunked(items_to_check, batch_size):
+            try:
+                results = check_batch(server, label, version_key, batch)
+                for item, result in zip(batch, results):
+                    op = item["original_path"]
+                    sha256, size, mtime = hashed[op]
+                    fp = fp_map[op]
+                    if not result["needs_upload"]:
+                        action_map[op] = ("skip", sha256, size, mtime, fp)
+                    elif result.get("content_exists"):
+                        action_map[op] = ("register", sha256, size, mtime, fp)
+                    else:
+                        action_map[op] = ("upload", sha256, size, mtime, fp)
+            except requests.RequestException as e:
+                log.error(f"  ERRO no batch check: {e}")
+                for item in batch:
+                    op = item["original_path"]
+                    sha256, size, mtime = hashed[op]
+                    action_map[op] = ("upload", sha256, size, mtime, fp_map[op])
+                    with lock: stats["errors"] += 1
+
+        # ------------------------------------------------------------------ #
+        # Fase 2 — uploads e registers em paralelo                            #
+        # ------------------------------------------------------------------ #
+        def _do_fast(fp, op, mtime, sha256):
+            try:
+                log.debug(f"FAST   {op}  [mtime+size ok, sem leitura de disco]")
+                register_file(server, label, version_key, op, mtime, sha256)
+                with lock: stats["fast"] += 1
+            except requests.RequestException as e:
+                log.error(f"  ERRO em {op}: {e}")
                 with lock: stats["errors"] += 1
+            finally:
+                _update_bar()
+
+        def _do_action(op, action, sha256, size, mtime, fp):
+            try:
+                if action == "skip":
+                    log.debug(f"SKIP   {op}")
+                    with lock: stats["skipped"] += 1
+                elif action == "register":
+                    log.info(f"REG    {op}  ({fmt_size(size)})  [conteudo ja no storage]")
+                    register_file(server, label, version_key, op, mtime, sha256)
+                    with lock: stats["registered"] += 1
+                else:
+                    log.info(f"UPLOAD {op}  ({fmt_size(size)})")
+                    upload_file(server, fp, label, version_key, op, mtime)
+                    with lock: stats["uploaded"] += 1
+            except requests.RequestException as e:
+                log.error(f"  ERRO em {op}: {e}")
+                with lock: stats["errors"] += 1
+            finally:
+                _update_bar()
+
+        with ThreadPoolExecutor(max_workers=effective) as pool:
+            futures = []
+            for fp, op, mtime, sha256 in fast_files:
+                futures.append(pool.submit(_do_fast, fp, op, mtime, sha256))
+            for op, (action, sha256, size, mtime, fp) in action_map.items():
+                futures.append(pool.submit(_do_action, op, action, sha256, size, mtime, fp))
+            for future in as_completed(futures):
+                if exc := future.exception():
+                    log.error(f"  ERRO inesperado: {exc}")
+                    with lock: stats["errors"] += 1
+
+    else:
+        # ------------------------------------------------------------------ #
+        # Fallback — comportamento original (check individual por worker)     #
+        # ------------------------------------------------------------------ #
+        def process(fp: Path, op: str):
+            stat  = fp.stat()
+            size  = stat.st_size
+            mtime = stat.st_mtime
+            try:
+                cached = prev_cache.get(op)
+                if cached and cached["mtime"] == mtime and cached["size"] == size:
+                    log.debug(f"FAST   {op}  ({fmt_size(size)})  [mtime+size ok, sem leitura de disco]")
+                    if not dry_run:
+                        register_file(server, label, version_key, op, mtime, cached["sha256"])
+                    with lock: stats["fast"] += 1
+                    return
+
+                sha256 = sha256_file(fp)
+                check  = check_file(server, label, version_key, op, sha256, size, mtime)
+
+                if not check["needs_upload"]:
+                    log.debug(f"SKIP   {op}")
+                    with lock: stats["skipped"] += 1
+                elif check.get("content_exists"):
+                    log.info(f"REG    {op}  ({fmt_size(size)})  [conteudo ja no storage]")
+                    if not dry_run:
+                        register_file(server, label, version_key, op, mtime, sha256)
+                    with lock: stats["registered"] += 1
+                else:
+                    log.info(f"UPLOAD {op}  ({fmt_size(size)})")
+                    if not dry_run:
+                        upload_file(server, fp, label, version_key, op, mtime)
+                    with lock: stats["uploaded"] += 1
+
+            except requests.RequestException as e:
+                log.error(f"  ERRO em {op}: {e}")
+                with lock: stats["errors"] += 1
+            finally:
+                _update_bar()
+
+        with ThreadPoolExecutor(max_workers=effective) as pool:
+            futures = {pool.submit(process, fp, op): op for fp, op in pending}
+            for future in as_completed(futures):
+                if exc := future.exception():
+                    log.error(f"  ERRO inesperado: {exc}")
+                    with lock: stats["errors"] += 1
 
     overall.close()
 
@@ -584,6 +724,8 @@ def main():
     pb.add_argument("--client", default=None)
     pb.add_argument("--exclude", nargs="+", default=[])
     pb.add_argument("--workers", type=int, default=4)
+    pb.add_argument("--batch-size", type=int, default=100, dest="batch_size",
+                    help="Arquivos por request no /check/batch (padrao: 100)")
     pb.add_argument("--dry-run", action="store_true")
     pb.add_argument("--verbose", action="store_true", help="Mostra logs de arquivos cacheados e ignorados")
 
@@ -633,7 +775,7 @@ def main():
         log.info(f"Comando  : BACKUP  label=[{args.label}]")
         backup_directory(args.directory, args.label, args.server,
                          args.dry_run, args.prefix, args.exclude,
-                         args.client, args.workers, args.verbose)
+                         args.client, args.workers, args.verbose, args.batch_size)
 
     elif args.command == "backups":
         list_backups(args.server, args.client)

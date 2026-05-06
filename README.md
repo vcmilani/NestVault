@@ -1,9 +1,11 @@
-# 🗄️ Backup Files — Raspberry Pi  `v2.5`
+# 🗄️ Backup Files — Raspberry Pi  `v2.6`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
 Cada execução de backup cria uma nova versão dentro do label. O servidor armazena o conteúdo físico apenas uma vez por sha256 — versões diferentes que compartilham arquivos idênticos não duplicam o storage.
 
+> **v2.6** — verificação de arquivos em lote: novo endpoint `POST /check/batch` reduz drasticamente o número de round-trips em backups com muitos arquivos pequenos (ex: 8 mil arquivos → 80 requests em vez de 8 mil). O cliente detecta automaticamente o suporte ao batch pelo `/health` e usa fallback individual em servidores antigos. Novo argumento `--batch-size` para ajustar o tamanho do lote.
+>
 > **v2.5** — limpeza de arquivos ao deletar label ou versão agora é assíncrona (retorna imediatamente ao cliente); verificação de espaço em disco ao finalizar backup também é assíncrona; novo endpoint `POST /maintenance/cleanup-orphans` para limpeza forçada; novos comandos `delete-label` e `cleanup-orphans` no cliente.
 >
 > **v2.4** — comparação entre versões no dashboard (adicionados, removidos, modificados); cache mtime+size no client elimina leitura de disco para arquivos inalterados; auto-refresh removido do dashboard.
@@ -227,6 +229,12 @@ python backup_client.py backup ~/documentos \
   --server http://192.168.1.100:8000 \
   --workers 8
 
+# Ajustar tamanho do lote de verificação (padrão: 100 arquivos/request)
+python backup_client.py backup ~/documentos \
+  --label "notebook-joao" \
+  --server http://192.168.1.100:8000 \
+  --batch-size 200
+
 # Verificar sem enviar
 python backup_client.py backup ~/documentos \
   --label "notebook-joao" \
@@ -244,6 +252,7 @@ python backup_client.py backup ~/documentos \
 | `--client` | | Nome do cliente — padrão é o hostname da máquina |
 | `--exclude` | | Subpastas a ignorar — aceita múltiplos valores |
 | `--workers` | | Uploads paralelos (padrão: `4`) |
+| `--batch-size` | | Arquivos por request no `/check/batch` (padrão: `100`) |
 | `--dry-run` | | Apenas verifica, não envia |
 | `--verbose` | | Logs detalhados (arquivos cacheados e ignorados) |
 
@@ -541,6 +550,23 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 
 ## ⚡ Otimizações
 
+### v2.6
+
+| Componente | Mudança |
+|---|---|
+| **`POST /check/batch` (server)** | Novo endpoint que verifica N arquivos em uma única request. Valida a versão uma vez e itera os itens reutilizando a lógica do `/check` — erros por item não abortam o lote. Retorna resultados na mesma ordem da entrada. |
+| **Fase 1 — hashing + batch (client)** | `backup_directory` separada em duas fases: (1) cache hits → hashing sha256 em paralelo → lotes para `/check/batch`; (2) uploads/registers em paralelo via `ThreadPoolExecutor` |
+| **Detecção automática de suporte (client)** | `_server_supports_batch()` consulta `/health` e compara a versão. Servidores < 2.6 usam o `/check` individual automaticamente |
+| **`--batch-size` (client)** | Novo argumento para ajustar o tamanho do lote (padrão: `100`). Valores maiores reduzem round-trips; valores menores reduzem o impacto de falhas parciais |
+
+**Ganho esperado:**
+
+| Cenário | Antes (v2.5) | Depois (v2.6) |
+|---|---|---|
+| 1.000 arquivos, rede local 5ms | ~5s só em checks | ~0,5s |
+| 8.000 arquivos, rede local 5ms | ~40s só em checks | ~4s |
+| 8.000 arquivos, Wi-Fi 20ms | ~160s só em checks | ~16s |
+
 ### v2.5
 
 | Componente | Mudança |
@@ -651,7 +677,8 @@ O conteúdo de cada arquivo é armazenado **uma única vez**, independente de qu
 
 | Método | Endpoint | Descrição |
 |--------|----------|-----------|
-| `POST` | `/check` | Verifica se arquivo precisa upload |
+| `POST` | `/check` | Verifica se um arquivo precisa upload |
+| `POST` | `/check/batch` | Verifica N arquivos em uma única request |
 | `POST` | `/upload` | Registra arquivo na versão |
 | `POST` | `/sync` | Confirma sincronização da versão com o cliente |
 | `GET` | `/files` | Lista arquivos de uma versão |
@@ -719,6 +746,30 @@ Todos os endpoints possuem **schemas Pydantic explícitos** para entrada e saíd
 }
 ```
 
+#### `CheckBatchRequest`
+```json
+{
+  "backup_label": "notebook-joao",
+  "version_key":  "2026-04-25T10:42:31",
+  "files": [
+    {
+      "original_path": "/home/joao/docs/relatorio.pdf",
+      "sha256": "abc123...",
+      "size":   204800,
+      "mtime":  1713700000.0
+    },
+    {
+      "original_path": "/home/joao/docs/planilha.xlsx",
+      "sha256": "def456...",
+      "size":   81920,
+      "mtime":  1713600000.0
+    }
+  ]
+}
+```
+
+Limite: entre 1 e 500 itens por request. O tamanho do lote é definido pelo cliente via `--batch-size`.
+
 #### `SyncRequest`
 ```json
 {
@@ -744,7 +795,7 @@ Todos os endpoints possuem **schemas Pydantic explícitos** para entrada e saíd
 ```json
 {
   "status":  "ok",
-  "version": "2.2.0",
+  "version": "2.6.0",
   "time":    "2026-04-25T10:42:31.123456"
 }
 ```
@@ -822,6 +873,18 @@ Stats agregados refletem a **última versão** do backup (qualquer status).
   "file_id": null                    // não null se já estava registrado
 }
 ```
+
+#### `CheckBatchResultItem` (um por arquivo no batch)
+```json
+{
+  "needs_upload": true,
+  "content_exists": false,
+  "reason": "Upload necessario",
+  "file_id": null
+}
+```
+
+A resposta de `/check/batch` é `list[CheckBatchResultItem]` na mesma ordem dos arquivos enviados. Um erro em um item não descarta o restante do lote — o servidor retorna `needs_upload: true` com um `reason` descritivo para itens problemáticos.
 
 #### `UploadResponse`
 ```json
@@ -912,6 +975,7 @@ Stats agregados refletem a **última versão** do backup (qualquer status).
 | `POST /backups/{label}/cleanup` | `CleanupRequest` | `CleanupResponse` |
 | `GET /backups/{label}/compare` | query: `v1`, `v2` | `CompareResponse` |
 | `POST /check` | `CheckRequest` | `CheckResponse` |
+| `POST /check/batch` | `CheckBatchRequest` | `list[CheckBatchResultItem]` |
 | `POST /upload` | binary stream + headers `X-*` | `UploadResponse` |
 | `POST /sync` | `SyncRequest` | `SyncResponse` |
 | `GET /files` | query: `backup_label`, `version_key` | `list[FileInfo]` |
