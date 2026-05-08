@@ -1,9 +1,11 @@
-# 🗄️ Backup Files — Raspberry Pi  `v2.6`
+# 🗄️ Backup Files — Raspberry Pi  `v2.7`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
 Cada execução de backup cria uma nova versão dentro do label. O servidor armazena o conteúdo físico apenas uma vez por sha256 — versões diferentes que compartilham arquivos idênticos não duplicam o storage.
 
+> **v2.7** *(planejado)* — informações de disco no dashboard: novo endpoint `GET /storage/info` expõe espaço livre/total do disco montado e espaço liberável ao apagar versões antigas. Dashboard exibe dois novos stat boxes com barra visual de uso e o total recuperável com um cleanup.
+>
 > **v2.6** — verificação de arquivos em lote: novo endpoint `POST /check/batch` reduz drasticamente o número de round-trips em backups com muitos arquivos pequenos (ex: 8 mil arquivos → 80 requests em vez de 8 mil). O cliente detecta automaticamente o suporte ao batch pelo `/health` e usa fallback individual em servidores antigos. Novo argumento `--batch-size` para ajustar o tamanho do lote.
 >
 > **v2.5** — limpeza de arquivos ao deletar label ou versão agora é assíncrona (retorna imediatamente ao cliente); verificação de espaço em disco ao finalizar backup também é assíncrona; novo endpoint `POST /maintenance/cleanup-orphans` para limpeza forçada; novos comandos `delete-label` e `cleanup-orphans` no cliente.
@@ -542,6 +544,8 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 **O que o dashboard exibe:**
 
 - **Stats globais** — total de backups, versões, arquivos, storage total
+- **Disco livre** — espaço disponível no disco montado com barra visual de uso e percentual *(v2.7)*
+- **Espaço liberável** — quanto seria recuperado apagando versões antigas (mantendo 1 por label) *(v2.7)*
 - **Tabela de backups** — clique em um label para expandir as versões
 - **Versões** — clique em uma versão para ver os arquivos
 - **Comparação de versões** — selecione duas versões com as checkboxes e clique em ⇄ Comparar: veja arquivos adicionados, removidos, modificados e o delta de tamanho de cada um
@@ -549,6 +553,14 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 ---
 
 ## ⚡ Otimizações
+
+### v2.7
+
+| Componente | Mudança |
+|---|---|
+| **`GET /storage/info` (server)** | Novo endpoint que retorna `total_bytes`, `used_bytes`, `free_bytes` via `shutil.disk_usage(STORAGE_DIR)` e `reclaimable_bytes` via subquery: soma o `size` dos `FileContent`s cujo `sha256` não é referenciado por nenhuma versão "done" mais recente de qualquer label |
+| **Dashboard — stat boxes (6)** | Dois novos boxes no stats bar: "Disco Livre" (espaço + percentual + barra visual) e "Liberável" (bytes recuperáveis com cleanup de versões antigas) |
+| **Dashboard — barra de disco** | Barra de progresso visual dentro do box "Disco Livre" — muda de cor conforme ocupação (verde → âmbar → vermelho ao ultrapassar 80%/90%) |
 
 ### v2.6
 
@@ -685,6 +697,12 @@ O conteúdo de cada arquivo é armazenado **uma única vez**, independente de qu
 | `GET` | `/files/{id}/download` | Faz download |
 
 > Paths com caracteres especiais são transmitidos em **base64** no header `X-Original-Path`.
+
+### Storage
+
+| Método | Endpoint | Descrição |
+|--------|----------|-----------|
+| `GET` | `/storage/info` | Espaço total/livre/usado do disco e bytes liberáveis ao apagar versões antigas |
 
 ### Manutenção
 
@@ -932,6 +950,18 @@ A resposta de `/check/batch` é `list[CheckBatchResultItem]` na mesma ordem dos 
 }
 ```
 
+#### `StorageInfoResponse`
+```json
+{
+  "total_bytes":      500107862016,
+  "used_bytes":       214748364800,
+  "free_bytes":       285359497216,
+  "reclaimable_bytes": 6442450944
+}
+```
+
+`reclaimable_bytes` = tamanho total dos `FileContent`s referenciados **exclusivamente** por versões antigas (não pela versão "done" mais recente de nenhum label). É o espaço que seria recuperado rodando `cleanup --keep 1 --all`.
+
 #### `CompareResponse`
 ```json
 {
@@ -980,6 +1010,7 @@ A resposta de `/check/batch` é `list[CheckBatchResultItem]` na mesma ordem dos 
 | `POST /sync` | `SyncRequest` | `SyncResponse` |
 | `GET /files` | query: `backup_label`, `version_key` | `list[FileInfo]` |
 | `GET /files/{id}/download` | — | binary stream |
+| `GET /storage/info` | — | `StorageInfoResponse` |
 | `POST /maintenance/cleanup-orphans` | — | `OrphanCleanupResponse` |
 
 ---
