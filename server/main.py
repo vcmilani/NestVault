@@ -34,7 +34,7 @@ AUTH_ENABLED = bool(API_KEY)
 # Buffer de leitura/escrita - 1 MB e bem mais rapido que 64KB no I/O
 CHUNK_SIZE = 1024 * 1024
 
-app = FastAPI(title="Backup Files — Raspberry Pi", version="2.6.0")
+app = FastAPI(title="Backup Files — Raspberry Pi", version="2.7.0")
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -179,6 +179,12 @@ class CleanupResponse(BaseModel):
 class OrphanCleanupResponse(BaseModel):
     files_removed: int
     bytes_freed: int
+
+class StorageInfoResponse(BaseModel):
+    total_bytes: int
+    used_bytes: int
+    free_bytes: int
+    reclaimable_bytes: int
 
 class CompareFileEntry(BaseModel):
     original_path: str
@@ -429,7 +435,47 @@ def dashboard():
 
 @app.get("/health", response_model=HealthResponse)
 def health():
-    return HealthResponse(status="ok", version="2.6.0", time=datetime.utcnow().isoformat())
+    return HealthResponse(status="ok", version="2.7.0", time=datetime.utcnow().isoformat())
+
+
+@app.get("/storage/info", response_model=StorageInfoResponse, dependencies=[Depends(require_api_key)])
+def storage_info(db: Session = Depends(get_db)):
+    usage = shutil.disk_usage(STORAGE_DIR)
+
+    # Keeper = versão "done" mais recente de cada label
+    keeper_ids: list[int] = []
+    labels = db.query(BackupID.label).all()
+    for (label,) in labels:
+        latest = (
+            db.query(BackupVersion.id)
+            .filter(BackupVersion.backup_label == label, BackupVersion.status == "done")
+            .order_by(BackupVersion.version_key.desc())
+            .first()
+        )
+        if latest:
+            keeper_ids.append(latest[0])
+
+    if keeper_ids:
+        kept_shas = (
+            db.query(VersionFile.sha256)
+            .filter(VersionFile.version_id.in_(keeper_ids))
+            .distinct()
+            .subquery()
+        )
+        reclaimable = (
+            db.query(func.coalesce(func.sum(FileContent.size), 0))
+            .filter(~FileContent.sha256.in_(select(kept_shas)))
+            .scalar()
+        ) or 0
+    else:
+        reclaimable = db.query(func.coalesce(func.sum(FileContent.size), 0)).scalar() or 0
+
+    return StorageInfoResponse(
+        total_bytes=usage.total,
+        used_bytes=usage.used,
+        free_bytes=usage.free,
+        reclaimable_bytes=int(reclaimable),
+    )
 
 
 # -- Backups ------------------------------------------------------------------
