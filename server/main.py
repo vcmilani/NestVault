@@ -191,6 +191,14 @@ class StorageInfoResponse(BaseModel):
     free_bytes: int
     reclaimable_bytes: int
 
+class DiskVolumeInfo(BaseModel):
+    path: str
+    total_bytes: int
+    used_bytes: int
+    free_bytes: int
+    content_files: int
+    content_bytes: int
+
 class CompareFileEntry(BaseModel):
     original_path: str
     sha256: str
@@ -445,6 +453,14 @@ def dashboard():
     return HTMLResponse(index.read_text(encoding="utf-8"))
 
 
+@app.get("/disks", response_class=HTMLResponse, include_in_schema=False)
+def disks_page():
+    page = STATIC_DIR / "disks.html"
+    if not page.exists():
+        return HTMLResponse("<h1>Página não encontrada</h1>", status_code=404)
+    return HTMLResponse(page.read_text(encoding="utf-8"))
+
+
 @app.get("/health", response_model=HealthResponse)
 def health():
     return HealthResponse(status="ok", version="2.8.0", time=datetime.now(timezone.utc).isoformat())
@@ -491,6 +507,29 @@ def storage_info(db: Session = Depends(get_db)):
         free_bytes=usage_free,
         reclaimable_bytes=int(reclaimable),
     )
+
+
+@app.get("/storage/disks", response_model=list[DiskVolumeInfo], dependencies=[Depends(require_api_key)])
+def storage_disks(db: Session = Depends(get_db)):
+    result = []
+    for v in STORAGE_VOLUMES:
+        usage = shutil.disk_usage(v)
+        prefix = str(v).rstrip("/") + "/"
+        content_files = db.query(func.count(FileContent.sha256)).filter(
+            FileContent.stored_at.like(prefix + "%")
+        ).scalar() or 0
+        content_bytes = db.query(func.coalesce(func.sum(FileContent.size), 0)).filter(
+            FileContent.stored_at.like(prefix + "%")
+        ).scalar() or 0
+        result.append(DiskVolumeInfo(
+            path=str(v),
+            total_bytes=usage.total,
+            used_bytes=usage.used,
+            free_bytes=usage.free,
+            content_files=content_files,
+            content_bytes=int(content_bytes),
+        ))
+    return result
 
 
 # -- Backups ------------------------------------------------------------------
