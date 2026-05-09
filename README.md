@@ -1,10 +1,12 @@
-# 🗄️ Backup Files — Raspberry Pi  `v2.7`
+# 🗄️ Backup Files — Raspberry Pi  `v2.8`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
 Cada execução de backup cria uma nova versão dentro do label. O servidor armazena o conteúdo físico apenas uma vez por sha256 — versões diferentes que compartilham arquivos idênticos não duplicam o storage.
 
-> **v2.7** *(planejado)* — informações de disco no dashboard: novo endpoint `GET /storage/info` expõe espaço livre/total do disco montado e espaço liberável ao apagar versões antigas. Dashboard exibe dois novos stat boxes com barra visual de uso e o total recuperável com um cleanup.
+> **v2.8** — suporte a múltiplos discos no servidor: a variável `STORAGE_DIRS` aceita uma lista de pontos de montagem separados por vírgula (`/mnt/disk1,/mnt/disk2`). O servidor distribui automaticamente os uploads para o disco com mais espaço livre; leitura, download e restore continuam funcionando sem nenhuma mudança — `FileContent.stored_at` guarda o path absoluto. O endpoint `GET /storage/info` agrega total/livre/usado de todos os volumes. O auto-cleanup dispara se qualquer disco estiver abaixo de 5%. O cliente não precisa de nenhuma alteração.
+>
+> **v2.7** — informações de disco no dashboard: novo endpoint `GET /storage/info` expõe espaço livre/total do disco montado e espaço liberável ao apagar versões antigas. Dashboard exibe dois novos stat boxes com barra visual de uso e o total recuperável com um cleanup.
 >
 > **v2.6** — verificação de arquivos em lote: novo endpoint `POST /check/batch` reduz drasticamente o número de round-trips em backups com muitos arquivos pequenos (ex: 8 mil arquivos → 80 requests em vez de 8 mil). O cliente detecta automaticamente o suporte ao batch pelo `/health` e usa fallback individual em servidores antigos. Novo argumento `--batch-size` para ajustar o tamanho do lote.
 >
@@ -132,9 +134,16 @@ pip install -r requirements.txt
 
 ```bash
 export BACKUP_API_KEY="uma-chave-secreta-forte-aqui"   # omitir = sem autenticação
-export STORAGE_DIR="/mnt/hd-externo/backups"
 export DB_PATH="/mnt/hd-externo/backup.db"
+
+# Um disco (compatibilidade legada)
+export STORAGE_DIR="/mnt/hd-externo/backups"
+
+# Dois ou mais discos — use STORAGE_DIRS (tem precedência sobre STORAGE_DIR)
+export STORAGE_DIRS="/mnt/disk1/backups,/mnt/disk2/backups"
 ```
+
+`STORAGE_DIRS` e `STORAGE_DIR` são mutuamente compatíveis: se apenas `STORAGE_DIR` estiver definido, o servidor opera normalmente com um único volume. Se `STORAGE_DIRS` estiver definido, ele tem precedência e pode listar quantos pontos de montagem forem necessários.
 
 ### 3. Iniciar o servidor
 
@@ -155,8 +164,8 @@ After=network.target
 User=pi
 WorkingDirectory=/home/pi/backup_system/server
 Environment="BACKUP_API_KEY=sua-chave-aqui"
-Environment="STORAGE_DIR=/mnt/hd-externo/backups"
-Environment="DB_PATH=/mnt/hd-externo/backup.db"
+Environment="STORAGE_DIRS=/mnt/disk1/backups,/mnt/disk2/backups"
+Environment="DB_PATH=/mnt/disk1/backup.db"
 ExecStart=/home/pi/backup_system/server/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
 Restart=always
 
@@ -487,19 +496,20 @@ Da mesma forma, ao excluir um label (`DELETE /backups/{label}`) ou uma versão (
 
 **Comportamento:**
 
-- Verifica o espaço do filesystem onde `STORAGE_DIR` está montado — funciona corretamente com discos secundários (ex: `/mnt/hd-externo`)
+- Com múltiplos discos (`STORAGE_DIRS`), verifica o **menor** percentual livre entre todos os volumes — o cleanup dispara se **qualquer** disco estiver abaixo de 5%
+- Com disco único (`STORAGE_DIR`), verifica o espaço do filesystem onde o storage está montado
 - Apaga as versões mais antigas primeiro, distribuindo entre todos os labels
 - **Nunca apaga a versão mais recente** de cada label — cada label sempre terá ao menos 1 versão
 - Após cada deleção, reavalia o espaço e para assim que atingir 5%
 - Registra no terminal do servidor cada versão apagada e o espaço livre atualizado
 
-**Logs de exemplo:**
+**Logs de exemplo (com dois discos):**
 
 ```
-[auto-cleanup] Espaço livre: 3.2% — abaixo de 5%, iniciando limpeza...
-[auto-cleanup] Removida notebook-joao/2026-03-01T02:00:00 — 4 arquivo(s) do storage — livre: 3.8%
-[auto-cleanup] Removida servidor-web/2026-03-05T03:00:00 — 2 arquivo(s) do storage — livre: 4.3%
-[auto-cleanup] Removida notebook-joao/2026-03-08T02:00:00 — 7 arquivo(s) do storage — livre: 5.1%
+[auto-cleanup] Espaço livre mínimo: 3.2% — abaixo de 5%, iniciando limpeza...
+[auto-cleanup] Removida notebook-joao/2026-03-01T02:00:00 — 4 arquivo(s) do storage — livre mín: 3.8%
+[auto-cleanup] Removida servidor-web/2026-03-05T03:00:00 — 2 arquivo(s) do storage — livre mín: 4.3%
+[auto-cleanup] Removida notebook-joao/2026-03-08T02:00:00 — 7 arquivo(s) do storage — livre mín: 5.1%
 [auto-cleanup] Espaço normalizado (5.1%), encerrando.
 ```
 
@@ -553,6 +563,17 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 ---
 
 ## ⚡ Otimizações
+
+### v2.8
+
+| Componente | Mudança |
+|---|---|
+| **Config — `STORAGE_DIRS`** | Nova env var aceita lista de paths separados por vírgula. `STORAGE_DIR` legado continua funcionando como antes (retrocompatível) |
+| **`_pick_volume()` (server)** | Novo helper que escolhe o volume com mais bytes livres no momento de cada upload |
+| **Upload (server)** | Tmp e conteúdo final escritos no mesmo volume escolhido — evita `shutil.move` cross-device |
+| **`/storage/info` (server)** | `total_bytes`, `used_bytes` e `free_bytes` agora somam todos os volumes; `reclaimable_bytes` calculado via DB como antes |
+| **Auto-cleanup (server)** | Usa o menor % livre entre todos os volumes — cleanup dispara se qualquer disco estiver crítico |
+| **Cliente** | Nenhuma alteração — completamente transparente |
 
 ### v2.7
 
@@ -641,7 +662,7 @@ BackupID (label)
                 └── FileContent (sha256, stored_at) ← arquivo físico único por conteúdo
 ```
 
-**Storage físico:**
+**Storage físico — disco único:**
 ```
 storage/
 └── _content/
@@ -651,7 +672,22 @@ storage/
         └── f7a923bc11d24e5f...
 ```
 
-O conteúdo de cada arquivo é armazenado **uma única vez**, independente de quantas versões ou labels o referenciem.
+**Storage físico — dois discos (`STORAGE_DIRS=/mnt/disk1,/mnt/disk2`):**
+```
+/mnt/disk1/
+└── _content/
+    ├── ab/
+    │   └── abcd1234ef567890...   ← arquivos novos vão para o disco com mais espaço livre
+    └── f7/
+        └── f7a923bc11d24e5f...
+
+/mnt/disk2/
+└── _content/
+    └── 3c/
+        └── 3ca812de55f09b1a...   ← cada FileContent.stored_at guarda o path absoluto
+```
+
+O conteúdo de cada arquivo é armazenado **uma única vez**, independente de quantas versões ou labels o referenciem. O campo `stored_at` no banco registra o path absoluto de cada conteúdo, de modo que leitura, download e restore funcionam independentemente de em qual disco o arquivo está.
 
 ---
 
@@ -960,6 +996,8 @@ A resposta de `/check/batch` é `list[CheckBatchResultItem]` na mesma ordem dos 
   "reclaimable_bytes": 6442450944
 }
 ```
+
+`total_bytes`, `used_bytes` e `free_bytes` são a **soma de todos os volumes** configurados em `STORAGE_DIRS` (ou o volume único de `STORAGE_DIR`).
 
 `reclaimable_bytes` = tamanho total dos `FileContent`s referenciados **exclusivamente** por versões antigas (não pela versão "done" mais recente de nenhum label). É o espaço que seria recuperado rodando `cleanup --keep 1 --all`.
 

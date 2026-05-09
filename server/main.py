@@ -25,16 +25,20 @@ from sqlalchemy.orm import Session
 from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, VersionFile
 
 # -- Config -------------------------------------------------------------------
-STORAGE_DIR = Path(os.getenv("STORAGE_DIR", "./storage"))
-API_KEY     = os.getenv("BACKUP_API_KEY", "")
-STATIC_DIR  = Path(__file__).parent / "static"
-STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+_raw_dirs    = os.getenv("STORAGE_DIRS") or os.getenv("STORAGE_DIR", "./storage")
+STORAGE_VOLUMES: list[Path] = [Path(p.strip()) for p in _raw_dirs.split(",") if p.strip()]
+STORAGE_DIR  = STORAGE_VOLUMES[0]   # alias para retrocompatibilidade
+for _v in STORAGE_VOLUMES:
+    _v.mkdir(parents=True, exist_ok=True)
+
+API_KEY      = os.getenv("BACKUP_API_KEY", "")
+STATIC_DIR   = Path(__file__).parent / "static"
 AUTH_ENABLED = bool(API_KEY)
 
 # Buffer de leitura/escrita - 1 MB e bem mais rapido que 64KB no I/O
 CHUNK_SIZE = 1024 * 1024
 
-app = FastAPI(title="Backup Files — Raspberry Pi", version="2.7.0")
+app = FastAPI(title="Backup Files — Raspberry Pi", version="2.8.0")
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -211,21 +215,27 @@ class CompareResponse(BaseModel):
 
 
 # -- Helpers ------------------------------------------------------------------
-def _content_path(sha256: str) -> Path:
-    dest = STORAGE_DIR / "_content" / sha256[:2] / sha256
+def _pick_volume() -> Path:
+    """Escolhe o volume com mais espaço livre para o próximo upload."""
+    return max(STORAGE_VOLUMES, key=lambda v: shutil.disk_usage(v).free)
+
+
+def _content_path(sha256: str, volume: Path) -> Path:
+    dest = volume / "_content" / sha256[:2] / sha256
     dest.parent.mkdir(parents=True, exist_ok=True)
     return dest
 
 
-async def _stream_request_to_disk(request: Request) -> tuple[str, int, Path]:
+async def _stream_request_to_disk(request: Request, volume: Path) -> tuple[str, int, Path]:
     """
     Faz streaming do body raw da request para disco calculando sha256 em paralelo.
     Sem multipart — o body e o arquivo diretamente (binario puro).
+    Tmp escrito no mesmo volume de destino para evitar cross-device move.
     Retorna (sha256, size, tmp_path).
     """
     h    = hashlib.sha256()
     size = 0
-    tmp_path = STORAGE_DIR / f"_tmp_{os.urandom(8).hex()}"
+    tmp_path = volume / f"_tmp_{os.urandom(8).hex()}"
     try:
         with open(tmp_path, "wb", buffering=0) as f:
             async for chunk in request.stream():
@@ -331,17 +341,18 @@ def _backup_info(b: BackupID, db: Session) -> BackupInfo:
     )
 
 
-def _get_disk_free_percent() -> float:
-    usage = shutil.disk_usage(STORAGE_DIR)
-    return usage.free / usage.total * 100
+def _min_disk_free_percent() -> float:
+    """Retorna o menor % livre entre todos os volumes (dispara cleanup se qualquer disco estiver crítico)."""
+    return min(shutil.disk_usage(v).free / shutil.disk_usage(v).total * 100
+               for v in STORAGE_VOLUMES)
 
 
 def _auto_cleanup_if_needed(db: Session) -> None:
-    free_pct = _get_disk_free_percent()
+    free_pct = _min_disk_free_percent()
     if free_pct >= 5.0:
         return
 
-    print(f"[auto-cleanup] Espaço livre: {free_pct:.1f}% — abaixo de 5%, iniciando limpeza...")
+    print(f"[auto-cleanup] Espaço livre mínimo: {free_pct:.1f}% — abaixo de 5%, iniciando limpeza...")
 
     # Labels com >= 2 versões "done" (as que têm algo a deletar)
     labels_with_versions = (
@@ -370,13 +381,13 @@ def _auto_cleanup_if_needed(db: Session) -> None:
         db.delete(v)
         db.commit()
         removed, _ = _cleanup_orphan_contents(db)
-        free_pct = _get_disk_free_percent()
-        print(f"[auto-cleanup] Removida {label}/{key} — {removed} arquivo(s) do storage — livre: {free_pct:.1f}%")
+        free_pct = _min_disk_free_percent()
+        print(f"[auto-cleanup] Removida {label}/{key} — {removed} arquivo(s) do storage — livre mín: {free_pct:.1f}%")
         if free_pct >= 5.0:
             print(f"[auto-cleanup] Espaço normalizado ({free_pct:.1f}%), encerrando.")
             return
 
-    print(f"[auto-cleanup] Concluído. Livre: {free_pct:.1f}% — todas as labels com 1 versão.")
+    print(f"[auto-cleanup] Concluído. Livre mín: {free_pct:.1f}% — todas as labels com 1 versão.")
 
 
 def _cleanup_orphan_contents(db: Session) -> tuple[int, int]:
@@ -435,12 +446,15 @@ def dashboard():
 
 @app.get("/health", response_model=HealthResponse)
 def health():
-    return HealthResponse(status="ok", version="2.7.0", time=datetime.utcnow().isoformat())
+    return HealthResponse(status="ok", version="2.8.0", time=datetime.utcnow().isoformat())
 
 
 @app.get("/storage/info", response_model=StorageInfoResponse, dependencies=[Depends(require_api_key)])
 def storage_info(db: Session = Depends(get_db)):
-    usage = shutil.disk_usage(STORAGE_DIR)
+    usages = [shutil.disk_usage(v) for v in STORAGE_VOLUMES]
+    usage_total = sum(u.total for u in usages)
+    usage_used  = sum(u.used  for u in usages)
+    usage_free  = sum(u.free  for u in usages)
 
     # Keeper = versão "done" mais recente de cada label
     keeper_ids: list[int] = []
@@ -471,9 +485,9 @@ def storage_info(db: Session = Depends(get_db)):
         reclaimable = db.query(func.coalesce(func.sum(FileContent.size), 0)).scalar() or 0
 
     return StorageInfoResponse(
-        total_bytes=usage.total,
-        used_bytes=usage.used,
-        free_bytes=usage.free,
+        total_bytes=usage_total,
+        used_bytes=usage_used,
+        free_bytes=usage_free,
         reclaimable_bytes=int(reclaimable),
     )
 
@@ -662,15 +676,16 @@ async def upload_file(
             raise HTTPException(400, f"Conteudo sha256={content_sha256} nao encontrado no storage")
         sha256 = content_sha256
     else:
-        # Stream binario puro para disco + hash em paralelo
-        sha256, size, tmp_path = await _stream_request_to_disk(request)
+        # Escolhe volume com mais espaço livre; tmp e conteúdo vão pro mesmo disco
+        volume = _pick_volume()
+        sha256, size, tmp_path = await _stream_request_to_disk(request, volume)
 
         try:
             fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
             if fc:
                 tmp_path.unlink(missing_ok=True)
             else:
-                dest = _content_path(sha256)
+                dest = _content_path(sha256, volume)
                 shutil.move(str(tmp_path), str(dest))
                 fc = FileContent(sha256=sha256, stored_at=str(dest), size=size)
                 db.add(fc)
