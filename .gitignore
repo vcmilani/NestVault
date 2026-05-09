@@ -20,7 +20,16 @@ __pycache__/
 # Variáveis de ambiente
 .env
 
+# Testes
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Editor
+.vscode/
+.idea/
+
 # macOS
 .DS_Store
-server/.DS_Store
 server/.DS_Store
