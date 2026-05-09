@@ -669,7 +669,7 @@ O conteúdo de cada arquivo é armazenado **uma única vez**, independente de qu
 | Método | Endpoint | Descrição |
 |--------|----------|-----------|
 | `POST` | `/backups` | Cria backup — idempotente |
-| `GET` | `/backups` | Lista todos os backups |
+| `GET` | `/backups` | Lista todos os backups — `?client_name=` filtra por cliente |
 | `GET` | `/backups/{label}` | Detalhes de um backup |
 | `DELETE` | `/backups/{label}` | Remove backup e todas as versões |
 
@@ -813,13 +813,13 @@ Limite: entre 1 e 500 itens por request. O tamanho do lote é definido pelo clie
 ```json
 {
   "status":  "ok",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "time":    "2026-04-25T10:42:31.123456"
 }
 ```
 
 #### `BackupInfo`
-Stats agregados refletem a **última versão** do backup (qualquer status).
+Stats agregados refletem a **última versão `done`** do backup.
 ```json
 {
   "id": 1,
@@ -860,6 +860,7 @@ Stats agregados refletem a **última versão** do backup (qualquer status).
   "status": "done",                         // "running" | "done" | "failed"
   "created_at": "2026-04-25 10:42:31",
   "finished_at": "2026-04-25 10:45:12",
+  "duration_seconds": 161.0,                // null se ainda em andamento
   "file_count": 142,
   "total_size_bytes": 1503238553
 }
@@ -994,7 +995,7 @@ A resposta de `/check/batch` é `list[CheckBatchResultItem]` na mesma ordem dos 
 |---|---|---|
 | `GET /health` | — | `HealthResponse` |
 | `POST /backups` | `BackupCreate` | `BackupCreatedResponse` |
-| `GET /backups` | — | `list[BackupInfo]` |
+| `GET /backups` | query: `client_name` (opcional) | `list[BackupInfo]` |
 | `GET /backups/{label}` | — | `BackupInfo` |
 | `DELETE /backups/{label}` | — | `BackupDeletedResponse` |
 | `POST /backups/{label}/versions` | `VersionCreate` | `VersionCreatedResponse` |
