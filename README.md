@@ -541,6 +541,52 @@ Da mesma forma, ao excluir um label (`DELETE /backups/{label}`) ou uma versão (
 
 ---
 
+## 🧪 Testes
+
+A suíte cobre helpers internos (unitários) e todos os endpoints da API (integração), usando SQLite in-memory e diretórios temporários — sem depender de nenhum serviço externo.
+
+### Instalar dependências de desenvolvimento
+
+```bash
+pip install pytest pytest-asyncio httpx
+```
+
+### Executar todos os testes
+
+```bash
+pytest tests/ -v
+```
+
+### Executar um módulo específico
+
+```bash
+pytest tests/test_upload.py -v
+pytest tests/test_cleanup.py -v
+```
+
+### Com relatório de cobertura (opcional)
+
+```bash
+pip install pytest-cov
+pytest tests/ --cov=server --cov-report=term-missing
+```
+
+### O que cada módulo testa
+
+| Arquivo | O que cobre |
+|---|---|
+| `test_helpers.py` | `_pick_volume`, `_content_path`, `_min_disk_free_percent` (mocks de disco) |
+| `test_backups.py` | CRUD de backups e versões — criação, listagem, finalização, deleção |
+| `test_check.py` | `/check` e `/check/batch` — 3 branches: novo, conteúdo existente, já registrado |
+| `test_upload.py` | `/upload` — upload novo, deduplicação (mesmo sha256), modo register-only |
+| `test_files.py` | `GET /files` e download — listagem ordenada, 404 e 410 (arquivo físico ausente) |
+| `test_compare.py` | `GET /compare` — added, deleted, modified, unchanged, size_delta |
+| `test_cleanup.py` | `/cleanup`, `/maintenance/cleanup-orphans` — remoção de versões e arquivos órfãos |
+| `test_storage.py` | `GET /storage/info` — volume único e agregação de dois volumes; `reclaimable_bytes` |
+| `test_auth.py` | Rejeição sem chave, rejeição com chave errada, acesso liberado com chave válida |
+
+---
+
 ## 🖥️ Dashboard Web
 
 Acessível pelo browser, servido diretamente pelo FastAPI:

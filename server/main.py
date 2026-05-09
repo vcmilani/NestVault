@@ -9,6 +9,7 @@ Otimizacoes de performance:
 - Limpeza de arquivos ao deletar label/versao feita em background (nao bloqueia o cliente)
 """
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Depends, Header, BackgroundTasks
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -16,8 +17,7 @@ from pydantic import BaseModel, Field
 from typing import Optional, Literal
 import os, hashlib, secrets, base64, shutil
 from pathlib import Path
-from datetime import datetime
-from collections import defaultdict
+from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -38,15 +38,16 @@ AUTH_ENABLED = bool(API_KEY)
 # Buffer de leitura/escrita - 1 MB e bem mais rapido que 64KB no I/O
 CHUNK_SIZE = 1024 * 1024
 
-app = FastAPI(title="Backup Files — Raspberry Pi", version="2.8.0")
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    init_db()
+    yield
+
+
+app = FastAPI(title="Backup Files — Raspberry Pi", version="2.8.0", lifespan=lifespan)
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-
-@app.on_event("startup")
-def startup():
-    init_db()
 
 
 # -- Auth ---------------------------------------------------------------------
@@ -446,7 +447,7 @@ def dashboard():
 
 @app.get("/health", response_model=HealthResponse)
 def health():
-    return HealthResponse(status="ok", version="2.8.0", time=datetime.utcnow().isoformat())
+    return HealthResponse(status="ok", version="2.8.0", time=datetime.now(timezone.utc).isoformat())
 
 
 @app.get("/storage/info", response_model=StorageInfoResponse, dependencies=[Depends(require_api_key)])
@@ -569,7 +570,7 @@ def get_version(label: str, version_key: str, db: Session = Depends(get_db)):
 def finish_version(label: str, version_key: str, req: VersionFinish, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     v = _get_version_or_404(label, version_key, db)
     v.status = req.status
-    v.finished_at = datetime.utcnow()
+    v.finished_at = datetime.now(timezone.utc)
     db.commit()
     if req.status == "done":
         background_tasks.add_task(_bg_auto_cleanup)
@@ -852,7 +853,11 @@ def cleanup_versions(label: str, req: CleanupRequest, db: Session = Depends(get_
     ids_to_delete = [v[0] for v in to_delete]
     keys_removed  = [v[1] for v in to_delete]
 
-    # Bulk delete via cascade
+    # SQLite nao enforca FK cascades por padrao; deletar VersionFiles antes
+    # para que _cleanup_orphan_contents encontre os FileContents orfaos.
+    db.query(VersionFile).filter(VersionFile.version_id.in_(ids_to_delete)).delete(
+        synchronize_session=False
+    )
     db.query(BackupVersion).filter(BackupVersion.id.in_(ids_to_delete)).delete(
         synchronize_session=False
     )
