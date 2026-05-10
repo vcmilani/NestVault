@@ -198,6 +198,18 @@ def check_batch(server, label, version_key, items: list[dict]) -> list[dict]:
     return r.json()
 
 
+def absorb_version(server: str, label: str, version_key: str, source_version_key: str) -> dict:
+    """Herda arquivos ausentes da versao fonte para a versao destino (modo acumulativo)."""
+    r = _session.post(
+        f"{server}/backups/{label}/versions/{version_key}/absorb",
+        json={"source_version_key": source_version_key},
+        headers=build_headers(),
+        timeout=60,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
 def _server_supports_batch(server: str) -> bool:
     try:
         r = _session.get(f"{server}/health", headers=build_headers(), timeout=5)
@@ -230,20 +242,20 @@ def sync_version(server, label, version_key, existing_paths):
     r.raise_for_status(); return r.json()
 
 
-def _fetch_prev_cache(server, label) -> dict:
+def _fetch_prev_cache(server, label) -> tuple[Optional[str], dict]:
     """
     Busca arquivos da última versão 'done' para evitar recalcular sha256
     de arquivos com mtime+size inalterados.
-    Retorna {original_path: FileInfo} ou {} em caso de erro/ausência.
+    Retorna (version_key, {original_path: FileInfo}) ou (None, {}) em caso de erro/ausência.
     """
     try:
         r = _session.get(f"{server}/backups/{label}/versions",
                          headers=build_headers(), timeout=10)
         if not r.ok:
-            return {}
+            return None, {}
         last_done = next((v for v in r.json() if v["status"] == "done"), None)
         if not last_done:
-            return {}
+            return None, {}
         r2 = _session.get(
             f"{server}/files",
             headers=build_headers(),
@@ -251,10 +263,10 @@ def _fetch_prev_cache(server, label) -> dict:
             timeout=30,
         )
         if not r2.ok:
-            return {}
-        return {f["original_path"]: f for f in r2.json()}
+            return None, {}
+        return last_done["version_key"], {f["original_path"]: f for f in r2.json()}
     except requests.RequestException:
-        return {}
+        return None, {}
 
 
 # -- Backup -------------------------------------------------------------------
@@ -266,7 +278,7 @@ def _chunked(lst: list, n: int):
 def backup_directory(
     directory, label, server=DEFAULT_SERVER, dry_run=False,
     path_prefix=None, exclude=None, client_name=None, workers=4, verbose=False,
-    batch_size=100, hash_workers=None,
+    batch_size=100, hash_workers=None, accumulate=False,
 ):
     root = Path(directory).resolve()
     if not root.exists():
@@ -285,7 +297,7 @@ def backup_directory(
         log.info(f"Versao    : {version_key}")
 
     # Cache da versão anterior para evitar leitura de disco em arquivos inalterados
-    prev_cache = _fetch_prev_cache(server, label) if not dry_run else {}
+    prev_done_key, prev_cache = _fetch_prev_cache(server, label) if not dry_run else (None, {})
     if prev_cache:
         log.info(f"Cache     : {len(prev_cache)} arquivo(s) da versao anterior carregados")
 
@@ -477,6 +489,7 @@ def backup_directory(
 
     overall.close()
 
+    absorb_result = None
     if not dry_run:
         try:
             sync_version(server, label, version_key, all_paths)
@@ -485,6 +498,12 @@ def backup_directory(
 
         status = "failed" if stats["errors"] else "done"
         finish_version(server, label, version_key, status)
+        if accumulate and status == "done" and prev_done_key:
+            try:
+                absorb_result = absorb_version(server, label, version_key, prev_done_key)
+                log.info(f"Absorb    : {absorb_result['inherited']} herdado(s), {absorb_result['skipped']} ja presente(s)")
+            except requests.RequestException as e:
+                log.error(f"Absorb    : ERRO — {e}")
 
     log.info("")
     log.info("=" * 55)
@@ -496,6 +515,8 @@ def backup_directory(
     log.info(f"  Cacheados   : {stats['fast']}  (mtime+size ok, sem leitura de disco)")
     log.info(f"  Ignorados   : {stats['skipped']}  (retomada de backup interrompido)")
     log.info(f"  Erros       : {stats['errors']}")
+    if absorb_result is not None:
+        log.info(f"  Herdados    : {absorb_result['inherited']}  (modo acumulativo)")
     log.info("=" * 55)
     return stats
 
@@ -735,6 +756,8 @@ def main():
                     help="Processos paralelos para calcular SHA256 (padrao: os.cpu_count())")
     pb.add_argument("--batch-size", type=int, default=100, dest="batch_size",
                     help="Arquivos por request no /check/batch (padrao: 100)")
+    pb.add_argument("--accumulate", action="store_true",
+                    help="Modo acumulativo: herda arquivos ausentes da versao anterior (ideal para galerias de fotos)")
     pb.add_argument("--dry-run", action="store_true")
     pb.add_argument("--verbose", action="store_true", help="Mostra logs de arquivos cacheados e ignorados")
 
@@ -785,7 +808,7 @@ def main():
         backup_directory(args.directory, args.label, args.server,
                          args.dry_run, args.prefix, args.exclude,
                          args.client, args.workers, args.verbose, args.batch_size,
-                         args.hash_workers)
+                         args.hash_workers, accumulate=args.accumulate)
 
     elif args.command == "backups":
         list_backups(args.server, args.client)

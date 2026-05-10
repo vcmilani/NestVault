@@ -259,6 +259,12 @@ python backup_client.py backup ~/documentos \
   --label "notebook-joao" \
   --server http://192.168.1.100:8000 \
   --dry-run
+
+# Modo acumulativo — acumula todos os arquivos já vistos entre execuções (ideal para galerias de fotos)
+python backup_client.py backup /Volumes/HD/Fotos \
+  --label "fotos" \
+  --server http://192.168.1.100:8000 \
+  --accumulate
 ```
 
 **Opções:**
@@ -273,6 +279,7 @@ python backup_client.py backup ~/documentos \
 | `--workers` | | Uploads paralelos (padrão: `4`) |
 | `--hash-workers` | | Processos paralelos para cálculo de SHA-256 (padrão: `os.cpu_count()`) |
 | `--batch-size` | | Arquivos por request no `/check/batch` (padrão: `100`) |
+| `--accumulate` | | Modo acumulativo: herda arquivos ausentes da versão anterior — veja [Modo Acumulativo](#modo-acumulativo) |
 | `--dry-run` | | Apenas verifica, não envia |
 | `--verbose` | | Logs detalhados (arquivos cacheados e ignorados) |
 
@@ -291,6 +298,22 @@ python backup_client.py backup ~/documentos \
 =======================================================
 ```
 
+Com `--accumulate`, aparece também a linha `Herdados`:
+
+```
+=======================================================
+  Backup      : [fotos]
+  Versao      : 2026-05-10T14:00:00
+  Verificados : 120
+  Enviados    : 120
+  Registrados : 0
+  Cacheados   : 0
+  Ignorados   : 0
+  Erros       : 0
+  Herdados    : 100  ← arquivos ausentes herdados da versão anterior
+=======================================================
+```
+
 **Recomendação de workers:**
 
 `--workers` controla uploads paralelos (bound pela rede); `--hash-workers` controla processos de SHA-256 (bound pela CPU/disco). Os dois são independentes.
@@ -303,6 +326,47 @@ python backup_client.py backup ~/documentos \
 | Muitos arquivos pequenos (200k+) | 4 | `cpu_count() * 2` |
 | Arquivos grandes (>100 MB) | 2–3 | `cpu_count()` (padrão) |
 | NFS / rede lenta | 2 | 4 |
+
+---
+
+### Modo Acumulativo
+
+O modo padrão do NestVault é **snapshot**: cada versão representa exatamente o que estava no diretório naquele momento. Se um arquivo for deletado do cliente e um backup posterior rodar, ele desaparece do servidor ao se executar um cleanup.
+
+O modo `--accumulate` resolve o caso de acervos que **nunca estão completos no cliente ao mesmo tempo** — o exemplo típico é uma galeria de fotos espalhada em HDs externos: no mês 1 você conecta o HD com fotos de janeiro, no mês 2 conecta outro HD com fotos de fevereiro, e nunca os dois estão disponíveis simultaneamente.
+
+**Como funciona:**
+
+Ao finalizar um backup com `--accumulate`, o cliente chama o endpoint `/absorb` do servidor, que copia para a versão atual todos os `VersionFile`s da versão anterior que **não existem** na versão atual (pelo `original_path`). O resultado é que a versão mais recente sempre acumula todos os arquivos já vistos em backups anteriores.
+
+```
+Backup 1 — HD com fotos de janeiro (100 fotos):
+  versão 2026-03-01  →  100 fotos
+
+Backup 2 — HD com fotos de fevereiro (120 fotos):
+  upload: 120 fotos novas
+  absorb: herda 100 fotos de janeiro da versão anterior
+  versão 2026-05-10  →  220 fotos no total
+
+Backup 3 — HD com fotos de março (80 fotos):
+  upload: 80 fotos novas
+  absorb: herda 220 fotos das versões anteriores
+  versão 2026-07-15  →  300 fotos no total
+```
+
+**Regras do absorb:**
+
+| Situação | Comportamento |
+|---|---|
+| Arquivo presente no cliente | Upload normal; não é afetado pelo absorb |
+| Arquivo ausente do cliente (deletado) | Herdado da versão anterior — preservado no servidor |
+| Arquivo modificado (mesmo path, novo conteúdo) | Versão nova tem o novo conteúdo; absorb ignora (path já existe) |
+
+**Deduplicação:** o absorb é uma operação puramente de banco de dados — copia apenas referências (`VersionFile`), sem mover ou duplicar arquivos físicos. O storage crescerá apenas com conteúdos genuinamente novos.
+
+**Cleanup:** versões antigas podem ser removidas normalmente com `cleanup --keep 1`. Como a versão mais recente já absorbeu todos os arquivos únicos das versões anteriores, nenhum conteúdo será perdido ao deletá-las.
+
+> **Atenção:** com `--accumulate`, arquivos deletados do cliente são **intencionalmente preservados** no servidor. Se precisar remover um arquivo do acervo acumulado, a forma correta é deletar a versão manualmente pelo dashboard ou pela API.
 
 ---
 
@@ -795,6 +859,7 @@ O conteúdo de cada arquivo é armazenado **uma única vez**, independente de qu
 | `GET` | `/backups/{label}/versions/{key}` | Detalhes de uma versão |
 | `PATCH` | `/backups/{label}/versions/{key}` | Finaliza versão (done/failed) |
 | `DELETE` | `/backups/{label}/versions/{key}` | Remove versão |
+| `POST` | `/backups/{label}/versions/{key}/absorb` | Herda arquivos ausentes de outra versão (modo acumulativo) |
 | `POST` | `/backups/{label}/cleanup` | Mantém apenas `keep` versões mais recentes |
 | `GET` | `/backups/{label}/compare` | Diff de arquivos entre duas versões (`?v1=...&v2=...`) |
 
@@ -915,6 +980,13 @@ Limite: entre 1 e 500 itens por request. O tamanho do lote é definido pelo clie
 {
   "backup_label": "notebook-joao",
   "keep": 5      // >= 0
+}
+```
+
+#### `AbsorbRequest`
+```json
+{
+  "source_version_key": "2026-03-01T02:00:00"  // versão da qual herdar arquivos ausentes
 }
 ```
 
@@ -1064,6 +1136,14 @@ A resposta de `/check/batch` é `list[CheckBatchResultItem]` na mesma ordem dos 
 }
 ```
 
+#### `AbsorbResponse`
+```json
+{
+  "inherited": 100,  // VersionFiles copiados da versão fonte para a versão destino
+  "skipped": 20      // arquivos da fonte que já existiam no destino (pelo original_path)
+}
+```
+
 #### `StorageInfoResponse`
 ```json
 {
@@ -1118,6 +1198,7 @@ A resposta de `/check/batch` é `list[CheckBatchResultItem]` na mesma ordem dos 
 | `GET /backups/{label}/versions/{key}` | — | `VersionInfo` |
 | `PATCH /backups/{label}/versions/{key}` | `VersionFinish` | `VersionInfo` |
 | `DELETE /backups/{label}/versions/{key}` | — | `VersionDeletedResponse` |
+| `POST /backups/{label}/versions/{key}/absorb` | `AbsorbRequest` | `AbsorbResponse` |
 | `POST /backups/{label}/cleanup` | `CleanupRequest` | `CleanupResponse` |
 | `GET /backups/{label}/compare` | query: `v1`, `v2` | `CompareResponse` |
 | `POST /check` | `CheckRequest` | `CheckResponse` |
