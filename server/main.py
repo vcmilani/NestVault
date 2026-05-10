@@ -1,5 +1,5 @@
 """
-Backup Files — Raspberry Pi  v2.5
+NestVault  v2.5
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
-import os, hashlib, secrets, base64, shutil
+import os, hashlib, secrets, base64, shutil, logging
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -23,6 +23,13 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, VersionFile
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("backup-server")
 
 # -- Config -------------------------------------------------------------------
 _raw_dirs    = os.getenv("STORAGE_DIRS") or os.getenv("STORAGE_DIR", "./storage")
@@ -41,10 +48,12 @@ CHUNK_SIZE = 1024 * 1024
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    log.info(f"Servidor iniciado — {len(STORAGE_VOLUMES)} volume(s): {[str(v) for v in STORAGE_VOLUMES]}")
+    log.info(f"Auth: {'habilitada' if AUTH_ENABLED else 'desabilitada'}")
     yield
 
 
-app = FastAPI(title="Backup Files — Raspberry Pi", version="2.8.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="2.8.0", lifespan=lifespan)
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -190,6 +199,14 @@ class StorageInfoResponse(BaseModel):
     used_bytes: int
     free_bytes: int
     reclaimable_bytes: int
+
+class DiskVolumeInfo(BaseModel):
+    path: str
+    total_bytes: int
+    used_bytes: int
+    free_bytes: int
+    content_files: int
+    content_bytes: int
 
 class CompareFileEntry(BaseModel):
     original_path: str
@@ -353,7 +370,7 @@ def _auto_cleanup_if_needed(db: Session) -> None:
     if free_pct >= 5.0:
         return
 
-    print(f"[auto-cleanup] Espaço livre mínimo: {free_pct:.1f}% — abaixo de 5%, iniciando limpeza...")
+    log.warning(f"[auto-cleanup] Espaço livre mínimo: {free_pct:.1f}% — abaixo de 5%, iniciando limpeza...")
 
     # Labels com >= 2 versões "done" (as que têm algo a deletar)
     labels_with_versions = (
@@ -383,12 +400,12 @@ def _auto_cleanup_if_needed(db: Session) -> None:
         db.commit()
         removed, _ = _cleanup_orphan_contents(db)
         free_pct = _min_disk_free_percent()
-        print(f"[auto-cleanup] Removida {label}/{key} — {removed} arquivo(s) do storage — livre mín: {free_pct:.1f}%")
+        log.info(f"[auto-cleanup] Removida {label}/{key} — {removed} arquivo(s) — livre mín: {free_pct:.1f}%")
         if free_pct >= 5.0:
-            print(f"[auto-cleanup] Espaço normalizado ({free_pct:.1f}%), encerrando.")
+            log.info(f"[auto-cleanup] Espaço normalizado ({free_pct:.1f}%), encerrando.")
             return
 
-    print(f"[auto-cleanup] Concluído. Livre mín: {free_pct:.1f}% — todas as labels com 1 versão.")
+    log.info(f"[auto-cleanup] Concluído. Livre mín: {free_pct:.1f}% — todas as labels com 1 versão.")
 
 
 def _cleanup_orphan_contents(db: Session) -> tuple[int, int]:
@@ -412,6 +429,8 @@ def _cleanup_orphan_contents(db: Session) -> tuple[int, int]:
         bytes_freed += fc.size
         db.delete(fc)
         removed += 1
+    if removed:
+        log.debug(f"[cleanup-orphans] {removed} arquivo(s) — {bytes_freed / 1024:.1f} KB liberados")
     db.commit()
     return removed, bytes_freed
 
@@ -422,7 +441,7 @@ def _bg_cleanup_orphan_contents() -> None:
     try:
         count, _ = _cleanup_orphan_contents(db)
         if count:
-            print(f"[bg-cleanup] {count} arquivo(s) orfao(s) removido(s) do storage")
+            log.info(f"[bg-cleanup] {count} arquivo(s) orfao(s) removido(s) do storage")
     finally:
         db.close()
 
@@ -443,6 +462,14 @@ def dashboard():
     if not index.exists():
         return HTMLResponse("<h1>Dashboard nao encontrado</h1>", status_code=404)
     return HTMLResponse(index.read_text(encoding="utf-8"))
+
+
+@app.get("/disks", response_class=HTMLResponse, include_in_schema=False)
+def disks_page():
+    page = STATIC_DIR / "disks.html"
+    if not page.exists():
+        return HTMLResponse("<h1>Página não encontrada</h1>", status_code=404)
+    return HTMLResponse(page.read_text(encoding="utf-8"))
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -493,6 +520,29 @@ def storage_info(db: Session = Depends(get_db)):
     )
 
 
+@app.get("/storage/disks", response_model=list[DiskVolumeInfo], dependencies=[Depends(require_api_key)])
+def storage_disks(db: Session = Depends(get_db)):
+    result = []
+    for v in STORAGE_VOLUMES:
+        usage = shutil.disk_usage(v)
+        prefix = str(v).rstrip("/") + "/"
+        content_files = db.query(func.count(FileContent.sha256)).filter(
+            FileContent.stored_at.like(prefix + "%")
+        ).scalar() or 0
+        content_bytes = db.query(func.coalesce(func.sum(FileContent.size), 0)).filter(
+            FileContent.stored_at.like(prefix + "%")
+        ).scalar() or 0
+        result.append(DiskVolumeInfo(
+            path=str(v),
+            total_bytes=usage.total,
+            used_bytes=usage.used,
+            free_bytes=usage.free,
+            content_files=content_files,
+            content_bytes=int(content_bytes),
+        ))
+    return result
+
+
 # -- Backups ------------------------------------------------------------------
 @app.post("/backups", response_model=BackupCreatedResponse, dependencies=[Depends(require_api_key)])
 def create_backup(req: BackupCreate, db: Session = Depends(get_db)):
@@ -531,6 +581,7 @@ def delete_backup(label: str, background_tasks: BackgroundTasks, db: Session = D
     )
     db.delete(b)
     db.commit()
+    log.info(f"[delete] Label [{label}] excluído — limpeza de órfãos em background")
     background_tasks.add_task(_bg_cleanup_orphan_contents)
     return BackupDeletedResponse(status="deleted", label=label)
 
@@ -573,6 +624,7 @@ def finish_version(label: str, version_key: str, req: VersionFinish, background_
     v.finished_at = datetime.now(timezone.utc)
     db.commit()
     if req.status == "done":
+        log.info(f"[versao] {label}/{version_key} finalizada → disparando auto-cleanup em background")
         background_tasks.add_task(_bg_auto_cleanup)
     return _version_stats(v, db)
 
@@ -582,6 +634,7 @@ def delete_version(label: str, version_key: str, background_tasks: BackgroundTas
     v = _get_version_or_404(label, version_key, db)
     db.delete(v)
     db.commit()
+    log.info(f"[delete] Versão {label}/{version_key} excluída — limpeza em background")
     background_tasks.add_task(_bg_cleanup_orphan_contents)
     return VersionDeletedResponse(
         status="deleted",
@@ -853,6 +906,8 @@ def cleanup_versions(label: str, req: CleanupRequest, db: Session = Depends(get_
     ids_to_delete = [v[0] for v in to_delete]
     keys_removed  = [v[1] for v in to_delete]
 
+    log.info(f"[cleanup] {label}: removendo {len(keys_removed)} versão(ões): {keys_removed}")
+
     # SQLite nao enforca FK cascades por padrao; deletar VersionFiles antes
     # para que _cleanup_orphan_contents encontre os FileContents orfaos.
     db.query(VersionFile).filter(VersionFile.version_id.in_(ids_to_delete)).delete(
@@ -863,6 +918,7 @@ def cleanup_versions(label: str, req: CleanupRequest, db: Session = Depends(get_
     )
     db.commit()
     orphans_removed, _ = _cleanup_orphan_contents(db)
+    log.info(f"[cleanup] {label}: {orphans_removed} arquivo(s) de storage removidos")
     return CleanupResponse(
         kept=req.keep,
         versions_removed=keys_removed,

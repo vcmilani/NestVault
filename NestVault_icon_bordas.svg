@@ -1,0 +1,46 @@
+<svg width="100%" viewBox="0 0 680 680" role="img" xmlns="http://www.w3.org/2000/svg" style="">
+  <title style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">nestVault app icon — badge maior</title>
+
+  <!-- Background full bleed -->
+  <rect x="0" y="0" width="680" height="680" fill="#2D3748" rx="130"/>
+
+  <!-- Ninho — arcos verdes na base -->
+  <path d="M80,590 Q340,720 600,590" fill="none" stroke="#48BB78" stroke-width="34" stroke-linecap="round"/>
+  <path d="M120,545 Q340,668 560,545" fill="none" stroke="#48BB78" stroke-width="25" stroke-linecap="round"/>
+  <path d="M168,502 Q340,618 512,502" fill="none" stroke="#48BB78" stroke-width="17" stroke-linecap="round"/>
+
+  <!-- Halo do hexágono -->
+  <polygon points="340,62 568,194 568,486 340,618 112,486 112,194" fill="#38B2AC" opacity="0.15"/>
+
+  <!-- Hexágono principal -->
+  <polygon points="340,75 558,200 558,475 340,600 122,475 122,200" fill="#3D4E63"/>
+  <polygon points="340,75 558,200 558,475 340,600 122,475 122,200" fill="none" stroke="#38B2AC" stroke-width="8"/>
+  <polygon points="340,100 535,215 535,460 340,575 145,460 145,215" fill="none" stroke="#4A6080" stroke-width="4"/>
+
+  <!-- Porta circular -->
+  <circle cx="340" cy="337" r="130" fill="#1A202C"/>
+  <circle cx="340" cy="337" r="130" fill="none" stroke="#38B2AC" stroke-width="8"/>
+
+  <!-- Tiques cardinais -->
+  <line x1="340" y1="207" x2="340" y2="234" stroke="#E2E8F0" stroke-width="13" stroke-linecap="round"/>
+  <line x1="340" y1="440" x2="340" y2="467" stroke="#E2E8F0" stroke-width="13" stroke-linecap="round"/>
+  <line x1="210" y1="337" x2="237" y2="337" stroke="#E2E8F0" stroke-width="13" stroke-linecap="round"/>
+  <line x1="443" y1="337" x2="470" y2="337" stroke="#E2E8F0" stroke-width="13" stroke-linecap="round"/>
+
+  <!-- Tiques diagonais -->
+  <line x1="248" y1="245" x2="265" y2="262" stroke="#E2E8F0" stroke-width="8" stroke-linecap="round"/>
+  <line x1="415" y1="412" x2="432" y2="429" stroke="#E2E8F0" stroke-width="8" stroke-linecap="round"/>
+  <line x1="432" y1="245" x2="415" y2="262" stroke="#E2E8F0" stroke-width="8" stroke-linecap="round"/>
+  <line x1="248" y1="429" x2="265" y2="412" stroke="#E2E8F0" stroke-width="8" stroke-linecap="round"/>
+
+  <!-- Centro do dial -->
+  <circle cx="340" cy="337" r="40" fill="#2D3748"/>
+  <circle cx="340" cy="337" r="22" fill="#38B2AC"/>
+  <circle cx="340" cy="337" r="9" fill="#1A202C"/>
+
+  <!-- Badge teal — maior -->
+  <circle cx="558" cy="182" r="68" fill="#2D3748"/>
+  <circle cx="558" cy="182" r="55" fill="#38B2AC"/>
+  <polyline points="536,182 552,200 582,162" fill="none" stroke="#F0FFF4" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+
+</svg>
