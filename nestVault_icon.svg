@@ -2,7 +2,7 @@
   <title style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">nestVault app icon — badge maior</title>
 
   <!-- Background full bleed -->
-  <rect x="0" y="0" width="680" height="680" fill="#2D3748" style="fill:rgb(45, 55, 72);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto" rx="130"/>
+  <rect x="0" y="0" width="680" height="680" fill="#2D3748" style="fill:rgb(45, 55, 72);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto" />
 
   <!-- Ninho — arcos verdes na base -->
   <path d="M80,590 Q340,720 600,590" fill="none" stroke="#48BB78" stroke-width="34" stroke-linecap="round" style="fill:none;stroke:rgb(72, 187, 120);color:rgb(0, 0, 0);stroke-width:34px;stroke-linecap:round;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
