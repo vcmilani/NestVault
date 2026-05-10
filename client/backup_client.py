@@ -15,7 +15,7 @@ import os, sys, hashlib, argparse, logging, base64, socket, threading
 from pathlib import Path
 from typing import Optional
 from datetime import datetime, timezone
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 import requests
 from tqdm import tqdm
@@ -59,6 +59,12 @@ def sha256_file(path: Path) -> str:
         while chunk := f.read(CHUNK_SIZE):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _hash_item(item: tuple) -> tuple:
+    """Funcao top-level para hashing em ProcessPoolExecutor (necessario para pickle)."""
+    fp, op, mtime, size = item
+    return op, sha256_file(fp), size, mtime
 
 def build_headers(extra: Optional[dict] = None) -> dict:
     h = {"X-API-Key": API_KEY}
@@ -260,7 +266,7 @@ def _chunked(lst: list, n: int):
 def backup_directory(
     directory, label, server=DEFAULT_SERVER, dry_run=False,
     path_prefix=None, exclude=None, client_name=None, workers=4, verbose=False,
-    batch_size=100,
+    batch_size=100, hash_workers=None,
 ):
     root = Path(directory).resolve()
     if not root.exists():
@@ -304,8 +310,9 @@ def backup_directory(
     if use_batch:
         log.info(f"Modo      : batch ({batch_size} arquivos/request)")
     effective = 1 if dry_run else workers
+    effective_hash = 1 if dry_run else (hash_workers or os.cpu_count() or 4)
     if effective > 1:
-        log.info(f"Workers   : {effective} threads paralelas")
+        log.info(f"Workers   : {effective} threads (upload)  /  {effective_hash} processos (hash)")
 
     overall = tqdm(
         total=total, unit="arq", desc="Progresso", position=0, leave=True,
@@ -337,15 +344,13 @@ def backup_directory(
             else:
                 pending_hash.append((fp, op, mtime, size))
 
-        # Hashing em paralelo
+        # Hashing em paralelo com ProcessPoolExecutor (bypassa GIL para SHA256 CPU-bound)
         hashed: dict[str, tuple[str, int, float]] = {}  # op -> (sha256, size, mtime)
         if pending_hash:
-            log.info(f"Hashing   : {len(pending_hash)} arquivo(s) para calcular SHA256 ({len(fast_files)} cache hits)")
-            with ThreadPoolExecutor(max_workers=effective) as pool:
-                def _hash(item):
-                    fp, op, mtime, size = item
-                    return op, sha256_file(fp), size, mtime
-                for op, sha256, size, mtime in pool.map(_hash, pending_hash):
+            log.info(f"Hashing   : {len(pending_hash)} arquivo(s) para calcular SHA256 "
+                     f"({len(fast_files)} cache hits, {effective_hash} processos)")
+            with ProcessPoolExecutor(max_workers=effective_hash) as pool:
+                for op, sha256, size, mtime in pool.map(_hash_item, pending_hash, chunksize=max(1, len(pending_hash) // (effective_hash * 4))):
                     hashed[op] = (sha256, size, mtime)
             log.info(f"Hashing   : concluído")
 
@@ -726,6 +731,8 @@ def main():
     pb.add_argument("--client", default=None)
     pb.add_argument("--exclude", nargs="+", default=[])
     pb.add_argument("--workers", type=int, default=4)
+    pb.add_argument("--hash-workers", type=int, default=None, dest="hash_workers",
+                    help="Processos paralelos para calcular SHA256 (padrao: os.cpu_count())")
     pb.add_argument("--batch-size", type=int, default=100, dest="batch_size",
                     help="Arquivos por request no /check/batch (padrao: 100)")
     pb.add_argument("--dry-run", action="store_true")
@@ -777,7 +784,8 @@ def main():
         log.info(f"Comando  : BACKUP  label=[{args.label}]")
         backup_directory(args.directory, args.label, args.server,
                          args.dry_run, args.prefix, args.exclude,
-                         args.client, args.workers, args.verbose, args.batch_size)
+                         args.client, args.workers, args.verbose, args.batch_size,
+                         args.hash_workers)
 
     elif args.command == "backups":
         list_backups(args.server, args.client)
@@ -811,4 +819,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # Necessario para ProcessPoolExecutor no macOS/Windows (spawn-based multiprocessing)
+    from multiprocessing import freeze_support
+    freeze_support()
     main()

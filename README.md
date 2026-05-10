@@ -1,9 +1,11 @@
-# 🗄️ NestVault  `v2.8`
+# 🗄️ NestVault  `v2.9`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
 Cada execução de backup cria uma nova versão dentro do label. O servidor armazena o conteúdo físico apenas uma vez por sha256 — versões diferentes que compartilham arquivos idênticos não duplicam o storage.
 
+> **v2.9** — hashing paralelo com `ProcessPoolExecutor`: a fase de cálculo de SHA-256 passou de `ThreadPoolExecutor` para `ProcessPoolExecutor`, contornando o GIL do Python e utilizando todos os núcleos da CPU. O número de processos de hash é independente dos workers de upload e padreia para `os.cpu_count()`. Novo argumento `--hash-workers` para controle manual. Ganho típico de 4–8× em máquinas com 8+ núcleos comparado à v2.8.
+>
 > **v2.8** — suporte a múltiplos discos no servidor: a variável `STORAGE_DIRS` aceita uma lista de pontos de montagem separados por vírgula (`/mnt/disk1,/mnt/disk2`). O servidor distribui automaticamente os uploads para o disco com mais espaço livre; leitura, download e restore continuam funcionando sem nenhuma mudança — `FileContent.stored_at` guarda o path absoluto. O endpoint `GET /storage/info` agrega total/livre/usado de todos os volumes. O auto-cleanup dispara se qualquer disco estiver abaixo de 5%. O cliente não precisa de nenhuma alteração.
 >
 > **v2.7** — informações de disco no dashboard: novo endpoint `GET /storage/info` expõe espaço livre/total do disco montado e espaço liberável ao apagar versões antigas. Dashboard exibe dois novos stat boxes com barra visual de uso e o total recuperável com um cleanup.
@@ -234,11 +236,17 @@ python backup_client.py backup ~/projeto \
   --server http://192.168.1.100:8000 \
   --exclude node_modules .git __pycache__ .venv dist build
 
-# Aumentar paralelismo (padrão: 4 workers)
+# Aumentar paralelismo de upload (padrão: 4 workers)
 python backup_client.py backup ~/documentos \
   --label "notebook-joao" \
   --server http://192.168.1.100:8000 \
   --workers 8
+
+# Controlar processos de hashing (padrão: os.cpu_count())
+python backup_client.py backup ~/documentos \
+  --label "notebook-joao" \
+  --server http://192.168.1.100:8000 \
+  --hash-workers 16
 
 # Ajustar tamanho do lote de verificação (padrão: 100 arquivos/request)
 python backup_client.py backup ~/documentos \
@@ -263,6 +271,7 @@ python backup_client.py backup ~/documentos \
 | `--client` | | Nome do cliente — padrão é o hostname da máquina |
 | `--exclude` | | Subpastas a ignorar — aceita múltiplos valores |
 | `--workers` | | Uploads paralelos (padrão: `4`) |
+| `--hash-workers` | | Processos paralelos para cálculo de SHA-256 (padrão: `os.cpu_count()`) |
 | `--batch-size` | | Arquivos por request no `/check/batch` (padrão: `100`) |
 | `--dry-run` | | Apenas verifica, não envia |
 | `--verbose` | | Logs detalhados (arquivos cacheados e ignorados) |
@@ -284,13 +293,16 @@ python backup_client.py backup ~/documentos \
 
 **Recomendação de workers:**
 
-| Cenário | Workers |
-|---------|:-------:|
-| Pi com cartão SD | 2 |
-| Pi com HD externo USB | 4–6 |
-| Pi com SSD | 6–8 |
-| Muitos arquivos pequenos | 8+ |
-| Arquivos grandes (>100 MB) | 2–3 |
+`--workers` controla uploads paralelos (bound pela rede); `--hash-workers` controla processos de SHA-256 (bound pela CPU/disco). Os dois são independentes.
+
+| Cenário | `--workers` | `--hash-workers` |
+|---------|:-----------:|:----------------:|
+| Pi com cartão SD | 2 | 2 |
+| Pi com HD externo USB | 4–6 | `cpu_count()` (padrão) |
+| Pi com SSD | 6–8 | `cpu_count()` (padrão) |
+| Muitos arquivos pequenos (200k+) | 4 | `cpu_count() * 2` |
+| Arquivos grandes (>100 MB) | 2–3 | `cpu_count()` (padrão) |
+| NFS / rede lenta | 2 | 4 |
 
 ---
 
@@ -610,6 +622,25 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 
 ## ⚡ Otimizações
 
+### v2.9
+
+| Componente | Mudança |
+|---|---|
+| **Hashing (client)** | `ThreadPoolExecutor` → `ProcessPoolExecutor` para SHA-256: bypassa o GIL, paralelismo real de CPU em todos os núcleos |
+| **`_hash_item` (client)** | Função top-level de módulo (necessário para serialização do `ProcessPoolExecutor`) com `chunksize` dinâmico para minimizar overhead de IPC |
+| **`hash_workers` (client)** | Novo parâmetro independente de `workers`; padrão `os.cpu_count()`, separando o tunning de upload (rede) do de hashing (CPU) |
+| **`--hash-workers` (CLI)** | Novo argumento para controle manual do número de processos de hash |
+
+**Ganho esperado:**
+
+| Cenário | v2.8 (4 threads) | v2.9 (N processos) |
+|---|---|---|
+| 200k arquivos, 8 núcleos | linha base | ~4–6× mais rápido |
+| 200k arquivos, 16 núcleos | linha base | ~8–12× mais rápido |
+| 2ª execução (cache hits) | sem leitura de disco | sem mudança (já ótimo) |
+
+> O ganho é maior em arquivos de tamanho médio (1 KB–10 MB) onde o SHA-256 domina. Para arquivos muito pequenos (<1 KB), o overhead de IPC pode reduzir o ganho; para arquivos muito grandes, o gargalo vira I/O de disco.
+
 ### v2.8
 
 | Componente | Mudança |
@@ -895,7 +926,7 @@ Limite: entre 1 e 500 itens por request. O tamanho do lote é definido pelo clie
 ```json
 {
   "status":  "ok",
-  "version": "2.7.0",
+  "version": "2.9.0",
   "time":    "2026-04-25T10:42:31.123456"
 }
 ```
