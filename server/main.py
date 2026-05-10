@@ -446,9 +446,12 @@ def _bg_cleanup_orphan_contents() -> None:
     """Background task: cria sua propria sessao DB e limpa conteudos orfaos."""
     db = SessionLocal()
     try:
+        log.info("[bg-cleanup] iniciando limpeza de conteúdos órfãos")
         count, _ = _cleanup_orphan_contents(db)
         if count:
             log.info(f"[bg-cleanup] {count} arquivo(s) orfao(s) removido(s) do storage")
+        else:
+            log.info("[bg-cleanup] nenhuma limpeza necessária, não havia arquivos órfãos")
     finally:
         db.close()
 
@@ -457,6 +460,7 @@ def _bg_auto_cleanup() -> None:
     """Background task: cria sua propria sessao DB e executa auto-cleanup se necessario."""
     db = SessionLocal()
     try:
+        log.info("[bg-auto-cleanup] verificando necessidade de limpeza automática")
         _auto_cleanup_if_needed(db)
     finally:
         db.close()
