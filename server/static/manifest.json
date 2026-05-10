@@ -1,7 +1,7 @@
 {
-  "name": "Backup Files — Raspberry Pi",
-  "short_name": "Backups Vault",
-  "description": "Dashboard de backups do Raspberry Pi",
+  "name": "NestVault",
+  "short_name": "NestVault",
+  "description": "Dashboard de backups NestVault",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0d0f0f",

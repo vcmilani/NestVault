@@ -1,4 +1,4 @@
-# 🗄️ Backup Files — Raspberry Pi  `v2.8`
+# 🗄️ NestVault  `v2.8`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -119,7 +119,7 @@ sudo systemctl start backup-server
 
 ---
 
-## ⚙️ Servidor (Raspberry Pi)
+## ⚙️ Servidor
 
 ### 1. Criar venv e instalar dependências
 
@@ -157,7 +157,7 @@ Crie `/etc/systemd/system/backup-server.service`:
 
 ```ini
 [Unit]
-Description=Backup Files — Raspberry Pi
+Description=NestVault
 After=network.target
 
 [Service]

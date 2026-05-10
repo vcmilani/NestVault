@@ -1,5 +1,5 @@
 """
-Backup Files — Raspberry Pi  v2.2
+NestVault  v2.2
 Cada execucao de backup cria uma nova versao dentro do label.
 Conteudo identico e armazenado uma unica vez no servidor (deduplicacao por sha256).
 
@@ -340,12 +340,14 @@ def backup_directory(
         # Hashing em paralelo
         hashed: dict[str, tuple[str, int, float]] = {}  # op -> (sha256, size, mtime)
         if pending_hash:
+            log.info(f"Hashing   : {len(pending_hash)} arquivo(s) para calcular SHA256 ({len(fast_files)} cache hits)")
             with ThreadPoolExecutor(max_workers=effective) as pool:
                 def _hash(item):
                     fp, op, mtime, size = item
                     return op, sha256_file(fp), size, mtime
                 for op, sha256, size, mtime in pool.map(_hash, pending_hash):
                     hashed[op] = (sha256, size, mtime)
+            log.info(f"Hashing   : concluído")
 
         # Verificação em lote
         # action_map: op -> ("skip"|"register"|"upload", sha256, size, mtime, fp)
@@ -712,7 +714,7 @@ def cleanup_orphans(server=DEFAULT_SERVER):
 
 # -- CLI ----------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Backup Files — Raspberry Pi v2.5")
+    parser = argparse.ArgumentParser(description="NestVault v2.5")
     sub = parser.add_subparsers(dest="command", required=True)
 
     # backup
