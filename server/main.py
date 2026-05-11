@@ -113,6 +113,13 @@ class CleanupRequest(BaseModel):
     backup_label: str
     keep: int = Field(5, ge=0, description="Quantas versoes manter")
 
+class AbsorbRequest(BaseModel):
+    source_version_key: str
+
+class AbsorbResponse(BaseModel):
+    inherited: int
+    skipped: int
+
 
 # -- Schemas: Responses -------------------------------------------------------
 class HealthResponse(BaseModel):
@@ -439,9 +446,12 @@ def _bg_cleanup_orphan_contents() -> None:
     """Background task: cria sua propria sessao DB e limpa conteudos orfaos."""
     db = SessionLocal()
     try:
+        log.info("[bg-cleanup] iniciando limpeza de conteúdos órfãos")
         count, _ = _cleanup_orphan_contents(db)
         if count:
             log.info(f"[bg-cleanup] {count} arquivo(s) orfao(s) removido(s) do storage")
+        else:
+            log.info("[bg-cleanup] nenhuma limpeza necessária, não havia arquivos órfãos")
     finally:
         db.close()
 
@@ -450,6 +460,7 @@ def _bg_auto_cleanup() -> None:
     """Background task: cria sua propria sessao DB e executa auto-cleanup se necessario."""
     db = SessionLocal()
     try:
+        log.info("[bg-auto-cleanup] verificando necessidade de limpeza automática")
         _auto_cleanup_if_needed(db)
     finally:
         db.close()
@@ -627,6 +638,41 @@ def finish_version(label: str, version_key: str, req: VersionFinish, background_
         log.info(f"[versao] {label}/{version_key} finalizada → disparando auto-cleanup em background")
         background_tasks.add_task(_bg_auto_cleanup)
     return _version_stats(v, db)
+
+
+@app.post("/backups/{label}/versions/{version_key}/absorb", response_model=AbsorbResponse, dependencies=[Depends(require_api_key)])
+def absorb_version(label: str, version_key: str, req: AbsorbRequest, db: Session = Depends(get_db)):
+    """
+    Herda arquivos da versao fonte que nao existem na versao destino (por original_path).
+    Usado no modo acumulativo: novos arquivos sao adicionados pelo upload normal;
+    arquivos ausentes do cliente (deletados) sao preservados via absorb da versao anterior.
+    """
+    dest = _get_version_or_404(label, version_key, db)
+    src  = _get_version_or_404(label, req.source_version_key, db)
+
+    existing = db.query(VersionFile.original_path).filter(VersionFile.version_id == dest.id).subquery()
+    source_files = (
+        db.query(VersionFile)
+        .filter(VersionFile.version_id == src.id,
+                ~VersionFile.original_path.in_(select(existing)))
+        .all()
+    )
+
+    total_src = db.query(func.count(VersionFile.id)).filter(VersionFile.version_id == src.id).scalar() or 0
+    inherited = len(source_files)
+
+    for vf in source_files:
+        db.add(VersionFile(
+            version_id=dest.id,
+            original_path=vf.original_path,
+            sha256=vf.sha256,
+            mtime=vf.mtime,
+        ))
+    db.commit()
+
+    skipped = total_src - inherited
+    log.info(f"[absorb] {label}/{version_key} ← {req.source_version_key}: {inherited} herdado(s), {skipped} ja presente(s)")
+    return AbsorbResponse(inherited=inherited, skipped=skipped)
 
 
 @app.delete("/backups/{label}/versions/{version_key}", response_model=VersionDeletedResponse, dependencies=[Depends(require_api_key)])
