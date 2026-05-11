@@ -1,0 +1,100 @@
+name: Build executables
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset_name: backup-client-linux-x64
+            artifact_path: client/dist/backup-client-linux-x64
+            strip: "true"
+
+          - os: macos-latest
+            asset_name: backup-client-macos
+            artifact_path: client/dist/backup-client-macos
+            strip: "true"
+
+          - os: windows-latest
+            asset_name: backup-client-windows-x64
+            artifact_path: client/dist/backup-client-windows-x64.exe
+            strip: "false"
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          pip install -r client/requirements.txt
+          pip install pyinstaller
+
+      - name: Build executable
+        shell: bash
+        run: |
+          cd client
+          ARGS="--onefile --name ${{ matrix.asset_name }}"
+          if [ "${{ matrix.strip }}" = "true" ]; then
+            ARGS="$ARGS --strip"
+          fi
+          pyinstaller $ARGS backup_client.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.artifact_path }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Release ${{ github.ref_name }}
+          body: |
+            ## Executáveis — ${{ github.ref_name }}
+
+            Baixe o binário para o seu sistema:
+
+            | Plataforma | Arquivo |
+            |---|---|
+            | Linux x64 | `backup-client-linux-x64` |
+            | macOS | `backup-client-macos` |
+            | Windows x64 | `backup-client-windows-x64.exe` |
+
+            ### Como usar
+
+            **Linux/macOS** — dar permissão de execução antes do primeiro uso:
+            ```bash
+            chmod +x backup-client-*
+            ./backup-client-linux-x64 --help
+            ```
+
+            **Windows** — executar diretamente:
+            ```
+            backup-client-windows-x64.exe --help
+            ```
+
+            A API Key é passada via variável de ambiente `BACKUP_API_KEY`.
+          files: dist/*
+          draft: false
+          prerelease: false
