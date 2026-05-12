@@ -69,6 +69,35 @@ sudo systemctl daemon-reload && sudo systemctl restart backup-server
 
 Novos uploads serão replicados. Conteúdos existentes **não** são re-replicados automaticamente retroativamente — apenas quando sofrem novo upload ou quando um volume degraded se recupera.
 
+### Adicionando um disco novo ao cluster
+
+Se você adicionar um novo ponto de montagem ao `STORAGE_DIRS`, o servidor o reconhece como volume saudável imediatamente — mas **não re-replica os arquivos existentes para ele**. Apenas novos uploads passarão a usar o disco novo.
+
+Para forçar a re-replicação dos conteúdos existentes, será necessário um endpoint de manutenção (planejado para versão futura). Por enquanto, a alternativa é aguardar que os arquivos sejam naturalmente re-enviados pelo cliente.
+
+### Trocando um disco defeituoso
+
+O servidor identifica volumes **exclusivamente pelo caminho de montagem** — não há rastreamento de UUID ou número de série. Isso tem uma consequência importante:
+
+**✅ Mesmo ponto de montagem — re-replicação automática:**
+```
+disco /mnt/disk2 falha → servidor marca /mnt/disk2 como degraded
+usuário troca o disco físico, formata e remonta em /mnt/disk2
+→ _volume_health_monitor detecta que /mnt/disk2 voltou a responder
+→ re-replicação automática em background: arquivos sub-replicados são copiados para o disco novo
+```
+
+**⚠️ Caminho diferente — sem re-replicação automática:**
+```
+disco /mnt/disk2 falha → degraded
+usuário monta o disco novo em /mnt/disk3 e adiciona ao STORAGE_DIRS
+→ servidor vê /mnt/disk3 como volume novo e saudável
+→ nenhuma re-replicação: arquivos existentes continuam com cópia única em /mnt/disk1
+→ novos uploads passam a usar /mnt/disk3 normalmente
+```
+
+**Recomendação:** ao trocar um disco defeituoso, sempre monte o substituto no **mesmo caminho** do disco antigo. Isso garante que a re-replicação ocorra automaticamente sem intervenção manual.
+
 ---
 
 ## ⚠️ Atualizando da v2.1 para v2.2

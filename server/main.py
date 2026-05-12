@@ -84,6 +84,7 @@ def _ensure_replicas(sha256: str, source_path: Path, db: Session) -> None:
     target  = _target_replicas()
     copies  = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).all()
     vol_set = {c.volume_path for c in copies}
+    added   = []
     for vol in _healthy_volumes():
         if len(copies) >= target:
             break
@@ -96,13 +97,17 @@ def _ensure_replicas(sha256: str, source_path: Path, db: Session) -> None:
             db.add(copy)
             copies.append(copy)
             vol_set.add(str(vol))
+            added.append(str(vol))
         except OSError as e:
             log.warning(f"[replication] Falha ao replicar {sha256} para {vol}: {e}")
+    if added:
+        log.debug(f"[replication] {sha256[:8]}… replicado para: {added}")
 
 
 def _rereplicate_to_volume(v: Path) -> None:
     db = SessionLocal()
     try:
+        log.info(f"[rereplicate] Iniciando re-replicação para {v}")
         shas_on_v = {r.sha256 for r in db.query(FileContentCopy.sha256)
                                           .filter(FileContentCopy.volume_path == str(v)).all()}
         target = _target_replicas()
@@ -134,6 +139,8 @@ def _rereplicate_to_volume(v: Path) -> None:
         if count:
             db.commit()
             log.info(f"[rereplicate] {count} arquivo(s) re-replicados para {v}")
+        else:
+            log.info(f"[rereplicate] Nenhum arquivo sub-replicado encontrado para {v}")
     finally:
         db.close()
 
@@ -154,6 +161,8 @@ def _backfill_content_copies() -> None:
         if count:
             db.commit()
             log.info(f"[backfill] {count} entrada(s) migradas para file_content_copies")
+        else:
+            log.info("[backfill] Nenhuma entrada para migrar — file_content_copies já atualizado")
     except Exception as e:
         log.error(f"[backfill] Erro: {e}")
     finally:
