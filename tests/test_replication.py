@@ -240,6 +240,109 @@ def test_cleanup_removes_all_physical_copies(tmp_path, monkeypatch):
         assert _copies_in(v2, sha) == [], "cópia v2 deve ser removida"
 
 
+# -- /maintenance/rereplicate -------------------------------------------------
+
+def test_rereplicate_fills_single_copy_to_target(tmp_path, monkeypatch):
+    """Arquivo com 1 cópia deve ganhar réplica no segundo volume via /maintenance/rereplicate."""
+    v1 = tmp_path / "v1"; v1.mkdir()
+    v2 = tmp_path / "v2"; v2.mkdir()
+
+    for c in _mk_client(monkeypatch, [v1, v2], replication_factor=1):
+        c.post("/backups", json={"label": "b1"})
+        c.post("/backups/b1/versions", json={"version_key": "v1"})
+        r = _upload(c, "b1", "v1", "/file.txt", b"needs replica")
+        sha = r["sha256"]
+
+        total = len(_copies_in(v1, sha)) + len(_copies_in(v2, sha))
+        assert total == 1
+
+        monkeypatch.setattr(m, "REPLICATION_FACTOR", 2)
+        r = c.post("/maintenance/rereplicate")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["replicated"] == 1
+        assert data["skipped"] == 0
+        assert data["target_copies"] == 2
+
+        assert len(_copies_in(v1, sha)) == 1
+        assert len(_copies_in(v2, sha)) == 1
+
+
+def test_rereplicate_skips_already_replicated(tmp_path, monkeypatch):
+    """Arquivos já com cópias suficientes não são contados como replicados."""
+    v1 = tmp_path / "v1"; v1.mkdir()
+    v2 = tmp_path / "v2"; v2.mkdir()
+
+    for c in _mk_client(monkeypatch, [v1, v2], replication_factor=2):
+        c.post("/backups", json={"label": "b1"})
+        c.post("/backups/b1/versions", json={"version_key": "v1"})
+        _upload(c, "b1", "v1", "/file.txt", b"already replicated")
+
+        r = c.post("/maintenance/rereplicate")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["replicated"] == 0
+        assert data["skipped"] == 0
+
+
+def test_rereplicate_skips_when_source_degraded(tmp_path, monkeypatch):
+    """Se a única cópia está em volume degraded (mas há saudáveis), conta como skipped."""
+    # 3 volumes: v1 recebe a cópia, depois fica degraded; v2/v3 saudáveis garantem target=2
+    v1 = tmp_path / "v1"; v1.mkdir()
+    v2 = tmp_path / "v2"; v2.mkdir()
+    v3 = tmp_path / "v3"; v3.mkdir()
+
+    for c in _mk_client(monkeypatch, [v1, v2, v3], replication_factor=1):
+        c.post("/backups", json={"label": "b1"})
+        c.post("/backups/b1/versions", json={"version_key": "v1"})
+        monkeypatch.setattr(m, "_pick_volume", lambda: v1)
+        r = _upload(c, "b1", "v1", "/file.txt", b"source will be degraded")
+
+        # v1 degraded: cópia inacessível. v2/v3 saudáveis → target=min(2,2)=2 → underfilled
+        m._degraded_volumes.add(v1)
+        monkeypatch.setattr(m, "REPLICATION_FACTOR", 2)
+
+        r = c.post("/maintenance/rereplicate")
+        assert r.status_code == 200
+        assert r.json()["skipped"] == 1
+        assert r.json()["replicated"] == 0
+
+        m._degraded_volumes.discard(v1)
+
+
+def test_rereplicate_dedup_path_triggers_replication(tmp_path, monkeypatch):
+    """Upload via caminho dedup (X-Content-Sha256) deve acionar replicação."""
+    v1 = tmp_path / "v1"; v1.mkdir()
+    v2 = tmp_path / "v2"; v2.mkdir()
+
+    for c in _mk_client(monkeypatch, [v1, v2], replication_factor=1):
+        c.post("/backups", json={"label": "b1"})
+        c.post("/backups/b1/versions", json={"version_key": "v1"})
+        r = _upload(c, "b1", "v1", "/a.txt", b"dedup content")
+        sha = r["sha256"]
+
+        total = len(_copies_in(v1, sha)) + len(_copies_in(v2, sha))
+        assert total == 1
+
+        # Ativa replicação e reenvia via caminho dedup (X-Content-Sha256, sem body)
+        monkeypatch.setattr(m, "REPLICATION_FACTOR", 2)
+        resp = c.post(
+            "/upload",
+            content=b"",
+            headers={
+                "X-Backup-Label": "b1",
+                "X-Version-Key": "v1",
+                "X-Original-Path": _enc("/b.txt"),
+                "X-Mtime": "1.0",
+                "X-Content-Sha256": sha,
+            },
+        )
+        assert resp.status_code == 200
+
+        assert len(_copies_in(v1, sha)) == 1
+        assert len(_copies_in(v2, sha)) == 1
+
+
 # -- /storage/disks with replication ------------------------------------------
 
 def test_storage_disks_counts_copies_per_volume(tmp_path, monkeypatch):

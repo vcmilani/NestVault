@@ -272,7 +272,7 @@ export BACKUP_API_KEY="uma-chave-secreta-forte-aqui"
 
 ## 🚀 Comandos
 
-O cliente possui sete subcomandos: `backup`, `backups`, `versions`, `restore`, `cleanup`, `delete-label` e `cleanup-orphans`.
+O cliente possui oito subcomandos: `backup`, `backups`, `versions`, `restore`, `cleanup`, `delete-label`, `cleanup-orphans` e `rereplicate`.
 
 ---
 
@@ -625,6 +625,34 @@ Exemplo de saída:
 Iniciando limpeza forcada de arquivos orfaos...
 Limpeza concluida: 14 arquivo(s) removido(s), 312.4 MB liberados
 ```
+
+---
+
+### rereplicate
+
+Força a re-replicação de todos os arquivos que possuem menos cópias físicas do que o `REPLICATION_FACTOR` configurado no servidor. Use após:
+
+- Adicionar um disco novo ao cluster (arquivos existentes não são replicados automaticamente)
+- Recuperar um disco que ficou `degraded` por um longo período
+- Aumentar o valor de `REPLICATION_FACTOR`
+
+```bash
+python backup_client.py rereplicate \
+  --server http://192.168.1.100:8000
+```
+
+| Opção | Descrição |
+|-------|-----------|
+| `--server` | URL do servidor |
+
+Exemplo de saída:
+
+```
+Iniciando re-replicacao de conteudos sub-replicados...
+Re-replicacao concluida: 312 arquivo(s) replicado(s), 0 pulado(s) (fonte inacessivel) — alvo: 2 copia(s)
+```
+
+Se `skipped > 0`, significa que alguns arquivos têm a única cópia em um volume `degraded` — eles não puderam ser replicados. Recupere o disco e execute o comando novamente.
 
 ---
 
@@ -986,8 +1014,11 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 | Método | Endpoint | Descrição |
 |--------|----------|-----------|
 | `POST` | `/maintenance/cleanup-orphans` | Remove todos os arquivos físicos não referenciados por nenhuma versão |
+| `POST` | `/maintenance/rereplicate` | Re-replica conteúdos com menos cópias que `REPLICATION_FACTOR` |
 
-> Retorna `{ "files_removed": N, "bytes_freed": N }`. Útil após deleções em massa ou para liberar espaço imediatamente. Operação **síncrona** — aguarda a conclusão antes de responder.
+> `/maintenance/cleanup-orphans` — retorna `{ "files_removed": N, "bytes_freed": N }`. Útil após deleções em massa. Operação **síncrona**.
+>
+> `/maintenance/rereplicate` — retorna `{ "replicated": N, "skipped": N, "target_copies": N }`. `replicated` = arquivos que receberam ao menos uma nova cópia. `skipped` = arquivos cuja única cópia está em volume `degraded` (não foi possível copiar a fonte). Operação **síncrona** — pode demorar em acervos grandes.
 
 ---
 
@@ -1324,6 +1355,7 @@ A resposta de `/check/batch` é `list[CheckBatchResultItem]` na mesma ordem dos 
 | `GET /storage/info` | — | `StorageInfoResponse` |
 | `GET /storage/disks` | — | `list[DiskVolumeInfo]` |
 | `POST /maintenance/cleanup-orphans` | — | `OrphanCleanupResponse` |
+| `POST /maintenance/rereplicate` | — | `RereplicateResponse` |
 
 ---
 

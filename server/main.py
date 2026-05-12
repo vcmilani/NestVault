@@ -339,6 +339,11 @@ class OrphanCleanupResponse(BaseModel):
     files_removed: int
     bytes_freed: int
 
+class RereplicateResponse(BaseModel):
+    replicated: int
+    skipped: int
+    target_copies: int
+
 class StorageInfoResponse(BaseModel):
     total_bytes: int
     used_bytes: int
@@ -942,6 +947,9 @@ async def upload_file(
         if not fc:
             raise HTTPException(400, f"Conteudo sha256={content_sha256} nao encontrado no storage")
         sha256 = content_sha256
+        first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).first()
+        if first_copy:
+            _ensure_replicas(sha256, Path(first_copy.stored_at), db)
     else:
         # Escolhe volume com mais espaço livre; tmp e conteúdo vão pro mesmo disco
         volume = _pick_volume()
@@ -1121,6 +1129,38 @@ def force_cleanup_orphans(db: Session = Depends(get_db)):
     """Remove todos os FileContents nao referenciados por nenhuma versao ativa."""
     files_removed, bytes_freed = _cleanup_orphan_contents(db)
     return OrphanCleanupResponse(files_removed=files_removed, bytes_freed=bytes_freed)
+
+
+@app.post("/maintenance/rereplicate", response_model=RereplicateResponse, dependencies=[Depends(require_api_key)])
+def force_rereplicate(db: Session = Depends(get_db)):
+    """Re-replica conteúdos com menos cópias que REPLICATION_FACTOR. Útil após adicionar um disco novo."""
+    target = _target_replicas()
+    degraded_strs = [str(d) for d in _degraded_volumes]
+
+    underfilled = (
+        db.query(FileContent.sha256, func.count(FileContentCopy.id).label("cnt"))
+        .outerjoin(FileContentCopy, FileContentCopy.sha256 == FileContent.sha256)
+        .group_by(FileContent.sha256)
+        .having(func.count(FileContentCopy.id) < target)
+        .all()
+    )
+
+    replicated = 0
+    skipped = 0
+    for (sha256, _) in underfilled:
+        q = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256)
+        if degraded_strs:
+            q = q.filter(~FileContentCopy.volume_path.in_(degraded_strs))
+        source = q.first()
+        if not source:
+            skipped += 1
+            continue
+        _ensure_replicas(sha256, Path(source.stored_at), db)
+        replicated += 1
+
+    db.commit()
+    log.info(f"[maintenance/rereplicate] {replicated} arquivo(s) re-replicados, {skipped} pulados (sem fonte acessível)")
+    return RereplicateResponse(replicated=replicated, skipped=skipped, target_copies=target)
 
 
 # -- Cleanup ------------------------------------------------------------------
