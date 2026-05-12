@@ -1,9 +1,11 @@
-# 🗄️ NestVault  `v2.9`
+# 🗄️ NestVault  `v3.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
 Cada execução de backup cria uma nova versão dentro do label. O servidor armazena o conteúdo físico apenas uma vez por sha256 — versões diferentes que compartilham arquivos idênticos não duplicam o storage.
 
+> **v3.0** — redundância de dados por replicação entre volumes: cada arquivo pode ser mantido em N cópias físicas em volumes distintos via `REPLICATION_FACTOR` (padrão `1` = comportamento anterior, sem replicação). Downloads fazem fallback automático para cópias sobreviventes. Quando um volume degraded se recupera, arquivos sub-replicados são restaurados em background. Compatível com RAID/ZFS físico — sem replicação por padrão.
+>
 > **v2.9** — hashing paralelo com `ProcessPoolExecutor`: a fase de cálculo de SHA-256 passou de `ThreadPoolExecutor` para `ProcessPoolExecutor`, contornando o GIL do Python e utilizando todos os núcleos da CPU. O número de processos de hash é independente dos workers de upload e padreia para `os.cpu_count()`. Novo argumento `--hash-workers` para controle manual. Ganho típico de 4–8× em máquinas com 8+ núcleos comparado à v2.8.
 >
 > **v2.8** — suporte a múltiplos discos no servidor: a variável `STORAGE_DIRS` aceita uma lista de pontos de montagem separados por vírgula (`/mnt/disk1,/mnt/disk2`). O servidor distribui automaticamente os uploads para o disco com mais espaço livre; leitura, download e restore continuam funcionando sem nenhuma mudança — `FileContent.stored_at` guarda o path absoluto. O endpoint `GET /storage/info` agrega total/livre/usado de todos os volumes. O auto-cleanup dispara se qualquer disco estiver abaixo de 5%. O cliente não precisa de nenhuma alteração.
@@ -40,6 +42,32 @@ backup_system/
 ├── .gitignore
 └── README.md
 ```
+
+---
+
+## ⚠️ Atualizando da v2.x para v3.0
+
+A v3.0 adiciona a tabela `file_content_copies` ao banco. O `init_db()` cria a tabela automaticamente no startup. Um backfill automático migra os `FileContent` existentes para a nova tabela em background — sem downtime.
+
+Nenhuma ação manual é necessária. Para verificar:
+
+```bash
+sqlite3 /mnt/hd-externo/backup.db ".tables"
+# Deve listar file_content_copies
+
+sqlite3 /mnt/hd-externo/backup.db "SELECT COUNT(*) FROM file_content_copies;"
+# Deve retornar o mesmo número de linhas de file_contents
+```
+
+Para ativar a replicação após migrar:
+
+```bash
+# Editar o serviço systemd e adicionar:
+Environment="REPLICATION_FACTOR=2"
+sudo systemctl daemon-reload && sudo systemctl restart backup-server
+```
+
+Novos uploads serão replicados. Conteúdos existentes **não** são re-replicados automaticamente retroativamente — apenas quando sofrem novo upload ou quando um volume degraded se recupera.
 
 ---
 
@@ -143,6 +171,12 @@ export STORAGE_DIR="/mnt/hd-externo/backups"
 
 # Dois ou mais discos — use STORAGE_DIRS (tem precedência sobre STORAGE_DIR)
 export STORAGE_DIRS="/mnt/disk1/backups,/mnt/disk2/backups"
+
+# Replicação entre volumes (opcional — padrão 1 = sem replicação)
+# 1 = sem replicação (compatível com RAID físico ou disco único)
+# 2 = espelhar para 2 volumes
+# 0 = espelhar para todos os volumes saudáveis
+export REPLICATION_FACTOR=2
 ```
 
 `STORAGE_DIRS` e `STORAGE_DIR` são mutuamente compatíveis: se apenas `STORAGE_DIR` estiver definido, o servidor opera normalmente com um único volume. Se `STORAGE_DIRS` estiver definido, ele tem precedência e pode listar quantos pontos de montagem forem necessários.
@@ -168,6 +202,7 @@ WorkingDirectory=/home/pi/backup_system/server
 Environment="BACKUP_API_KEY=sua-chave-aqui"
 Environment="STORAGE_DIRS=/mnt/disk1/backups,/mnt/disk2/backups"
 Environment="DB_PATH=/mnt/disk1/backup.db"
+Environment="REPLICATION_FACTOR=2"
 ExecStart=/home/pi/backup_system/server/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
 Restart=always
 
@@ -686,6 +721,19 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 
 ## ⚡ Otimizações
 
+### v3.0
+
+| Componente | Mudança |
+|---|---|
+| **`REPLICATION_FACTOR` (server)** | Nova env var. Padrão `1` = comportamento anterior (sem replicação, compatível com RAID físico/ZFS). `2+` = replicação síncrona no upload para N volumes. `0` = espelhar para todos os volumes saudáveis |
+| **`FileContentCopy` (DB)** | Nova tabela rastreia o path físico de cada cópia por volume (`sha256`, `stored_at`, `volume_path`) |
+| **Upload (server)** | Após gravar a cópia primária, `_ensure_replicas()` copia para volumes adicionais antes de confirmar. Volumes degraded são pulados |
+| **Download (server)** | Tenta cada cópia em ordem, pulando volumes degraded — 503 apenas se todas as cópias estão em volumes degraded, 410 se o dado sumiu |
+| **Cleanup (server)** | Remove todas as cópias físicas de um conteúdo órfão antes de apagar o registro |
+| **Re-replicação (server)** | `_volume_health_monitor` detecta recovery e copia arquivos sub-replicados em background via `_rereplicate_to_volume` |
+| **`/storage/disks` (server)** | Contagem de arquivos por volume via tabela `file_content_copies` (mais precisa que LIKE anterior) |
+| **Backfill (server)** | No startup, `_backfill_content_copies` migra entradas `FileContent` existentes para a nova tabela — sem downtime |
+
 ### v2.9
 
 | Componente | Mudança |
@@ -800,7 +848,8 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 BackupID (label)
   └── BackupVersion (version_key = datetime ISO)
         └── VersionFile (original_path, sha256, mtime)
-                └── FileContent (sha256, stored_at) ← arquivo físico único por conteúdo
+                └── FileContent (sha256, stored_at) ← primeiro path (compat)
+                      └── FileContentCopy (sha256, stored_at, volume_path) ← todas as cópias
 ```
 
 **Storage físico — disco único:**
@@ -828,7 +877,26 @@ storage/
         └── 3ca812de55f09b1a...   ← cada FileContent.stored_at guarda o path absoluto
 ```
 
-O conteúdo de cada arquivo é armazenado **uma única vez**, independente de quantas versões ou labels o referenciem. O campo `stored_at` no banco registra o path absoluto de cada conteúdo, de modo que leitura, download e restore funcionam independentemente de em qual disco o arquivo está.
+O conteúdo de cada arquivo é armazenado **uma única vez por sha256**, independente de quantas versões ou labels o referenciem. Com `REPLICATION_FACTOR=1` (padrão), cada conteúdo fica em um único volume. Com `REPLICATION_FACTOR=2`, uma cópia adicional é gravada em outro volume:
+
+**Storage físico — replicação ativa (`REPLICATION_FACTOR=2`):**
+```
+/mnt/disk1/
+└── _content/
+    ├── ab/
+    │   └── abcd1234ef567890...   ← cópia primária
+    └── f7/
+        └── f7a923bc11d24e5f...
+
+/mnt/disk2/
+└── _content/
+    ├── ab/
+    │   └── abcd1234ef567890...   ← réplica (mesmo conteúdo, path diferente)
+    └── f7/
+        └── f7a923bc11d24e5f...
+```
+
+Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o arquivo sem intervenção.
 
 ---
 
@@ -881,6 +949,8 @@ O conteúdo de cada arquivo é armazenado **uma única vez**, independente de qu
 | Método | Endpoint | Descrição |
 |--------|----------|-----------|
 | `GET` | `/storage/info` | Espaço total/livre/usado do disco e bytes liberáveis ao apagar versões antigas |
+| `GET` | `/storage/disks` | Status e contagem de arquivos físicos por volume |
+| `GET` | `/disks` | Dashboard de discos (HTML) |
 
 ### Manutenção
 
@@ -1156,6 +1226,21 @@ A resposta de `/check/batch` é `list[CheckBatchResultItem]` na mesma ordem dos 
 
 `total_bytes`, `used_bytes` e `free_bytes` são a **soma de todos os volumes** configurados em `STORAGE_DIRS` (ou o volume único de `STORAGE_DIR`).
 
+#### `DiskVolumeInfo`
+```json
+{
+  "path":          "/mnt/disk1/backups",
+  "total_bytes":   500107862016,
+  "used_bytes":    214748364800,
+  "free_bytes":    285359497216,
+  "content_files": 1842,
+  "content_bytes": 38654705664,
+  "status":        "ok"
+}
+```
+
+`status` pode ser `"ok"` ou `"degraded"` (volume inacessível). Em estado degraded, `total_bytes`, `used_bytes` e `free_bytes` são `0`. `content_files` e `content_bytes` contam as cópias físicas **presentes neste volume** — com replicação ativa, o mesmo arquivo aparece em múltiplos volumes.
+
 `reclaimable_bytes` = tamanho total dos `FileContent`s referenciados **exclusivamente** por versões antigas (não pela versão "done" mais recente de nenhum label). É o espaço que seria recuperado rodando `cleanup --keep 1 --all`.
 
 #### `CompareResponse`
@@ -1208,6 +1293,7 @@ A resposta de `/check/batch` é `list[CheckBatchResultItem]` na mesma ordem dos 
 | `GET /files` | query: `backup_label`, `version_key` | `list[FileInfo]` |
 | `GET /files/{id}/download` | — | binary stream |
 | `GET /storage/info` | — | `StorageInfoResponse` |
+| `GET /storage/disks` | — | `list[DiskVolumeInfo]` |
 | `POST /maintenance/cleanup-orphans` | — | `OrphanCleanupResponse` |
 
 ---
