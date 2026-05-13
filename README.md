@@ -31,7 +31,7 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 ## Estrutura
 
 ```
-backup_system/
+NestVault/
 ├── server/
 │   ├── main.py              ← API FastAPI
 │   ├── database.py          ← Modelos SQLite/SQLAlchemy
