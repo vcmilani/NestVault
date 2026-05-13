@@ -1257,13 +1257,13 @@ def encrypt_existing_files(db: Session = Depends(get_db)):
 
         if success:
             fc.encrypted = True
+            db.commit()  # persiste por arquivo — retomada segura se interrompido
             bytes_processed += fc.size
             files_encrypted += 1
             log.info(f"[encrypt-existing] [{i}/{total}] {fc.sha256[:8]}… concluído")
         else:
             skipped += 1
 
-    db.commit()
     log.info(f"[encrypt-existing] concluído — {files_encrypted} cifrado(s), {skipped} pulado(s), {bytes_processed / 1024 / 1024:.2f} MB processados")
     return EncryptExistingResponse(
         files_encrypted=files_encrypted,
