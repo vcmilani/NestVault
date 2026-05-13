@@ -240,6 +240,12 @@ def force_rereplicate_api(server):
     return r.json()
 
 
+def force_encrypt_existing_api(server):
+    r = _session.post(f"{server}/maintenance/encrypt-existing", headers=build_headers(), timeout=600)
+    r.raise_for_status()
+    return r.json()
+
+
 def sync_version(server, label, version_key, existing_paths):
     r = _session.post(f"{server}/sync",
                       json={"backup_label": label, "version_key": version_key,
@@ -775,9 +781,42 @@ def rereplicate(server=DEFAULT_SERVER):
         sys.exit(1)
 
 
+# -- Encrypt existing ---------------------------------------------------------
+def encrypt_existing(server=DEFAULT_SERVER):
+    log.info("Iniciando criptografia de arquivos existentes...")
+    try:
+        import time
+        t0 = time.monotonic()
+        result = force_encrypt_existing_api(server)
+        elapsed = time.monotonic() - t0
+        encrypted = result.get("files_encrypted", 0)
+        processed = result.get("bytes_processed", 0)
+        skipped   = result.get("skipped", 0)
+        log.info(f"  Arquivos criptografados : {encrypted}")
+        log.info(f"  Bytes processados       : {fmt_size(processed)}")
+        log.info(f"  Ja criptografados       : {skipped} (pulados)")
+        log.info(f"  Tempo                   : {elapsed:.1f}s")
+        if skipped:
+            log.warning(
+                f"{skipped} arquivo(s) pulado(s) — volume degraded ou erro de I/O. "
+                f"Recupere o disco e execute novamente."
+            )
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            log.error("Servidor nao suporta criptografia (requer NestVault v3.1+)")
+        elif e.response is not None and e.response.status_code == 400:
+            log.error("Criptografia nao habilitada no servidor (ENCRYPTION_ENABLED=false)")
+        else:
+            log.error(f"Erro: {e}")
+        sys.exit(1)
+    except requests.RequestException as e:
+        log.error(f"Erro na criptografia: {e}")
+        sys.exit(1)
+
+
 # -- CLI ----------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="NestVault v2.5")
+    parser = argparse.ArgumentParser(description="NestVault v3.1")
     sub = parser.add_subparsers(dest="command", required=True)
 
     # backup
@@ -845,6 +884,13 @@ def main():
     )
     prr.add_argument("--server", default=DEFAULT_SERVER)
 
+    # encrypt-existing
+    pee = sub.add_parser(
+        "encrypt-existing",
+        help="Cifra arquivos existentes no storage (requer ENCRYPTION_ENABLED=true no servidor)",
+    )
+    pee.add_argument("--server", default=DEFAULT_SERVER)
+
     args = parser.parse_args()
 
     if args.command == "backup":
@@ -887,6 +933,10 @@ def main():
     elif args.command == "rereplicate":
         log.info("Comando  : REREPLICATE")
         rereplicate(args.server)
+
+    elif args.command == "encrypt-existing":
+        log.info("Comando  : ENCRYPT-EXISTING")
+        encrypt_existing(args.server)
 
 
 if __name__ == "__main__":
