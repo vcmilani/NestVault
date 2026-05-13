@@ -206,7 +206,7 @@ async def lifespan(_: FastAPI):
     monitor.cancel()
 
 
-app = FastAPI(title="NestVault", version="3.0.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="3.1.1", lifespan=lifespan)
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -675,7 +675,7 @@ def disks_page():
 
 @app.get("/health", response_model=HealthResponse)
 def health():
-    return HealthResponse(status="ok", version="3.0.0", time=datetime.now(timezone.utc).isoformat())
+    return HealthResponse(status="ok", version="3.1.1", time=datetime.now(timezone.utc).isoformat())
 
 
 @app.get("/storage/info", response_model=StorageInfoResponse, dependencies=[Depends(require_api_key)])
