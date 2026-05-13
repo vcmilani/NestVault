@@ -306,7 +306,7 @@ class VersionInfo(BaseModel):
     id: int
     version_key: str
     backup_label: str
-    status: Literal["running", "done", "failed"]
+    status: Literal["running", "incomplete", "done", "failed"]
     created_at: str
     finished_at: Optional[str] = None
     duration_seconds: Optional[float] = Field(None, description="Duracao do backup em segundos")
@@ -799,6 +799,12 @@ def create_version(label: str, req: VersionCreate, db: Session = Depends(get_db)
                 .first())
     if existing:
         return VersionCreatedResponse(created=False, version=_version_stats(existing, db))
+    updated = (db.query(BackupVersion)
+               .filter(BackupVersion.backup_label == label,
+                       BackupVersion.status == "running")
+               .update({"status": "incomplete"}, synchronize_session=False))
+    if updated:
+        log.info(f"[versao] {label}: {updated} versão(ões) running → incomplete")
     v = BackupVersion(backup_label=label, version_key=req.version_key)
     db.add(v); db.commit(); db.refresh(v)
     return VersionCreatedResponse(created=True, version=_version_stats(v, db))

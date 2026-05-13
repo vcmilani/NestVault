@@ -90,6 +90,7 @@
   .badge-active,.badge-done{background:var(--green-dim);color:var(--green)}
   .badge-failed{background:var(--red-dim);color:var(--red)}
   .badge-running{background:var(--amber-dim);color:var(--amber)}
+  .badge-incomplete{background:var(--bg3);border:1px solid var(--border2);color:var(--text-dim)}
 
   /* Versions sub-table */
   .versions-row td{padding:0}
@@ -355,7 +356,7 @@
         <tr class="${isExp?'expanded':''}" onclick="toggleVersions('${esc(b.label)}',this)">
           <td><span class="chevron">▶</span>${esc(b.label)}</td>
           <td class="dim-cell">${esc(b.client_name||'—')}</td>
-          <td>${badge('active')}</td>
+          <td>${badge(b.status)}</td>
           <td class="num-cell">${b.version_count}</td>
           <td class="num-cell">${b.file_count.toLocaleString('pt-BR')}</td>
           <td class="size-cell">${fmtSize(b.total_size_bytes)}</td>
