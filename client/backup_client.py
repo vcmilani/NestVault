@@ -165,6 +165,10 @@ def upload_file(server, local_path: Path, label, version_key, original_path, mti
         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}]",
     )
     reader = _ProgressReader(local_path, bar)
+    # O servidor cifra e replica antes de responder — escala com o tamanho do arquivo.
+    # Tupla (connect_timeout, read_timeout): 10s para conectar, 1s por MB para leitura
+    # (mínimo 300s para arquivos pequenos em hardware lento ou com replicação).
+    read_timeout = max(300, file_size // (1024 * 1024))
     try:
         r = _session.post(
             f"{server}/upload",
@@ -177,7 +181,7 @@ def upload_file(server, local_path: Path, label, version_key, original_path, mti
                 "Content-Type":    "application/octet-stream",
                 "Content-Length":  str(file_size),
             }),
-            timeout=120,
+            timeout=(10, read_timeout),
         )
     finally:
         bar.close()
@@ -235,13 +239,13 @@ def force_cleanup_orphans_api(server):
 
 
 def force_rereplicate_api(server):
-    r = _session.post(f"{server}/maintenance/rereplicate", headers=build_headers(), timeout=300)
+    r = _session.post(f"{server}/maintenance/rereplicate", headers=build_headers(), timeout=(10, None))
     r.raise_for_status()
     return r.json()
 
 
 def force_encrypt_existing_api(server):
-    r = _session.post(f"{server}/maintenance/encrypt-existing", headers=build_headers(), timeout=600)
+    r = _session.post(f"{server}/maintenance/encrypt-existing", headers=build_headers(), timeout=(10, None))
     r.raise_for_status()
     return r.json()
 
