@@ -11,7 +11,7 @@ Otimizacoes de performance:
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Depends, Header, BackgroundTasks
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
@@ -23,6 +23,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile
+import crypto
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,6 +42,9 @@ for _v in STORAGE_VOLUMES:
 API_KEY      = os.getenv("BACKUP_API_KEY", "")
 STATIC_DIR   = Path(__file__).parent / "static"
 AUTH_ENABLED = bool(API_KEY)
+
+ENCRYPTION_ENABLED = os.getenv("ENCRYPTION_ENABLED", "false").lower() == "true"
+_encryption_key: bytes | None = None
 
 # Buffer de leitura/escrita - 1 MB e bem mais rapido que 64KB no I/O
 CHUNK_SIZE = 1024 * 1024
@@ -182,7 +186,13 @@ async def _volume_health_monitor() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    global _encryption_key
     init_db()
+    if ENCRYPTION_ENABLED:
+        _encryption_key = crypto.load_key()  # lança ValueError se inválida — falha rápido
+        log.info("Criptografia: habilitada (AES-256-GCM)")
+    else:
+        log.info("Criptografia: desabilitada")
     asyncio.get_event_loop().run_in_executor(None, _backfill_content_copies)
     monitor = asyncio.create_task(_volume_health_monitor())
     log.info(f"Servidor iniciado — {len(STORAGE_VOLUMES)} volume(s): {[str(v) for v in STORAGE_VOLUMES]}")
@@ -343,6 +353,11 @@ class RereplicateResponse(BaseModel):
     replicated: int
     skipped: int
     target_copies: int
+
+class EncryptExistingResponse(BaseModel):
+    files_encrypted: int
+    bytes_processed: int
+    skipped: int
 
 class StorageInfoResponse(BaseModel):
     total_bytes: int
@@ -965,7 +980,16 @@ async def upload_file(
             else:
                 dest = _content_path(sha256, volume)
                 shutil.move(str(tmp_path), str(dest))
-                fc = FileContent(sha256=sha256, stored_at=str(dest), size=size)
+                if ENCRYPTION_ENABLED:
+                    tmp_enc = dest.parent / f"_enc_{os.urandom(4).hex()}"
+                    try:
+                        crypto.encrypt_stream(dest, tmp_enc, _encryption_key)
+                        shutil.move(str(tmp_enc), str(dest))
+                    except Exception:
+                        tmp_enc.unlink(missing_ok=True)
+                        raise
+                fc = FileContent(sha256=sha256, stored_at=str(dest), size=size,
+                                 encrypted=ENCRYPTION_ENABLED)
                 db.add(fc)
                 db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(volume)))
                 db.flush()
@@ -1049,6 +1073,10 @@ def download_file(file_id: int, db: Session = Depends(get_db)):
     if not row:
         raise HTTPException(404, "Arquivo nao encontrado")
 
+    fc           = db.query(FileContent).filter(FileContent.sha256 == row.sha256).first()
+    is_encrypted = fc.encrypted if fc else False
+    filename     = Path(row.original_path).name
+
     copies = (db.query(FileContentCopy)
               .filter(FileContentCopy.sha256 == row.sha256)
               .filter(~FileContentCopy.volume_path.in_([str(v) for v in _degraded_volumes]))
@@ -1058,7 +1086,13 @@ def download_file(file_id: int, db: Session = Depends(get_db)):
         p = Path(copy.stored_at)
         try:
             if p.exists():
-                return FileResponse(p, filename=Path(row.original_path).name)
+                if is_encrypted:
+                    return StreamingResponse(
+                        crypto.decrypt_chunks(p, _encryption_key),
+                        media_type="application/octet-stream",
+                        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+                    )
+                return FileResponse(p, filename=filename)
         except OSError:
             continue
 
@@ -1161,6 +1195,60 @@ def force_rereplicate(db: Session = Depends(get_db)):
     db.commit()
     log.info(f"[maintenance/rereplicate] {replicated} arquivo(s) re-replicados, {skipped} pulados (sem fonte acessível)")
     return RereplicateResponse(replicated=replicated, skipped=skipped, target_copies=target)
+
+
+@app.post("/maintenance/encrypt-existing", response_model=EncryptExistingResponse, dependencies=[Depends(require_api_key)])
+def encrypt_existing_files(db: Session = Depends(get_db)):
+    """Cifra todos os FileContents ainda não cifrados. Requer ENCRYPTION_ENABLED=true no servidor."""
+    if not ENCRYPTION_ENABLED:
+        raise HTTPException(400, "Criptografia não habilitada no servidor (ENCRYPTION_ENABLED=false)")
+
+    pending       = db.query(FileContent).filter(FileContent.encrypted == False).all()  # noqa: E712
+    degraded_strs = [str(v) for v in _degraded_volumes]
+    files_encrypted = 0
+    bytes_processed = 0
+    skipped         = 0
+
+    for fc in pending:
+        q = db.query(FileContentCopy).filter(FileContentCopy.sha256 == fc.sha256)
+        if degraded_strs:
+            q = q.filter(~FileContentCopy.volume_path.in_(degraded_strs))
+        copies = q.all()
+
+        if not copies:
+            log.warning(f"[encrypt-existing] {fc.sha256[:8]}… sem cópia acessível — pulando")
+            skipped += 1
+            continue
+
+        success = True
+        for copy in copies:
+            p = Path(copy.stored_at)
+            if not p.exists():
+                continue
+            tmp_enc = p.parent / f"_enc_{os.urandom(4).hex()}"
+            try:
+                crypto.encrypt_stream(p, tmp_enc, _encryption_key)
+                shutil.move(str(tmp_enc), str(p))
+            except Exception as e:
+                log.warning(f"[encrypt-existing] Erro em {p}: {e}")
+                tmp_enc.unlink(missing_ok=True)
+                success = False
+                break
+
+        if success:
+            fc.encrypted = True
+            bytes_processed += fc.size
+            files_encrypted += 1
+        else:
+            skipped += 1
+
+    db.commit()
+    log.info(f"[encrypt-existing] {files_encrypted} cifrado(s), {skipped} pulado(s)")
+    return EncryptExistingResponse(
+        files_encrypted=files_encrypted,
+        bytes_processed=bytes_processed,
+        skipped=skipped,
+    )
 
 
 # -- Cleanup ------------------------------------------------------------------

@@ -7,8 +7,8 @@ Ajustes de performance:
 """
 
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Float,
-    DateTime, ForeignKey, UniqueConstraint, Index, event
+    create_engine, Column, Integer, String, Float, Boolean,
+    DateTime, ForeignKey, UniqueConstraint, Index, event, text
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
@@ -77,6 +77,7 @@ class FileContent(Base):
     sha256     = Column(String(64), primary_key=True)
     stored_at  = Column(String, nullable=False)
     size       = Column(Integer, nullable=False)
+    encrypted  = Column(Boolean, nullable=False, default=False, server_default="0")
     created_at = Column(DateTime, default=datetime.utcnow)
 
     refs = relationship("VersionFile", back_populates="content", lazy="dynamic")
@@ -116,6 +117,15 @@ class VersionFile(Base):
 
 def init_db():
     Base.metadata.create_all(bind=engine)
+    # Migração: adiciona coluna encrypted em bancos existentes (ignora se já existir)
+    with engine.connect() as conn:
+        try:
+            conn.execute(text(
+                "ALTER TABLE file_contents ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0"
+            ))
+            conn.commit()
+        except Exception:
+            pass
 
 
 def get_db():

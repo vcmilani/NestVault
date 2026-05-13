@@ -1,9 +1,11 @@
-# 🗄️ NestVault  `v3.0`
+# 🗄️ NestVault  `v3.1`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
 Cada execução de backup cria uma nova versão dentro do label. O servidor armazena o conteúdo físico apenas uma vez por sha256 — versões diferentes que compartilham arquivos idênticos não duplicam o storage.
 
+> **v3.1** — criptografia em repouso com AES-256-GCM: ativada via `ENCRYPTION_ENABLED=true` + `ENCRYPTION_KEY` (Base64, 32 bytes). Opt-in — desabilitada por padrão para quem já usa LUKS/ZFS/FileVault. Arquivos existentes continuam legíveis; a migração é feita sob demanda via `encrypt-existing` (cliente) ou `POST /maintenance/encrypt-existing`. Download descriptografa em streaming, sem buffer completo em memória. Novo módulo `crypto.py` com chunked AES-256-GCM (1 MB/chunk, nonce único por chunk). Replicação já copia arquivos cifrados — nenhum dado trafega em claro entre volumes.
+>
 > **v3.0** — redundância de dados por replicação entre volumes: cada arquivo pode ser mantido em N cópias físicas em volumes distintos via `REPLICATION_FACTOR` (padrão `1` = comportamento anterior, sem replicação). Downloads fazem fallback automático para cópias sobreviventes. Quando um volume degraded se recupera, arquivos sub-replicados são restaurados em background. Compatível com RAID/ZFS físico — sem replicação por padrão.
 >
 > **v2.9** — hashing paralelo com `ProcessPoolExecutor`: a fase de cálculo de SHA-256 passou de `ThreadPoolExecutor` para `ProcessPoolExecutor`, contornando o GIL do Python e utilizando todos os núcleos da CPU. O número de processos de hash é independente dos workers de upload e padreia para `os.cpu_count()`. Novo argumento `--hash-workers` para controle manual. Ganho típico de 4–8× em máquinas com 8+ núcleos comparado à v2.8.
@@ -33,6 +35,7 @@ backup_system/
 ├── server/
 │   ├── main.py              ← API FastAPI
 │   ├── database.py          ← Modelos SQLite/SQLAlchemy
+│   ├── crypto.py            ← Criptografia AES-256-GCM (v3.1)
 │   ├── requirements.txt
 │   └── static/
 │       └── index.html       ← Dashboard web
@@ -42,6 +45,42 @@ backup_system/
 ├── .gitignore
 └── README.md
 ```
+
+---
+
+## ⚠️ Atualizando da v3.0 para v3.1
+
+A v3.1 adiciona a coluna `encrypted` à tabela `file_contents`. O `init_db()` executa o `ALTER TABLE` automaticamente no startup via `try/except` — sem downtime, sem intervenção manual.
+
+**Verificar migração:**
+
+```bash
+sqlite3 /mnt/hd-externo/backup.db ".schema file_contents"
+# Deve conter a coluna: encrypted INTEGER NOT NULL DEFAULT 0
+```
+
+**Para ativar a criptografia** (opcional — padrão é desabilitada):
+
+```bash
+# Gerar uma chave aleatória de 32 bytes
+python3 -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"
+# Exemplo: dGhpcyBpcyBhIDMyLWJ5dGUga2V5IGZvciBleGFtcGxl
+
+# Adicionar ao serviço systemd:
+Environment="ENCRYPTION_ENABLED=true"
+Environment="ENCRYPTION_KEY=<chave-gerada-acima>"
+sudo systemctl daemon-reload && sudo systemctl restart backup-server
+```
+
+> **Guarde a chave em local seguro.** Se perdida, arquivos cifrados se tornam irrecuperáveis. Rotação de chave não está disponível na v3.1.
+
+**Migrar arquivos existentes** (após ativar `ENCRYPTION_ENABLED=true`):
+
+```bash
+python backup_client.py encrypt-existing --server http://192.168.1.100:8000
+```
+
+Arquivos existentes sem criptografia continuam legíveis enquanto a migração não roda — a flag `encrypted` no banco distingue os dois estados.
 
 ---
 
@@ -206,6 +245,11 @@ export STORAGE_DIRS="/mnt/disk1/backups,/mnt/disk2/backups"
 # 2 = espelhar para 2 volumes
 # 0 = espelhar para todos os volumes saudáveis
 export REPLICATION_FACTOR=2
+
+# Criptografia em repouso AES-256-GCM (opcional — padrão desabilitada)
+# Omitir se o disco já tem criptografia (LUKS, ZFS encryption, macOS FileVault)
+export ENCRYPTION_ENABLED=true
+export ENCRYPTION_KEY="$(python3 -c 'import os,base64; print(base64.b64encode(os.urandom(32)).decode())')"
 ```
 
 `STORAGE_DIRS` e `STORAGE_DIR` são mutuamente compatíveis: se apenas `STORAGE_DIR` estiver definido, o servidor opera normalmente com um único volume. Se `STORAGE_DIRS` estiver definido, ele tem precedência e pode listar quantos pontos de montagem forem necessários.
@@ -232,6 +276,9 @@ Environment="BACKUP_API_KEY=sua-chave-aqui"
 Environment="STORAGE_DIRS=/mnt/disk1/backups,/mnt/disk2/backups"
 Environment="DB_PATH=/mnt/disk1/backup.db"
 Environment="REPLICATION_FACTOR=2"
+# Criptografia em repouso — omitir se o disco já tem criptografia própria
+# Environment="ENCRYPTION_ENABLED=true"
+# Environment="ENCRYPTION_KEY=<chave-base64-32-bytes>"
 ExecStart=/home/pi/backup_system/server/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
 Restart=always
 
@@ -272,7 +319,7 @@ export BACKUP_API_KEY="uma-chave-secreta-forte-aqui"
 
 ## 🚀 Comandos
 
-O cliente possui oito subcomandos: `backup`, `backups`, `versions`, `restore`, `cleanup`, `delete-label`, `cleanup-orphans` e `rereplicate`.
+O cliente possui nove subcomandos: `backup`, `backups`, `versions`, `restore`, `cleanup`, `delete-label`, `cleanup-orphans`, `rereplicate` e `encrypt-existing`.
 
 ---
 
@@ -656,6 +703,40 @@ Se `skipped > 0`, significa que alguns arquivos têm a única cópia em um volum
 
 ---
 
+### encrypt-existing
+
+Cifra todos os arquivos físicos que ainda não foram criptografados. Use após ativar `ENCRYPTION_ENABLED=true` no servidor para migrar um acervo existente. Requer que o servidor esteja rodando com `ENCRYPTION_ENABLED=true`.
+
+```bash
+python backup_client.py encrypt-existing \
+  --server http://192.168.1.100:8000
+```
+
+| Opção | Descrição |
+|-------|-----------|
+| `--server` | URL do servidor |
+
+Exemplo de saída:
+
+```
+Iniciando criptografia de arquivos existentes...
+  Arquivos criptografados : 1842
+  Bytes processados       : 38.6 GB
+  Já criptografados       : 0 (pulados)
+  Tempo                   : 312.4s
+```
+
+**Notas:**
+
+- Arquivos em volumes `degraded` são pulados e contados em "pulados" — rode novamente após recuperar o disco.
+- A operação é **idempotente**: arquivos já cifrados são ignorados automaticamente.
+- Em caso de interrupção, os arquivos já processados permanecem cifrados — reprocessar os restantes é seguro.
+- Novos uploads feitos com `ENCRYPTION_ENABLED=true` já chegam cifrados; o `encrypt-existing` trata apenas o acervo pré-v3.1.
+
+> Requer NestVault v3.1+ no servidor. Em servidores mais antigos, retorna `404` com mensagem de erro clara.
+
+---
+
 ### Limpeza automática por espaço em disco
 
 O servidor verifica automaticamente o espaço livre **ao finalizar cada backup** (status → `done`). Se o espaço livre no disco estiver abaixo de **5%**, versões antigas são apagadas até que o espaço seja normalizado. Essa verificação ocorre **em background** — o cliente recebe a confirmação do backup imediatamente, sem esperar o scan de disco.
@@ -777,6 +858,18 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 ---
 
 ## ⚡ Otimizações
+
+### v3.1
+
+| Componente | Mudança |
+|---|---|
+| **`ENCRYPTION_ENABLED` / `ENCRYPTION_KEY` (server)** | Novas env vars. Padrão `false` — compatível com discos que já têm criptografia própria (LUKS, ZFS, FileVault). Chave validada no startup; falha imediata se inválida |
+| **`crypto.py` (server)** | Novo módulo. AES-256-GCM em chunks de 1 MB: `encrypt_stream(src, dst, key)` e `decrypt_chunks(path, key)`. Formato: `[12 bytes nonce][4 bytes len][ciphertext+tag]` repetido. Nonce único por chunk via XOR com índice |
+| **`FileContent.encrypted` (DB)** | Nova coluna `INTEGER NOT NULL DEFAULT 0`. Migração automática via `ALTER TABLE` no startup — sem downtime. Distingue arquivos pré-v3.1 (plaintext) de arquivos novos (cifrados) |
+| **Upload (server)** | Após gravar no disco, cifra o arquivo antes de replicar. Cópias nos outros volumes já chegam cifradas |
+| **Download (server)** | Se `fc.encrypted=True`: `StreamingResponse` que decifra chunk a chunk. Se `False`: `FileResponse` direto (zero overhead para arquivos não cifrados) |
+| **`POST /maintenance/encrypt-existing` (server)** | Novo endpoint para migração do acervo existente. Cifra in-place cada cópia física, atualiza `encrypted=True` e faz commit por arquivo — interrupção não perde progresso |
+| **`encrypt-existing` (client)** | Novo subcomando que chama o endpoint com timeout de 600 s e exibe progresso |
 
 ### v3.0
 
@@ -905,7 +998,7 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 BackupID (label)
   └── BackupVersion (version_key = datetime ISO)
         └── VersionFile (original_path, sha256, mtime)
-                └── FileContent (sha256, stored_at) ← primeiro path (compat)
+                └── FileContent (sha256, stored_at, encrypted) ← primeiro path + flag de cifra
                       └── FileContentCopy (sha256, stored_at, volume_path) ← todas as cópias
 ```
 
@@ -1015,10 +1108,13 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 |--------|----------|-----------|
 | `POST` | `/maintenance/cleanup-orphans` | Remove todos os arquivos físicos não referenciados por nenhuma versão |
 | `POST` | `/maintenance/rereplicate` | Re-replica conteúdos com menos cópias que `REPLICATION_FACTOR` |
+| `POST` | `/maintenance/encrypt-existing` | Cifra arquivos físicos ainda não criptografados (requer `ENCRYPTION_ENABLED=true`) |
 
 > `/maintenance/cleanup-orphans` — retorna `{ "files_removed": N, "bytes_freed": N }`. Útil após deleções em massa. Operação **síncrona**.
 >
-> `/maintenance/rereplicate` — retorna `{ "replicated": N, "skipped": N, "target_copies": N }`. `replicated` = arquivos que receberam ao menos uma nova cópia. `skipped` = arquivos cuja única cópia está em volume `degraded` (não foi possível copiar a fonte). Operação **síncrona** — pode demorar em acervos grandes.
+> `/maintenance/rereplicate` — retorna `{ "replicated": N, "skipped": N, "target_copies": N }`. `replicated` = arquivos que receberam ao menos uma nova cópia. `skipped` = arquivos cuja única cópia está em volume `degraded`. Operação **síncrona** — pode demorar em acervos grandes.
+>
+> `/maintenance/encrypt-existing` — retorna `{ "files_encrypted": N, "bytes_processed": N, "skipped": N }`. `skipped` inclui arquivos sem cópia acessível (volume degraded) e erros de I/O. Operação **síncrona** — use timeout longo em acervos grandes (cliente usa 600 s). Retorna `400` se `ENCRYPTION_ENABLED=false`.
 
 ---
 
@@ -1128,7 +1224,7 @@ Limite: entre 1 e 500 itens por request. O tamanho do lote é definido pelo clie
 ```json
 {
   "status":  "ok",
-  "version": "2.9.0",
+  "version": "3.1.0",
   "time":    "2026-04-25T10:42:31.123456"
 }
 ```
@@ -1266,6 +1362,15 @@ A resposta de `/check/batch` é `list[CheckBatchResultItem]` na mesma ordem dos 
 }
 ```
 
+#### `EncryptExistingResponse`
+```json
+{
+  "files_encrypted": 1842,   // arquivos cifrados com sucesso nesta execução
+  "bytes_processed": 38654705664,
+  "skipped": 3               // arquivos pulados (volume degraded ou erro de I/O)
+}
+```
+
 #### `AbsorbResponse`
 ```json
 {
@@ -1356,6 +1461,7 @@ A resposta de `/check/batch` é `list[CheckBatchResultItem]` na mesma ordem dos 
 | `GET /storage/disks` | — | `list[DiskVolumeInfo]` |
 | `POST /maintenance/cleanup-orphans` | — | `OrphanCleanupResponse` |
 | `POST /maintenance/rereplicate` | — | `RereplicateResponse` |
+| `POST /maintenance/encrypt-existing` | — | `EncryptExistingResponse` |
 
 ---
 
