@@ -17,6 +17,13 @@ def _make_engine():
     )
 
 
+@pytest.fixture(autouse=True)
+def reset_degraded_volumes():
+    m._degraded_volumes.clear()
+    yield
+    m._degraded_volumes.clear()
+
+
 @pytest.fixture
 def tmp_vol(tmp_path):
     vol = tmp_path / "vol"

@@ -194,6 +194,79 @@ def test_storage_disks_deduplication_not_double_counted(tmp_path, monkeypatch):
         assert d["content_bytes"] == len(b"same content")
 
 
+# -- Degraded volume ----------------------------------------------------------
+
+def test_storage_disks_ok_status_when_healthy(tmp_path, monkeypatch):
+    """Volume saudável reporta status 'ok'."""
+    vol = tmp_path / "vol"; vol.mkdir()
+
+    def fake_usage(_):
+        return DiskUsage(total=10_000, used=3_000, free=7_000)
+
+    for c in _client_ctx(monkeypatch, [vol], fake_usage):
+        r = c.get("/storage/disks")
+        assert r.json()[0]["status"] == "ok"
+
+
+def test_storage_disks_degraded_volume_status(tmp_path, monkeypatch):
+    """Volume com disco inacessível retorna status 'degraded' e zeros."""
+    v1 = tmp_path / "v1"; v1.mkdir()
+    v2 = tmp_path / "v2"; v2.mkdir()
+
+    def fake_usage(path):
+        if path == v1:
+            return DiskUsage(total=1_000, used=200, free=800)
+        raise OSError("disco morto")
+
+    for c in _client_ctx(monkeypatch, [v1, v2], fake_usage):
+        r = c.get("/storage/disks")
+        assert r.status_code == 200
+        by_path = {d["path"]: d for d in r.json()}
+        assert by_path[str(v1)]["status"] == "ok"
+        assert by_path[str(v2)]["status"] == "degraded"
+        assert by_path[str(v2)]["total_bytes"] == 0
+        assert by_path[str(v2)]["free_bytes"] == 0
+
+
+def test_storage_info_skips_degraded_volume(tmp_path, monkeypatch):
+    """storage/info agrega apenas volumes saudáveis."""
+    v1 = tmp_path / "v1"; v1.mkdir()
+    v2 = tmp_path / "v2"; v2.mkdir()
+
+    def fake_usage(path):
+        if path == v1:
+            return DiskUsage(total=1_000, used=200, free=800)
+        raise OSError("disco morto")
+
+    for c in _client_ctx(monkeypatch, [v1, v2], fake_usage):
+        r = c.get("/storage/info")
+        assert r.status_code == 200
+        d = r.json()
+        assert d["total_bytes"] == 1_000
+        assert d["free_bytes"] == 800
+
+
+def test_upload_continues_when_one_volume_degraded(tmp_path, monkeypatch):
+    """Upload deve funcionar no volume saudável quando o outro está degraded."""
+    import main as m
+    v1 = tmp_path / "v1"; v1.mkdir()
+    v2 = tmp_path / "v2"; v2.mkdir()
+
+    for c in _client_ctx(monkeypatch, [v1, v2]):
+        # Marca v1 como degraded sem passar pelo disk_usage (simula disco já morto)
+        m._degraded_volumes.add(v1)
+
+        c.post("/backups", json={"label": "b1"})
+        c.post("/backups/b1/versions", json={"version_key": "v1"})
+        r = upload(c, "b1", "v1", "/a.txt", b"hello from healthy disk")
+        assert r["status"] == "registered"
+        # Conteúdo deve estar em v2 (único saudável) — v1 não deve ter nenhum arquivo
+        content_in_v1 = list((v1 / "_content").rglob("*")) if (v1 / "_content").exists() else []
+        content_in_v2 = list((v2 / "_content").rglob("*")) if (v2 / "_content").exists() else []
+        assert content_in_v1 == []
+        assert len(content_in_v2) > 0
+
+
 def test_storage_disks_content_isolated_per_volume(tmp_path, monkeypatch):
     """Cada volume reporta apenas os arquivos que estão nele."""
     v1 = tmp_path / "v1"; v1.mkdir()

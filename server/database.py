@@ -1,5 +1,5 @@
 """
-Models do banco de dados — v2.2
+Models do banco de dados — v3.0
 Ajustes de performance:
 - WAL mode no SQLite (escritas nao bloqueiam leituras)
 - Indices em colunas usadas em filtros e joins
@@ -80,6 +80,20 @@ class FileContent(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     refs = relationship("VersionFile", back_populates="content", lazy="dynamic")
+
+
+class FileContentCopy(Base):
+    __tablename__ = "file_content_copies"
+    __table_args__ = (
+        UniqueConstraint("sha256", "volume_path", name="uq_sha256_volume"),
+        Index("idx_fcc_sha256", "sha256"),
+        Index("idx_fcc_volume", "volume_path"),
+    )
+
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    sha256      = Column(String(64), ForeignKey("file_contents.sha256"), nullable=False)
+    stored_at   = Column(String, nullable=False, unique=True)
+    volume_path = Column(String, nullable=False)
 
 
 class VersionFile(Base):

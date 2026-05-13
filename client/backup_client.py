@@ -234,6 +234,12 @@ def force_cleanup_orphans_api(server):
     return r.json()
 
 
+def force_rereplicate_api(server):
+    r = _session.post(f"{server}/maintenance/rereplicate", headers=build_headers(), timeout=300)
+    r.raise_for_status()
+    return r.json()
+
+
 def sync_version(server, label, version_key, existing_paths):
     r = _session.post(f"{server}/sync",
                       json={"backup_label": label, "version_key": version_key,
@@ -738,6 +744,37 @@ def cleanup_orphans(server=DEFAULT_SERVER):
         sys.exit(1)
 
 
+def rereplicate(server=DEFAULT_SERVER):
+    """Força re-replicação de conteúdos com menos cópias que REPLICATION_FACTOR.
+
+    Útil após:
+    - Adicionar um disco novo ao cluster (arquivos existentes não são replicados automaticamente)
+    - Recuperar um disco que ficou degraded por um longo período
+    - Alterar REPLICATION_FACTOR para um valor maior
+
+    O servidor copia cada arquivo sub-replicado para volumes saudáveis disponíveis.
+    Arquivos cuja única cópia está em volume degraded são pulados e reportados em 'skipped'.
+    """
+    log.info("Iniciando re-replicacao de conteudos sub-replicados...")
+    try:
+        result = force_rereplicate_api(server)
+        replicated = result.get("replicated", 0)
+        skipped    = result.get("skipped", 0)
+        target     = result.get("target_copies", 0)
+        log.info(
+            f"Re-replicacao concluida: {replicated} arquivo(s) replicado(s), "
+            f"{skipped} pulado(s) (fonte inacessivel) — alvo: {target} copia(s)"
+        )
+        if skipped:
+            log.warning(
+                f"{skipped} arquivo(s) nao puderam ser replicados porque a unica copia "
+                f"esta em volume degraded. Recupere o disco e execute novamente."
+            )
+    except requests.RequestException as e:
+        log.error(f"Erro na re-replicacao: {e}")
+        sys.exit(1)
+
+
 # -- CLI ----------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="NestVault v2.5")
@@ -801,6 +838,13 @@ def main():
     pco = sub.add_parser("cleanup-orphans", help="Forca limpeza de arquivos sem backup associado")
     pco.add_argument("--server", default=DEFAULT_SERVER)
 
+    # rereplicate
+    prr = sub.add_parser(
+        "rereplicate",
+        help="Re-replica arquivos sub-replicados (use apos adicionar disco ou alterar REPLICATION_FACTOR)",
+    )
+    prr.add_argument("--server", default=DEFAULT_SERVER)
+
     args = parser.parse_args()
 
     if args.command == "backup":
@@ -839,6 +883,10 @@ def main():
     elif args.command == "cleanup-orphans":
         log.info("Comando  : CLEANUP-ORPHANS")
         cleanup_orphans(args.server)
+
+    elif args.command == "rereplicate":
+        log.info("Comando  : REREPLICATE")
+        rereplicate(args.server)
 
 
 if __name__ == "__main__":

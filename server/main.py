@@ -15,14 +15,14 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
-import os, hashlib, secrets, base64, shutil, logging
+import asyncio, os, hashlib, secrets, base64, shutil, logging
 from pathlib import Path
 from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, VersionFile
+from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,15 +45,153 @@ AUTH_ENABLED = bool(API_KEY)
 # Buffer de leitura/escrita - 1 MB e bem mais rapido que 64KB no I/O
 CHUNK_SIZE = 1024 * 1024
 
+REPLICATION_FACTOR = int(os.getenv("REPLICATION_FACTOR", "1"))
+# 1 = sem replicação (padrão — comportamento original, compatível com RAID físico/ZFS)
+# 2+ = replicar para N volumes
+# 0 = espelhar para todos os volumes saudáveis
+
+# -- Volume health ------------------------------------------------------------
+_degraded_volumes: set[Path] = set()
+
+
+def _safe_disk_usage(v: Path) -> tuple | None:
+    """Retorna disk_usage ou None se o volume estiver inacessível (marca como degraded)."""
+    try:
+        result = shutil.disk_usage(v)
+        _degraded_volumes.discard(v)
+        return result
+    except OSError:
+        if v not in _degraded_volumes:
+            log.error(f"[volume] {v} inacessível — marcado como degraded")
+            _degraded_volumes.add(v)
+        return None
+
+
+def _healthy_volumes() -> list[Path]:
+    return [v for v in STORAGE_VOLUMES if v not in _degraded_volumes]
+
+
+def _target_replicas() -> int:
+    healthy = len(_healthy_volumes())
+    factor  = REPLICATION_FACTOR if REPLICATION_FACTOR > 0 else len(STORAGE_VOLUMES)
+    if healthy < factor:
+        log.warning(f"[replication] fator={factor} > volumes saudáveis={healthy}")
+    return min(factor, max(1, healthy))
+
+
+def _ensure_replicas(sha256: str, source_path: Path, db: Session) -> None:
+    """Copia para volumes adicionais até atingir _target_replicas()."""
+    target  = _target_replicas()
+    copies  = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).all()
+    vol_set = {c.volume_path for c in copies}
+    added   = []
+    for vol in _healthy_volumes():
+        if len(copies) >= target:
+            break
+        if str(vol) in vol_set:
+            continue
+        try:
+            dest = _content_path(sha256, vol)
+            shutil.copy2(str(source_path), str(dest))
+            copy = FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(vol))
+            db.add(copy)
+            copies.append(copy)
+            vol_set.add(str(vol))
+            added.append(str(vol))
+        except OSError as e:
+            log.warning(f"[replication] Falha ao replicar {sha256} para {vol}: {e}")
+    if added:
+        log.debug(f"[replication] {sha256[:8]}… replicado para: {added}")
+
+
+def _rereplicate_to_volume(v: Path) -> None:
+    db = SessionLocal()
+    try:
+        log.info(f"[rereplicate] Iniciando re-replicação para {v}")
+        shas_on_v = {r.sha256 for r in db.query(FileContentCopy.sha256)
+                                          .filter(FileContentCopy.volume_path == str(v)).all()}
+        target = _target_replicas()
+        underfilled = (
+            db.query(FileContent.sha256, func.count(FileContentCopy.id).label("cnt"))
+            .outerjoin(FileContentCopy, FileContentCopy.sha256 == FileContent.sha256)
+            .group_by(FileContent.sha256)
+            .having(func.count(FileContentCopy.id) < target)
+            .all()
+        )
+        count = 0
+        for (sha256, _) in underfilled:
+            if sha256 in shas_on_v:
+                continue
+            source = (db.query(FileContentCopy)
+                        .filter(FileContentCopy.sha256 == sha256,
+                                ~FileContentCopy.volume_path.in_([str(d) for d in _degraded_volumes]))
+                        .first())
+            if not source:
+                continue
+            try:
+                dest = _content_path(sha256, v)
+                shutil.copy2(source.stored_at, str(dest))
+                db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(v)))
+                count += 1
+            except OSError as e:
+                log.warning(f"[rereplicate] Erro em {v}: {e} — abortando")
+                break
+        if count:
+            db.commit()
+            log.info(f"[rereplicate] {count} arquivo(s) re-replicados para {v}")
+        else:
+            log.info(f"[rereplicate] Nenhum arquivo sub-replicado encontrado para {v}")
+    finally:
+        db.close()
+
+
+def _backfill_content_copies() -> None:
+    """Cria FileContentCopy para FileContent sem cópia (instâncias existentes)."""
+    db = SessionLocal()
+    try:
+        existing_shas = {r.sha256 for r in db.query(FileContentCopy.sha256).distinct().all()}
+        to_fill = (db.query(FileContent).filter(~FileContent.sha256.in_(existing_shas)).all()
+                   if existing_shas else db.query(FileContent).all())
+        count = 0
+        for fc in to_fill:
+            p = Path(fc.stored_at)
+            vol = str(p.parents[2])  # {volume}/_content/{xx}/{sha256} → parents[2] = volume
+            db.add(FileContentCopy(sha256=fc.sha256, stored_at=fc.stored_at, volume_path=vol))
+            count += 1
+        if count:
+            db.commit()
+            log.info(f"[backfill] {count} entrada(s) migradas para file_content_copies")
+        else:
+            log.info("[backfill] Nenhuma entrada para migrar — file_content_copies já atualizado")
+    except Exception as e:
+        log.error(f"[backfill] Erro: {e}")
+    finally:
+        db.close()
+
+
+async def _volume_health_monitor() -> None:
+    """Tenta recuperar volumes degraded a cada 60 s."""
+    while True:
+        await asyncio.sleep(60)
+        for v in list(_degraded_volumes):
+            usage = _safe_disk_usage(v)
+            if usage:
+                log.info(f"[volume] {v} recuperado — iniciando re-replicação")
+                asyncio.get_event_loop().run_in_executor(None, _rereplicate_to_volume, v)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    asyncio.get_event_loop().run_in_executor(None, _backfill_content_copies)
+    monitor = asyncio.create_task(_volume_health_monitor())
     log.info(f"Servidor iniciado — {len(STORAGE_VOLUMES)} volume(s): {[str(v) for v in STORAGE_VOLUMES]}")
     log.info(f"Auth: {'habilitada' if AUTH_ENABLED else 'desabilitada'}")
     yield
+    monitor.cancel()
 
 
-app = FastAPI(title="NestVault", version="2.8.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="3.0.0", lifespan=lifespan)
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -201,6 +339,11 @@ class OrphanCleanupResponse(BaseModel):
     files_removed: int
     bytes_freed: int
 
+class RereplicateResponse(BaseModel):
+    replicated: int
+    skipped: int
+    target_copies: int
+
 class StorageInfoResponse(BaseModel):
     total_bytes: int
     used_bytes: int
@@ -214,6 +357,7 @@ class DiskVolumeInfo(BaseModel):
     free_bytes: int
     content_files: int
     content_bytes: int
+    status: Literal["ok", "degraded"]
 
 class CompareFileEntry(BaseModel):
     original_path: str
@@ -241,8 +385,11 @@ class CompareResponse(BaseModel):
 
 # -- Helpers ------------------------------------------------------------------
 def _pick_volume() -> Path:
-    """Escolhe o volume com mais espaço livre para o próximo upload."""
-    return max(STORAGE_VOLUMES, key=lambda v: shutil.disk_usage(v).free)
+    """Escolhe o volume saudável com mais espaço livre para o próximo upload."""
+    healthy = _healthy_volumes()
+    if not healthy:
+        raise HTTPException(503, "Nenhum volume de storage disponível")
+    return max(healthy, key=lambda v: _safe_disk_usage(v).free)
 
 
 def _content_path(sha256: str, volume: Path) -> Path:
@@ -367,9 +514,12 @@ def _backup_info(b: BackupID, db: Session) -> BackupInfo:
 
 
 def _min_disk_free_percent() -> float:
-    """Retorna o menor % livre entre todos os volumes (dispara cleanup se qualquer disco estiver crítico)."""
-    return min(shutil.disk_usage(v).free / shutil.disk_usage(v).total * 100
-               for v in STORAGE_VOLUMES)
+    """Retorna o menor % livre entre os volumes saudáveis."""
+    usages = [_safe_disk_usage(v) for v in STORAGE_VOLUMES if v not in _degraded_volumes]
+    usages = [u for u in usages if u]
+    if not usages:
+        return 100.0  # tudo degraded → nada a limpar
+    return min(u.free / u.total * 100 for u in usages)
 
 
 def _auto_cleanup_if_needed(db: Session) -> None:
@@ -430,9 +580,29 @@ def _cleanup_orphan_contents(db: Session) -> tuple[int, int]:
     removed = 0
     bytes_freed = 0
     for fc in orphans:
-        p = Path(fc.stored_at)
-        if p.exists():
-            p.unlink()
+        copies = db.query(FileContentCopy).filter(FileContentCopy.sha256 == fc.sha256).all()
+        failed = False
+        for copy in copies:
+            p = Path(copy.stored_at)
+            if p.exists():
+                try:
+                    p.unlink()
+                except OSError as e:
+                    log.warning(f"[cleanup-orphans] Não foi possível remover {p}: {e} — pulando")
+                    failed = True
+                    continue
+            db.delete(copy)
+        if failed:
+            continue
+        # fallback: se não havia cópias na nova tabela, tenta o stored_at legado
+        if not copies:
+            p = Path(fc.stored_at)
+            if p.exists():
+                try:
+                    p.unlink()
+                except OSError as e:
+                    log.warning(f"[cleanup-orphans] Não foi possível remover {p}: {e} — pulando")
+                    continue
         bytes_freed += fc.size
         db.delete(fc)
         removed += 1
@@ -485,12 +655,12 @@ def disks_page():
 
 @app.get("/health", response_model=HealthResponse)
 def health():
-    return HealthResponse(status="ok", version="2.8.0", time=datetime.now(timezone.utc).isoformat())
+    return HealthResponse(status="ok", version="3.0.0", time=datetime.now(timezone.utc).isoformat())
 
 
 @app.get("/storage/info", response_model=StorageInfoResponse, dependencies=[Depends(require_api_key)])
 def storage_info(db: Session = Depends(get_db)):
-    usages = [shutil.disk_usage(v) for v in STORAGE_VOLUMES]
+    usages = [u for u in (_safe_disk_usage(v) for v in STORAGE_VOLUMES) if u]
     usage_total = sum(u.total for u in usages)
     usage_used  = sum(u.used  for u in usages)
     usage_free  = sum(u.free  for u in usages)
@@ -535,21 +705,23 @@ def storage_info(db: Session = Depends(get_db)):
 def storage_disks(db: Session = Depends(get_db)):
     result = []
     for v in STORAGE_VOLUMES:
-        usage = shutil.disk_usage(v)
-        prefix = str(v).rstrip("/") + "/"
-        content_files = db.query(func.count(FileContent.sha256)).filter(
-            FileContent.stored_at.like(prefix + "%")
-        ).scalar() or 0
-        content_bytes = db.query(func.coalesce(func.sum(FileContent.size), 0)).filter(
-            FileContent.stored_at.like(prefix + "%")
-        ).scalar() or 0
+        usage = _safe_disk_usage(v)
+        status = "degraded" if usage is None else "ok"
+        content_files = (db.query(func.count(FileContentCopy.id))
+                           .filter(FileContentCopy.volume_path == str(v))
+                           .scalar() or 0)
+        content_bytes = (db.query(func.coalesce(func.sum(FileContent.size), 0))
+                           .join(FileContentCopy, FileContentCopy.sha256 == FileContent.sha256)
+                           .filter(FileContentCopy.volume_path == str(v))
+                           .scalar() or 0)
         result.append(DiskVolumeInfo(
             path=str(v),
-            total_bytes=usage.total,
-            used_bytes=usage.used,
-            free_bytes=usage.free,
+            total_bytes=usage.total if usage else 0,
+            used_bytes=usage.used  if usage else 0,
+            free_bytes=usage.free  if usage else 0,
             content_files=content_files,
             content_bytes=int(content_bytes),
+            status=status,
         ))
     return result
 
@@ -775,6 +947,9 @@ async def upload_file(
         if not fc:
             raise HTTPException(400, f"Conteudo sha256={content_sha256} nao encontrado no storage")
         sha256 = content_sha256
+        first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).first()
+        if first_copy:
+            _ensure_replicas(sha256, Path(first_copy.stored_at), db)
     else:
         # Escolhe volume com mais espaço livre; tmp e conteúdo vão pro mesmo disco
         volume = _pick_volume()
@@ -784,12 +959,17 @@ async def upload_file(
             fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
             if fc:
                 tmp_path.unlink(missing_ok=True)
+                first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).first()
+                if first_copy:
+                    _ensure_replicas(sha256, Path(first_copy.stored_at), db)
             else:
                 dest = _content_path(sha256, volume)
                 shutil.move(str(tmp_path), str(dest))
                 fc = FileContent(sha256=sha256, stored_at=str(dest), size=size)
                 db.add(fc)
+                db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(volume)))
                 db.flush()
+                _ensure_replicas(sha256, dest, db)
         except Exception:
             tmp_path.unlink(missing_ok=True)
             raise
@@ -863,17 +1043,33 @@ def list_files(
 
 @app.get("/files/{file_id}/download", dependencies=[Depends(require_api_key)])
 def download_file(file_id: int, db: Session = Depends(get_db)):
-    """Uma unica query com JOIN."""
-    row = (db.query(VersionFile.original_path, FileContent.stored_at)
-           .join(FileContent, FileContent.sha256 == VersionFile.sha256)
+    row = (db.query(VersionFile.original_path, VersionFile.sha256)
            .filter(VersionFile.id == file_id)
            .first())
     if not row:
         raise HTTPException(404, "Arquivo nao encontrado")
-    p = Path(row.stored_at)
-    if not p.exists():
-        raise HTTPException(410, "Conteudo fisico nao encontrado")
-    return FileResponse(p, filename=Path(row.original_path).name)
+
+    copies = (db.query(FileContentCopy)
+              .filter(FileContentCopy.sha256 == row.sha256)
+              .filter(~FileContentCopy.volume_path.in_([str(v) for v in _degraded_volumes]))
+              .all())
+
+    for copy in copies:
+        p = Path(copy.stored_at)
+        try:
+            if p.exists():
+                return FileResponse(p, filename=Path(row.original_path).name)
+        except OSError:
+            continue
+
+    # 503 apenas se há cópias em volumes degraded (recuperáveis); 410 se o dado sumiu mesmo
+    degraded_str = [str(v) for v in _degraded_volumes]
+    has_degraded = bool(degraded_str) and db.query(FileContentCopy).filter(
+        FileContentCopy.sha256 == row.sha256,
+        FileContentCopy.volume_path.in_(degraded_str),
+    ).count()
+    raise HTTPException(503 if has_degraded else 410,
+                        "Arquivo em volume degraded" if has_degraded else "Conteudo fisico nao encontrado")
 
 
 # -- Compare ------------------------------------------------------------------
@@ -933,6 +1129,38 @@ def force_cleanup_orphans(db: Session = Depends(get_db)):
     """Remove todos os FileContents nao referenciados por nenhuma versao ativa."""
     files_removed, bytes_freed = _cleanup_orphan_contents(db)
     return OrphanCleanupResponse(files_removed=files_removed, bytes_freed=bytes_freed)
+
+
+@app.post("/maintenance/rereplicate", response_model=RereplicateResponse, dependencies=[Depends(require_api_key)])
+def force_rereplicate(db: Session = Depends(get_db)):
+    """Re-replica conteúdos com menos cópias que REPLICATION_FACTOR. Útil após adicionar um disco novo."""
+    target = _target_replicas()
+    degraded_strs = [str(d) for d in _degraded_volumes]
+
+    underfilled = (
+        db.query(FileContent.sha256, func.count(FileContentCopy.id).label("cnt"))
+        .outerjoin(FileContentCopy, FileContentCopy.sha256 == FileContent.sha256)
+        .group_by(FileContent.sha256)
+        .having(func.count(FileContentCopy.id) < target)
+        .all()
+    )
+
+    replicated = 0
+    skipped = 0
+    for (sha256, _) in underfilled:
+        q = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256)
+        if degraded_strs:
+            q = q.filter(~FileContentCopy.volume_path.in_(degraded_strs))
+        source = q.first()
+        if not source:
+            skipped += 1
+            continue
+        _ensure_replicas(sha256, Path(source.stored_at), db)
+        replicated += 1
+
+    db.commit()
+    log.info(f"[maintenance/rereplicate] {replicated} arquivo(s) re-replicados, {skipped} pulados (sem fonte acessível)")
+    return RereplicateResponse(replicated=replicated, skipped=skipped, target_copies=target)
 
 
 # -- Cleanup ------------------------------------------------------------------
