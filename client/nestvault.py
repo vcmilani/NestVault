@@ -39,7 +39,7 @@ TEXT  = "#c8d0ce"
 
 
 def _header():
-    console.print(f"\n  [bold {AMBER}]◈[/bold {AMBER}]  [bold {TEXT}]NESTVAULT[/bold {TEXT}]  [{DIM}]v3.1[/{DIM}]\n")
+    console.print(f"\n  [bold {AMBER}]◈[/bold {AMBER}]  [bold {TEXT}]NESTVAULT[/bold {TEXT}]  [{DIM}]v3.1.2[/{DIM}]\n")
 
 
 def _kv(key: str, val: str, val_style: str = TEXT):

@@ -1224,7 +1224,7 @@ Limite: entre 1 e 500 itens por request. O tamanho do lote é definido pelo clie
 ```json
 {
   "status":  "ok",
-  "version": "3.1.0",
+  "version": "3.1.2",
   "time":    "2026-04-25T10:42:31.123456"
 }
 ```
