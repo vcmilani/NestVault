@@ -96,16 +96,18 @@ def _ensure_replicas(sha256: str, source_path: Path, db: Session) -> None:
             continue
         try:
             dest = _content_path(sha256, vol)
+            log.info(f"[replication] {sha256[:8]}… → {vol}")
             shutil.copy2(str(source_path), str(dest))
             copy = FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(vol))
             db.add(copy)
             copies.append(copy)
             vol_set.add(str(vol))
             added.append(str(vol))
+            log.info(f"[replication] {sha256[:8]}… copiado para {vol} com sucesso")
         except OSError as e:
             log.warning(f"[replication] Falha ao replicar {sha256} para {vol}: {e}")
     if added:
-        log.debug(f"[replication] {sha256[:8]}… replicado para: {added}")
+        log.info(f"[replication] {sha256[:8]}… replicação concluída — {len(added)} nova(s) cópia(s): {added}")
 
 
 def _rereplicate_to_volume(v: Path) -> None:
@@ -122,6 +124,7 @@ def _rereplicate_to_volume(v: Path) -> None:
             .having(func.count(FileContentCopy.id) < target)
             .all()
         )
+        total_under = len(underfilled)
         count = 0
         for (sha256, _) in underfilled:
             if sha256 in shas_on_v:
@@ -134,9 +137,11 @@ def _rereplicate_to_volume(v: Path) -> None:
                 continue
             try:
                 dest = _content_path(sha256, v)
+                log.info(f"[rereplicate] [{count + 1}/{total_under}] {sha256[:8]}… → {v}")
                 shutil.copy2(source.stored_at, str(dest))
                 db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(v)))
                 count += 1
+                log.info(f"[rereplicate] [{count}/{total_under}] {sha256[:8]}… copiado com sucesso")
             except OSError as e:
                 log.warning(f"[rereplicate] Erro em {v}: {e} — abortando")
                 break
@@ -201,7 +206,7 @@ async def lifespan(_: FastAPI):
     monitor.cancel()
 
 
-app = FastAPI(title="NestVault", version="3.0.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="3.1.2", lifespan=lifespan)
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -301,7 +306,7 @@ class VersionInfo(BaseModel):
     id: int
     version_key: str
     backup_label: str
-    status: Literal["running", "done", "failed"]
+    status: Literal["running", "incomplete", "done", "failed"]
     created_at: str
     finished_at: Optional[str] = None
     duration_seconds: Optional[float] = Field(None, description="Duracao do backup em segundos")
@@ -670,7 +675,7 @@ def disks_page():
 
 @app.get("/health", response_model=HealthResponse)
 def health():
-    return HealthResponse(status="ok", version="3.0.0", time=datetime.now(timezone.utc).isoformat())
+    return HealthResponse(status="ok", version="3.1.2", time=datetime.now(timezone.utc).isoformat())
 
 
 @app.get("/storage/info", response_model=StorageInfoResponse, dependencies=[Depends(require_api_key)])
@@ -794,6 +799,12 @@ def create_version(label: str, req: VersionCreate, db: Session = Depends(get_db)
                 .first())
     if existing:
         return VersionCreatedResponse(created=False, version=_version_stats(existing, db))
+    updated = (db.query(BackupVersion)
+               .filter(BackupVersion.backup_label == label,
+                       BackupVersion.status == "running")
+               .update({"status": "incomplete"}, synchronize_session=False))
+    if updated:
+        log.info(f"[versao] {label}: {updated} versão(ões) running → incomplete")
     v = BackupVersion(backup_label=label, version_key=req.version_key)
     db.add(v); db.commit(); db.refresh(v)
     return VersionCreatedResponse(created=True, version=_version_stats(v, db))
@@ -981,10 +992,12 @@ async def upload_file(
                 dest = _content_path(sha256, volume)
                 shutil.move(str(tmp_path), str(dest))
                 if ENCRYPTION_ENABLED:
+                    log.info(f"[upload] cifrando {original_path!r} ({size / 1024 / 1024:.2f} MB) — sha256={sha256[:8]}…")
                     tmp_enc = dest.parent / f"_enc_{os.urandom(4).hex()}"
                     try:
                         crypto.encrypt_stream(dest, tmp_enc, _encryption_key)
                         shutil.move(str(tmp_enc), str(dest))
+                        log.info(f"[upload] {sha256[:8]}… cifrado com sucesso")
                     except Exception:
                         tmp_enc.unlink(missing_ok=True)
                         raise
@@ -1181,19 +1194,23 @@ def force_rereplicate(db: Session = Depends(get_db)):
 
     replicated = 0
     skipped = 0
-    for (sha256, _) in underfilled:
+    total_under = len(underfilled)
+    log.info(f"[maintenance/rereplicate] {total_under} arquivo(s) com replicação abaixo do fator {target}")
+    for idx, (sha256, _) in enumerate(underfilled, 1):
         q = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256)
         if degraded_strs:
             q = q.filter(~FileContentCopy.volume_path.in_(degraded_strs))
         source = q.first()
         if not source:
+            log.warning(f"[maintenance/rereplicate] [{idx}/{total_under}] {sha256[:8]}… sem fonte acessível — pulando")
             skipped += 1
             continue
+        log.info(f"[maintenance/rereplicate] [{idx}/{total_under}] {sha256[:8]}… replicando a partir de {source.volume_path}")
         _ensure_replicas(sha256, Path(source.stored_at), db)
         replicated += 1
 
     db.commit()
-    log.info(f"[maintenance/rereplicate] {replicated} arquivo(s) re-replicados, {skipped} pulados (sem fonte acessível)")
+    log.info(f"[maintenance/rereplicate] concluído — {replicated} replicado(s), {skipped} pulado(s) (sem fonte acessível)")
     return RereplicateResponse(replicated=replicated, skipped=skipped, target_copies=target)
 
 
@@ -1208,42 +1225,52 @@ def encrypt_existing_files(db: Session = Depends(get_db)):
     files_encrypted = 0
     bytes_processed = 0
     skipped         = 0
+    total           = len(pending)
 
-    for fc in pending:
+    log.info(f"[encrypt-existing] {total} arquivo(s) pendente(s) de cifragem")
+
+    for i, fc in enumerate(pending, 1):
         q = db.query(FileContentCopy).filter(FileContentCopy.sha256 == fc.sha256)
         if degraded_strs:
             q = q.filter(~FileContentCopy.volume_path.in_(degraded_strs))
         copies = q.all()
 
         if not copies:
-            log.warning(f"[encrypt-existing] {fc.sha256[:8]}… sem cópia acessível — pulando")
+            log.warning(f"[encrypt-existing] [{i}/{total}] {fc.sha256[:8]}… sem cópia acessível — pulando")
             skipped += 1
             continue
+
+        size_mb = fc.size / 1024 / 1024
+        log.info(f"[encrypt-existing] [{i}/{total}] {fc.sha256[:8]}… ({size_mb:.2f} MB) — {len(copies)} cópia(s)")
 
         success = True
         for copy in copies:
             p = Path(copy.stored_at)
             if not p.exists():
+                log.warning(f"[encrypt-existing] [{i}/{total}] arquivo físico não encontrado em {copy.volume_path} — pulando cópia")
                 continue
+            log.info(f"[encrypt-existing] [{i}/{total}] cifrando cópia em {copy.volume_path}")
             tmp_enc = p.parent / f"_enc_{os.urandom(4).hex()}"
             try:
                 crypto.encrypt_stream(p, tmp_enc, _encryption_key)
                 shutil.move(str(tmp_enc), str(p))
+                log.info(f"[encrypt-existing] [{i}/{total}] cópia em {copy.volume_path} cifrada com sucesso")
             except Exception as e:
-                log.warning(f"[encrypt-existing] Erro em {p}: {e}")
+                log.warning(f"[encrypt-existing] [{i}/{total}] erro em {p}: {e}")
                 tmp_enc.unlink(missing_ok=True)
                 success = False
                 break
 
         if success:
             fc.encrypted = True
+            db.commit()  # persiste por arquivo — retomada segura se interrompido
             bytes_processed += fc.size
             files_encrypted += 1
+            log.info(f"[encrypt-existing] [{i}/{total}] {fc.sha256[:8]}… concluído")
         else:
             skipped += 1
 
-    db.commit()
-    log.info(f"[encrypt-existing] {files_encrypted} cifrado(s), {skipped} pulado(s)")
+    log.info(f"[encrypt-existing] concluído — {files_encrypted} cifrado(s), {skipped} pulado(s), {bytes_processed / 1024 / 1024:.2f} MB processados")
     return EncryptExistingResponse(
         files_encrypted=files_encrypted,
         bytes_processed=bytes_processed,

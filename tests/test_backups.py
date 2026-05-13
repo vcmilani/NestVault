@@ -135,6 +135,31 @@ def test_delete_version(client):
     assert r.json()["status"] == "deleted"
 
 
+def test_create_version_marks_running_as_incomplete(client):
+    make_backup(client, "b1")
+    client.post("/backups/b1/versions", json={"version_key": "2026-01-01T00:00:00"})
+    client.post("/backups/b1/versions", json={"version_key": "2026-02-01T00:00:00"})
+    v1 = client.get("/backups/b1/versions/2026-01-01T00:00:00").json()
+    assert v1["status"] == "incomplete"
+
+
+def test_incomplete_version_deleted_with_cleanup(client):
+    make_backup(client, "b1")
+    client.post("/backups/b1/versions", json={"version_key": "2026-01-01T00:00:00"})
+    client.post("/backups/b1/versions", json={"version_key": "2026-02-01T00:00:00"})
+    client.post("/backups/b1/cleanup", json={"backup_label": "b1", "keep": 0})
+    assert client.get("/backups/b1/versions").json() == []
+
+
+def test_incomplete_version_deleted_directly(client):
+    make_backup(client, "b1")
+    client.post("/backups/b1/versions", json={"version_key": "2026-01-01T00:00:00"})
+    client.post("/backups/b1/versions", json={"version_key": "2026-02-01T00:00:00"})
+    r = client.delete("/backups/b1/versions/2026-01-01T00:00:00")
+    assert r.status_code == 200
+    assert r.json()["status"] == "deleted"
+
+
 def test_backup_stats_reflect_last_done_version(client):
     import base64
     make_backup(client, "b1")

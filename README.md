@@ -40,7 +40,7 @@ NestVault/
 │   └── static/
 │       └── index.html       ← Dashboard web
 ├── client/
-│   ├── backup_client.py     ← Cliente de backup/restore
+│   ├── nestvault.py         ← Cliente de backup/restore
 │   └── requirements.txt
 ├── .gitignore
 └── README.md
@@ -77,7 +77,7 @@ sudo systemctl daemon-reload && sudo systemctl restart backup-server
 **Migrar arquivos existentes** (após ativar `ENCRYPTION_ENABLED=true`):
 
 ```bash
-python backup_client.py encrypt-existing --server http://192.168.1.100:8000
+nestvault encrypt-existing --server http://192.168.1.100:8000
 ```
 
 Arquivos existentes sem criptografia continuam legíveis enquanto a migração não roda — a flag `encrypted` no banco distingue os dois estados.
@@ -331,48 +331,48 @@ Arquivos cujo conteúdo já existe no storage (mesmo sha256) são apenas **regis
 
 ```bash
 # Backup simples — cria nova versão automaticamente
-python backup_client.py backup ~/documentos \
+nestvault backup ~/documentos \
   --label "notebook-joao" \
   --server http://192.168.1.100:8000
 
 # Com prefixo de path no servidor
-python backup_client.py backup ~/documentos \
+nestvault backup ~/documentos \
   --label "notebook-joao" \
   --server http://192.168.1.100:8000 \
   --prefix /home/joao/documentos
 
 # Ignorar subpastas
-python backup_client.py backup ~/projeto \
+nestvault backup ~/projeto \
   --label "projeto-alpha" \
   --server http://192.168.1.100:8000 \
   --exclude node_modules .git __pycache__ .venv dist build
 
 # Aumentar paralelismo de upload (padrão: 4 workers)
-python backup_client.py backup ~/documentos \
+nestvault backup ~/documentos \
   --label "notebook-joao" \
   --server http://192.168.1.100:8000 \
   --workers 8
 
 # Controlar processos de hashing (padrão: os.cpu_count())
-python backup_client.py backup ~/documentos \
+nestvault backup ~/documentos \
   --label "notebook-joao" \
   --server http://192.168.1.100:8000 \
   --hash-workers 16
 
 # Ajustar tamanho do lote de verificação (padrão: 100 arquivos/request)
-python backup_client.py backup ~/documentos \
+nestvault backup ~/documentos \
   --label "notebook-joao" \
   --server http://192.168.1.100:8000 \
   --batch-size 200
 
 # Verificar sem enviar
-python backup_client.py backup ~/documentos \
+nestvault backup ~/documentos \
   --label "notebook-joao" \
   --server http://192.168.1.100:8000 \
   --dry-run
 
 # Modo acumulativo — acumula todos os arquivos já vistos entre execuções (ideal para galerias de fotos)
-python backup_client.py backup /Volumes/HD/Fotos \
+nestvault backup /Volumes/HD/Fotos \
   --label "fotos" \
   --server http://192.168.1.100:8000 \
   --accumulate
@@ -486,10 +486,10 @@ Backup 3 — HD com fotos de março (80 fotos):
 Lista todos os backups registrados no servidor.
 
 ```bash
-python backup_client.py backups --server http://192.168.1.100:8000
+nestvault backups --server http://192.168.1.100:8000
 
 # Filtrar por cliente
-python backup_client.py backups --server http://192.168.1.100:8000 --client "notebook-joao"
+nestvault backups --server http://192.168.1.100:8000 --client "notebook-joao"
 ```
 
 | Opção | Descrição |
@@ -514,7 +514,7 @@ projeto-alpha                   notebook-joao              12       891      4.7
 Lista todas as versões de um backup, com contagem de arquivos e tamanho.
 
 ```bash
-python backup_client.py versions \
+nestvault versions \
   --label "notebook-joao" \
   --server http://192.168.1.100:8000
 ```
@@ -543,26 +543,26 @@ Baixa os arquivos de uma **versão específica** e reconstrói a estrutura de pa
 
 ```bash
 # Restaurar uma versão específica
-python backup_client.py restore /tmp/restore \
+nestvault restore /tmp/restore \
   --label "notebook-joao" \
   --version "2026-04-25T10:42:31" \
   --server http://192.168.1.100:8000
 
 # Restaurar apenas um subdiretório
-python backup_client.py restore /tmp/restore \
+nestvault restore /tmp/restore \
   --label "notebook-joao" \
   --version "2026-04-25T10:42:31" \
   --server http://192.168.1.100:8000 \
   --prefix /home/joao/documentos
 
 # Ver o que seria restaurado sem baixar
-python backup_client.py restore /tmp/restore \
+nestvault restore /tmp/restore \
   --label "notebook-joao" \
   --version "2026-04-25T10:42:31" \
   --dry-run
 
 # Sobrescrever arquivos existentes
-python backup_client.py restore /tmp/restore \
+nestvault restore /tmp/restore \
   --label "notebook-joao" \
   --version "2026-04-25T10:42:31" \
   --overwrite
@@ -587,13 +587,13 @@ Remove versões antigas de um ou todos os backups, mantendo apenas as `N` mais r
 
 ```bash
 # Limpar um label específico
-python backup_client.py cleanup \
+nestvault cleanup \
   --label "notebook-joao" \
   --keep 5 \
   --server http://192.168.1.100:8000
 
 # Limpar TODOS os labels de uma vez
-python backup_client.py cleanup \
+nestvault cleanup \
   --all \
   --keep 5 \
   --server http://192.168.1.100:8000
@@ -632,12 +632,12 @@ Exclui permanentemente um label e **todas as suas versões**. Os arquivos físic
 
 ```bash
 # Com confirmação interativa (padrão)
-python backup_client.py delete-label \
+nestvault delete-label \
   --label "notebook-joao" \
   --server http://192.168.1.100:8000
 
 # Sem confirmação — para uso em scripts
-python backup_client.py delete-label \
+nestvault delete-label \
   --label "notebook-joao" \
   --server http://192.168.1.100:8000 \
   --force
@@ -658,7 +658,7 @@ python backup_client.py delete-label \
 Força a limpeza imediata de arquivos físicos que não estão mais referenciados por nenhuma versão ativa. Útil após deleções em massa ou para liberar espaço rapidamente.
 
 ```bash
-python backup_client.py cleanup-orphans \
+nestvault cleanup-orphans \
   --server http://192.168.1.100:8000
 ```
 
@@ -684,7 +684,7 @@ Força a re-replicação de todos os arquivos que possuem menos cópias físicas
 - Aumentar o valor de `REPLICATION_FACTOR`
 
 ```bash
-python backup_client.py rereplicate \
+nestvault rereplicate \
   --server http://192.168.1.100:8000
 ```
 
@@ -708,7 +708,7 @@ Se `skipped > 0`, significa que alguns arquivos têm a única cópia em um volum
 Cifra todos os arquivos físicos que ainda não foram criptografados. Use após ativar `ENCRYPTION_ENABLED=true` no servidor para migrar um acervo existente. Requer que o servidor esteja rodando com `ENCRYPTION_ENABLED=true`.
 
 ```bash
-python backup_client.py encrypt-existing \
+nestvault encrypt-existing \
   --server http://192.168.1.100:8000
 ```
 
@@ -772,7 +772,7 @@ Da mesma forma, ao excluir um label (`DELETE /backups/{label}`) ou uma versão (
 # Backup todo dia às 02:00
 0 2 * * * BACKUP_API_KEY=sua-chave \
   /home/usuario/client/.venv/bin/python \
-  /home/usuario/client/backup_client.py backup ~/docs \
+  /home/usuario/client/nestvault.py backup ~/docs \
   --label "notebook-joao" \
   --server http://192.168.1.100:8000 \
   --exclude node_modules .git \
@@ -782,7 +782,7 @@ Da mesma forma, ao excluir um label (`DELETE /backups/{label}`) ou uma versão (
 # Cleanup semanal — manter 10 versões em todos os labels
 0 3 * * 0 BACKUP_API_KEY=sua-chave \
   /home/usuario/client/.venv/bin/python \
-  /home/usuario/client/backup_client.py cleanup \
+  /home/usuario/client/nestvault.py cleanup \
   --all --keep 10 \
   --server http://192.168.1.100:8000 \
   >> /var/log/backup-cleanup.log 2>&1
@@ -1224,7 +1224,7 @@ Limite: entre 1 e 500 itens por request. O tamanho do lote é definido pelo clie
 ```json
 {
   "status":  "ok",
-  "version": "3.1.0",
+  "version": "3.1.2",
   "time":    "2026-04-25T10:42:31.123456"
 }
 ```

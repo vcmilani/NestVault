@@ -14,18 +14,18 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            asset_name: backup-client-linux-x64
-            artifact_path: client/dist/backup-client-linux-x64
+            asset_name: nestvault-linux-x64
+            artifact_path: client/dist/nestvault-linux-x64
             strip: "true"
 
           - os: macos-latest
-            asset_name: backup-client-macos
-            artifact_path: client/dist/backup-client-macos
+            asset_name: nestvault-macos
+            artifact_path: client/dist/nestvault-macos
             strip: "true"
 
           - os: windows-latest
-            asset_name: backup-client-windows-x64
-            artifact_path: client/dist/backup-client-windows-x64.exe
+            asset_name: nestvault-windows-x64
+            artifact_path: client/dist/nestvault-windows-x64.exe
             strip: "false"
 
     runs-on: ${{ matrix.os }}
@@ -50,7 +50,7 @@ jobs:
           if [ "${{ matrix.strip }}" = "true" ]; then
             ARGS="$ARGS --strip"
           fi
-          pyinstaller $ARGS backup_client.py
+          pyinstaller $ARGS nestvault.py
 
       - uses: actions/upload-artifact@v4
         with:
@@ -77,21 +77,21 @@ jobs:
 
             | Plataforma | Arquivo |
             |---|---|
-            | Linux x64 | `backup-client-linux-x64` |
-            | macOS | `backup-client-macos` |
-            | Windows x64 | `backup-client-windows-x64.exe` |
+            | Linux x64 | `nestvault-linux-x64` |
+            | macOS | `nestvault-macos` |
+            | Windows x64 | `nestvault-windows-x64.exe` |
 
             ### Como usar
 
             **Linux/macOS** — dar permissão de execução antes do primeiro uso:
             ```bash
-            chmod +x backup-client-*
-            ./backup-client-linux-x64 --help
+            chmod +x nestvault-*
+            ./nestvault-linux-x64 --help
             ```
 
             **Windows** — executar diretamente:
             ```
-            backup-client-windows-x64.exe --help
+            nestvault-windows-x64.exe --help
             ```
 
             A API Key é passada via variável de ambiente `BACKUP_API_KEY`.
