@@ -39,7 +39,7 @@ TEXT  = "#c8d0ce"
 
 
 def _header():
-    console.print(f"\n  [bold {AMBER}]◈[/bold {AMBER}]  [bold {TEXT}]NESTVAULT[/bold {TEXT}]  [{DIM}]v3.1.3[/{DIM}]\n")
+    console.print(f"\n  [bold {AMBER}]◈[/bold {AMBER}]  [bold {TEXT}]NESTVAULT[/bold {TEXT}]  [{DIM}]v3.1.4[/{DIM}]\n")
 
 
 def _kv(key: str, val: str, val_style: str = TEXT):
@@ -382,7 +382,7 @@ def backup_directory(
         ensure_backup(server, label, client_name, path_prefix)
         create_version(server, label, version_key)
 
-    _kv("Label", f"[{label}]", AMBER)
+    _kv("Label", label, AMBER)
     _kv("Versao", version_key)
     if dry_run:
         _kv("Modo", "dry-run", AMBER)
@@ -740,7 +740,7 @@ def restore(destination, label, version_key, server=DEFAULT_SERVER,
     dest_root = Path(destination)
     dest_root.mkdir(parents=True, exist_ok=True)
 
-    _kv("Label",   f"[{label}]", AMBER)
+    _kv("Label",   label, AMBER)
     _kv("Versao",  version_key)
     _kv("Destino", str(dest_root))
 
@@ -1069,6 +1069,10 @@ def main():
     pee.add_argument("--server", default=DEFAULT_SERVER)
 
     args = parser.parse_args()
+
+    if hasattr(args, "label") and args.label is not None and not args.label.strip():
+        parser.error("--label nao pode ser vazio")
+
     _header()
 
     if args.command == "backup":
