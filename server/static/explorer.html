@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#e8a940">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="icon" type="image/svg+xml" href="/static/icon_web.svg">
+<title>NestVault — Explorer</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#0d0f0f; --bg2:#131616; --bg3:#1a1e1e;
+    --border:#232929; --border2:#2e3636;
+    --text:#c8d0ce; --text-dim:#5a6666; --text-mute:#3a4444;
+    --amber:#e8a940; --amber-dim:#7a5520;
+    --green:#4ecb8d; --green-dim:#1d5a3d;
+    --red:#e05c5c; --red-dim:#5a2020;
+    --blue:#5ba4cf; --purple:#a78bfa;
+    --mono:'IBM Plex Mono',monospace;
+  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;min-height:100vh}
+  body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.04) 2px,rgba(0,0,0,.04) 4px);pointer-events:none;z-index:999}
+
+  header{border-bottom:1px solid var(--border);padding:0 32px;display:flex;align-items:center;justify-content:space-between;height:56px;position:sticky;top:0;background:var(--bg);z-index:10}
+  .logo{display:flex;align-items:center;gap:12px}
+  .logo-icon{width:28px;height:28px;border:1.5px solid var(--amber);display:grid;place-items:center;color:var(--amber);font-size:14px}
+  .logo-text{font-size:12px;font-weight:500;letter-spacing:.12em;text-transform:uppercase}
+  .logo-sub{font-size:10px;color:var(--text-dim);letter-spacing:.08em}
+  .header-right{display:flex;align-items:center;gap:16px}
+  .hbtn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 12px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}
+  .hbtn:hover{border-color:var(--amber);color:var(--amber)}
+
+  main{padding:28px 32px;max-width:1500px}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+
+  .breadcrumb{display:flex;align-items:center;gap:8px;margin-bottom:20px;font-size:11px;color:var(--text-dim);flex-wrap:wrap}
+  .bc-link{color:var(--amber);text-decoration:none}
+  .bc-link:hover{text-decoration:underline}
+  .bc-sep{color:var(--text-mute)}
+  .bc-label{color:var(--text-dim)}
+  .bc-version{color:var(--text)}
+
+  .stats-bar{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;border:1px solid var(--border);margin-bottom:20px;background:var(--border);animation:fadeUp .3s ease both}
+  .stat-box{background:var(--bg2);padding:14px 18px}
+  .stat-label{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim);margin-bottom:6px}
+  .stat-value{font-size:22px;font-weight:300;color:var(--amber);letter-spacing:-.02em;line-height:1}
+
+  .error-bar{background:var(--red-dim);border:1px solid var(--red);padding:10px 16px;margin-bottom:20px;color:var(--red);font-size:11px;display:none}
+  .error-bar.visible{display:block}
+
+  .controls{display:flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid var(--border);border-bottom:none;background:var(--bg2)}
+  .filter-input{flex:1;background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:12px;padding:6px 12px;outline:none;transition:border-color .15s;min-width:0}
+  .filter-input:focus{border-color:var(--amber)}
+  .filter-input::placeholder{color:var(--text-mute)}
+  .cbtn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 10px;font-family:var(--mono);font-size:10px;cursor:pointer;letter-spacing:.06em;transition:all .15s;white-space:nowrap;flex-shrink:0}
+  .cbtn:hover{border-color:var(--amber);color:var(--amber)}
+
+  .tree-wrap{border:1px solid var(--border);animation:fadeUp .35s .05s ease both;overflow-x:auto;-webkit-overflow-scrolling:touch}
+
+  /* Tree rows */
+  .tree-row{display:flex;align-items:center;border-bottom:1px solid var(--border);min-height:33px;transition:background .1s}
+  .tree-row:last-child{border-bottom:none}
+  .dir-row{cursor:pointer}
+  .dir-row:hover{background:var(--bg3)}
+  .file-row{background:var(--bg)}
+  .file-row:hover{background:rgba(91,164,207,.025)}
+  .t-chevron{width:16px;flex-shrink:0;text-align:center;font-size:9px;color:var(--text-mute);transition:transform .15s;margin-right:2px}
+  .dir-row.open .t-chevron{transform:rotate(90deg);color:var(--amber)}
+  .t-icon{font-size:11px;margin-right:6px;flex-shrink:0}
+  .dir-row .t-icon{color:var(--amber)}
+  .file-row .t-icon{color:var(--text-mute)}
+  .t-name{flex:1;min-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:8px;font-size:12px}
+  .dir-row .t-name{color:var(--text)}
+  .file-row .t-name{color:var(--text-dim)}
+  .t-meta{display:flex;align-items:center;gap:14px;padding-right:14px;flex-shrink:0}
+  .t-count{font-size:10px;color:var(--text-mute);min-width:56px;text-align:right}
+  .t-size{font-size:11px;color:var(--blue);font-variant-numeric:tabular-nums;min-width:72px;text-align:right}
+  .t-hash{font-size:10px;color:var(--text-mute)}
+  .t-dl{background:none;border:1px solid transparent;color:var(--text-mute);font-family:var(--mono);font-size:10px;cursor:pointer;padding:2px 7px;transition:all .15s;letter-spacing:.04em}
+  .t-dl:hover{border-color:var(--amber);color:var(--amber)}
+  .dir-children{display:block}
+  .dir-children.collapsed{display:none}
+
+  /* Filter flat list */
+  .flat-head{padding:8px 14px;background:var(--bg3);border-bottom:1px solid var(--border);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim)}
+  .flat-row{display:flex;align-items:center;border-bottom:1px solid var(--border);min-height:33px;padding:5px 14px;gap:8px;background:var(--bg);transition:background .1s}
+  .flat-row:hover{background:rgba(91,164,207,.025)}
+  .flat-row:last-child{border-bottom:none}
+  .flat-path{flex:1;font-size:11px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+  .flat-path em{color:var(--amber);font-style:normal}
+
+  .loading{padding:40px;text-align:center;color:var(--text-mute);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+  .loading::after{content:'...';animation:dots 1.2s steps(4,end) infinite}
+  @keyframes dots{0%,20%{content:'.'}40%{content:'..'}60%,100%{content:'...'}}
+  .empty{padding:40px;text-align:center;color:var(--text-mute);font-size:11px;line-height:1.8}
+  .empty a{color:var(--amber)}
+
+  .login-overlay{position:fixed;inset:0;background:rgba(13,15,15,.93);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
+  .login-box{border:1px solid var(--border2);border-top:2px solid var(--amber);background:var(--bg2);padding:40px 48px;width:min(400px,calc(100vw - 32px));animation:fadeUp .3s ease}
+  .login-title{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--amber);margin-bottom:6px}
+  .login-sub{font-size:11px;color:var(--text-dim);margin-bottom:28px}
+  .login-lbl{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);display:block;margin-bottom:8px}
+  .login-input{width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:13px;padding:10px 14px;outline:none;transition:border-color .15s}
+  .login-input:focus{border-color:var(--amber)}
+  .login-btn{margin-top:16px;width:100%;background:var(--amber);border:none;color:var(--bg);font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;padding:11px;cursor:pointer;transition:opacity .15s}
+  .login-btn:hover{opacity:.85}
+  .login-error{margin-top:12px;font-size:11px;color:var(--red);min-height:16px}
+
+  ::-webkit-scrollbar{width:6px;height:6px}
+  ::-webkit-scrollbar-track{background:var(--bg)}
+  ::-webkit-scrollbar-thumb{background:var(--border2)}
+
+  @media(max-width:768px){
+    main{padding:16px}
+    header{padding:0 16px}
+    .header-right{gap:10px}
+    .stats-bar{grid-template-columns:repeat(2,1fr)}
+    .t-hash{display:none}
+    .hbtn{min-height:40px;padding:8px 12px}
+  }
+  @media(max-width:480px){
+    .t-count{display:none}
+    .logo-sub{display:none}
+    main{padding:10px 12px}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">◈</div>
+    <div><div class="logo-text">NestVault</div><div class="logo-sub">Explorer</div></div>
+  </div>
+  <div class="header-right">
+    <a class="hbtn" href="/">← Dashboard</a>
+    <a class="hbtn" href="/disks">⊞ Discos</a>
+    <button class="hbtn" id="logoutBtn">⌀ API Key</button>
+  </div>
+</header>
+
+<main>
+  <div class="error-bar" id="errorBar"></div>
+
+  <div class="breadcrumb">
+    <a class="bc-link" href="/">NestVault</a>
+    <span class="bc-sep">/</span>
+    <span class="bc-label" id="bcLabel">—</span>
+    <span class="bc-sep">/</span>
+    <span class="bc-version" id="bcVersion">—</span>
+  </div>
+
+  <div class="stats-bar">
+    <div class="stat-box"><div class="stat-label">Arquivos</div><div class="stat-value" id="sFiles">—</div></div>
+    <div class="stat-box"><div class="stat-label">Pastas</div><div class="stat-value" id="sDirs">—</div></div>
+    <div class="stat-box"><div class="stat-label">Tamanho total</div><div class="stat-value" id="sSize">—</div></div>
+    <div class="stat-box"><div class="stat-label">Profundidade</div><div class="stat-value" id="sDepth">—</div></div>
+  </div>
+
+  <div class="controls">
+    <input class="filter-input" id="filterInput" type="text" placeholder="Filtrar arquivos por nome ou caminho…" oninput="onFilter(this.value)">
+    <button class="cbtn" onclick="expandAll()">⊞ Expandir</button>
+    <button class="cbtn" onclick="collapseAll()">⊟ Colapsar</button>
+  </div>
+
+  <div class="tree-wrap" id="treeWrap">
+    <div class="loading">Carregando</div>
+  </div>
+</main>
+
+<div class="login-overlay" id="loginOverlay" style="display:none">
+  <div class="login-box">
+    <div class="login-title">◈ NestVault</div>
+    <div class="login-sub">Informe a API Key para continuar</div>
+    <form id="loginForm">
+      <label class="login-lbl" for="apiKeyInput">API Key</label>
+      <input class="login-input" id="apiKeyInput" type="password" placeholder="sua-api-key-aqui" autocomplete="off">
+      <button class="login-btn" type="submit">Entrar →</button>
+      <div class="login-error" id="loginError"></div>
+    </form>
+  </div>
+</div>
+
+<script>
+  let API_KEY = localStorage.getItem('backupApiKey') || '';
+  const qp      = new URLSearchParams(location.search);
+  const LABEL   = qp.get('label')   || '';
+  const VERSION = qp.get('version') || '';
+
+  let allFiles = [];
+  let treeRoot = null;
+  let _nodeId  = 0;
+
+  const H = () => ({ 'X-API-Key': API_KEY });
+
+  const fmtSize = b => {
+    if (!b) return '0 B';
+    const u = ['B','KB','MB','GB','TB'];
+    for (const unit of u) { if (b < 1024) return b.toFixed(1)+' '+unit; b /= 1024; }
+    return b.toFixed(1)+' PB';
+  };
+  const esc = s => String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const basename = p => p.replace(/\\/g,'/').split('/').filter(Boolean).pop() || p;
+
+  // -- Auth -------------------------------------------------------------------
+  function showError(msg) {
+    const b = document.getElementById('errorBar');
+    b.textContent = '⚠ '+msg; b.classList.add('visible');
+  }
+  function showLogin(msg='') {
+    document.getElementById('loginOverlay').style.display = 'flex';
+    document.getElementById('loginError').textContent = msg;
+  }
+  function hideLogin() { document.getElementById('loginOverlay').style.display = 'none'; }
+
+  document.getElementById('loginForm').addEventListener('submit', e => {
+    e.preventDefault();
+    const key = document.getElementById('apiKeyInput').value.trim();
+    if (!key) return;
+    API_KEY = key; localStorage.setItem('backupApiKey', key);
+    hideLogin(); loadFiles();
+  });
+  document.getElementById('logoutBtn').addEventListener('click', () => {
+    localStorage.removeItem('backupApiKey'); API_KEY = ''; showLogin();
+  });
+
+  // -- Tree building ----------------------------------------------------------
+  function buildTree(files) {
+    const root = { type:'dir', name:'', children: new Map(), files:[] };
+    for (const f of files) {
+      const norm  = f.original_path.replace(/\\/g, '/').replace(/^\//, '');
+      const parts = norm.split('/').filter(Boolean);
+      let node = root;
+      const bn = parts.length ? parts[parts.length - 1] : f.original_path;
+      for (let i = 0; i < parts.length - 1; i++) {
+        const part = parts[i];
+        if (!node.children.has(part)) {
+          node.children.set(part, { type:'dir', name:part, children: new Map(), files:[] });
+        }
+        node = node.children.get(part);
+      }
+      node.files.push({ ...f, _basename: bn });
+    }
+    return root;
+  }
+
+  function computeStats(node) {
+    let count = node.files.length;
+    let size  = node.files.reduce((s, f) => s + (f.size || 0), 0);
+    let dirs  = node.children.size;
+    let depth = 0;
+    for (const child of node.children.values()) {
+      const cs = computeStats(child);
+      count += cs.count;
+      size  += cs.size;
+      dirs  += cs.dirs;
+      depth  = Math.max(depth, cs.depth + 1);
+      child._stats = cs;
+    }
+    node._stats = { count, size, dirs, depth };
+    return { count, size, dirs, depth };
+  }
+
+  // -- Tree rendering ---------------------------------------------------------
+  function renderTree(node, depth) {
+    let html = '';
+    const pad = depth * 20;
+
+    const sortedDirs  = [...node.children.entries()]
+      .sort(([a], [b]) => a.localeCompare(b, 'pt', { sensitivity:'base' }));
+    const sortedFiles = [...node.files]
+      .sort((a, b) => a._basename.localeCompare(b._basename, 'pt', { sensitivity:'base' }));
+
+    for (const [name, child] of sortedDirs) {
+      const id = `dn${_nodeId++}`;
+      const st = child._stats || { count:0, size:0 };
+      html += `
+<div class="tree-row dir-row open" onclick="toggleDir(this,'${id}')">
+  <span style="display:inline-block;width:${pad}px;flex-shrink:0"></span>
+  <span class="t-chevron">▶</span>
+  <span class="t-icon">▸</span>
+  <span class="t-name">${esc(name)}/</span>
+  <div class="t-meta">
+    <span class="t-count">${st.count} arq.</span>
+    <span class="t-size">${fmtSize(st.size)}</span>
+  </div>
+</div>
+<div id="${id}" class="dir-children">${renderTree(child, depth + 1)}</div>`;
+    }
+
+    for (const f of sortedFiles) {
+      html += `
+<div class="tree-row file-row">
+  <span style="display:inline-block;width:${pad + 20}px;flex-shrink:0"></span>
+  <span class="t-chevron" style="visibility:hidden">▶</span>
+  <span class="t-icon">·</span>
+  <span class="t-name" title="${esc(f.original_path)}">${esc(f._basename)}</span>
+  <div class="t-meta">
+    <span class="t-hash">${f.sha256 ? f.sha256.slice(0,10)+'…' : '—'}</span>
+    <span class="t-size">${fmtSize(f.size || 0)}</span>
+    <button class="t-dl" onclick="dlFile(${f.id},'${esc(f._basename)}')" title="Baixar arquivo">↓ baixar</button>
+  </div>
+</div>`;
+    }
+
+    return html;
+  }
+
+  function toggleDir(el, id) {
+    const children = document.getElementById(id);
+    if (el.classList.toggle('open')) {
+      children.classList.remove('collapsed');
+    } else {
+      children.classList.add('collapsed');
+    }
+  }
+
+  function expandAll() {
+    document.querySelectorAll('.dir-row').forEach(el => el.classList.add('open'));
+    document.querySelectorAll('.dir-children').forEach(el => el.classList.remove('collapsed'));
+  }
+  function collapseAll() {
+    document.querySelectorAll('.dir-row').forEach(el => el.classList.remove('open'));
+    document.querySelectorAll('.dir-children').forEach(el => el.classList.add('collapsed'));
+  }
+
+  function _renderTree() {
+    _nodeId = 0;
+    document.getElementById('treeWrap').innerHTML = renderTree(treeRoot, 0);
+  }
+
+  // -- Filter -----------------------------------------------------------------
+  function onFilter(q) {
+    q = q.trim();
+    if (!q) { _renderTree(); return; }
+
+    const ql      = q.toLowerCase();
+    const matched = allFiles.filter(f => f.original_path.toLowerCase().includes(ql));
+    const wrap    = document.getElementById('treeWrap');
+
+    if (!matched.length) {
+      wrap.innerHTML = `<div class="empty">Nenhum arquivo encontrado para "<strong>${esc(q)}</strong>"</div>`;
+      return;
+    }
+
+    const re   = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+    const rows = matched.map(f => {
+      const escaped     = esc(f.original_path);
+      const highlighted = escaped.replace(re, m => `<em>${m}</em>`);
+      return `
+<div class="flat-row">
+  <span class="t-icon" style="color:var(--text-mute);flex-shrink:0">·</span>
+  <span class="flat-path" title="${esc(f.original_path)}">${highlighted}</span>
+  <div class="t-meta">
+    <span class="t-hash">${f.sha256 ? f.sha256.slice(0,10)+'…' : '—'}</span>
+    <span class="t-size">${fmtSize(f.size || 0)}</span>
+    <button class="t-dl" onclick="dlFile(${f.id},'${esc(basename(f.original_path))}')" title="Baixar arquivo">↓ baixar</button>
+  </div>
+</div>`;
+    }).join('');
+
+    wrap.innerHTML = `<div class="flat-head">${matched.length} resultado(s)</div>${rows}`;
+  }
+
+  // -- Download ---------------------------------------------------------------
+  async function dlFile(fileId, filename) {
+    try {
+      const r = await fetch(`/files/${fileId}/download`, { headers: H() });
+      if (r.status === 401) { showLogin(); return; }
+      if (!r.ok) { alert(`Erro ${r.status} ao baixar o arquivo`); return; }
+      const blob = await r.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = Object.assign(document.createElement('a'), { href: url, download: filename });
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch(e) {
+      alert('Erro ao baixar: ' + e.message);
+    }
+  }
+
+  // -- Load -------------------------------------------------------------------
+  async function loadFiles() {
+    const wrap = document.getElementById('treeWrap');
+
+    if (!LABEL || !VERSION) {
+      wrap.innerHTML = `<div class="empty">Nenhuma versão selecionada.<br><a href="/">← Voltar ao dashboard</a></div>`;
+      return;
+    }
+
+    document.getElementById('bcLabel').textContent   = LABEL;
+    document.getElementById('bcVersion').textContent = VERSION;
+    document.title = `NestVault — ${LABEL} / ${VERSION}`;
+    wrap.innerHTML = '<div class="loading">Carregando</div>';
+
+    try {
+      const url = `/files?backup_label=${encodeURIComponent(LABEL)}&version_key=${encodeURIComponent(VERSION)}`;
+      const r   = await fetch(url, { headers: H() });
+      if (r.status === 401) { showLogin(); return; }
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      allFiles = await r.json();
+
+      if (!allFiles.length) {
+        wrap.innerHTML = '<div class="empty">Nenhum arquivo nesta versão</div>';
+        ['sFiles','sDirs','sSize','sDepth'].forEach(id =>
+          document.getElementById(id).textContent = '0');
+        return;
+      }
+
+      treeRoot        = buildTree(allFiles);
+      const stats     = computeStats(treeRoot);
+
+      document.getElementById('sFiles').textContent = stats.count.toLocaleString('pt-BR');
+      document.getElementById('sDirs').textContent  = stats.dirs.toLocaleString('pt-BR');
+      document.getElementById('sSize').textContent  = fmtSize(stats.size);
+      document.getElementById('sDepth').textContent = stats.depth;
+
+      _renderTree();
+    } catch(e) {
+      wrap.innerHTML = `<div class="empty">Erro ao carregar arquivos: ${esc(e.message)}</div>`;
+      showError('Não foi possível carregar: ' + e.message);
+    }
+  }
+
+  // -- Init -------------------------------------------------------------------
+  async function init() {
+    const resp = await fetch('/health');
+    if (!resp.ok) { showError('Servidor indisponível'); return; }
+    const test = await fetch('/backups', { headers: H() });
+    if (test.status === 401) { showLogin(); }
+    else { loadFiles(); }
+  }
+  init();
+</script>
+</body>
+</html>
