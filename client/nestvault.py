@@ -39,7 +39,7 @@ TEXT  = "#c8d0ce"
 
 
 def _header():
-    console.print(f"\n  [bold {AMBER}]◈[/bold {AMBER}]  [bold {TEXT}]NESTVAULT[/bold {TEXT}]  [{DIM}]v3.1.4[/{DIM}]\n")
+    console.print(f"\n  [bold {AMBER}]◈[/bold {AMBER}]  [bold {TEXT}]NESTVAULT[/bold {TEXT}]  [{DIM}]v3.1.5[/{DIM}]\n")
 
 
 def _kv(key: str, val: str, val_style: str = TEXT):
@@ -1073,6 +1073,9 @@ def main():
     if hasattr(args, "label") and args.label is not None and not args.label.strip():
         parser.error("--label nao pode ser vazio")
 
+    if hasattr(args, "server") and not (args.server or "").startswith(("http://", "https://")):
+        parser.error(f"--server invalido: {args.server!r}. Use http://host:porta ou https://host:porta")
+
     _header()
 
     if args.command == "backup":
@@ -1125,7 +1128,12 @@ def main():
 
 
 if __name__ == "__main__":
-    # Necessario para ProcessPoolExecutor no macOS/Windows (spawn-based multiprocessing)
-    from multiprocessing import freeze_support
-    freeze_support()
+    import multiprocessing
+    # Binarios congelados (PyInstaller) no Linux precisam de 'spawn' explicito para que
+    # freeze_support() intercepte corretamente os workers do ProcessPoolExecutor.
+    # Sem isso, workers re-executam o binario inteiro e chamam main() com modulo
+    # parcialmente inicializado, causando server="" e MissingSchema.
+    if getattr(sys, "frozen", False) and sys.platform == "linux":
+        multiprocessing.set_start_method("spawn", force=True)
+    multiprocessing.freeze_support()
     main()
