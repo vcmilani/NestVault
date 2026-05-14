@@ -151,8 +151,7 @@ def now_key() -> str:
 
 def _is_excluded(fp: Path, root: Path, ex: str) -> bool:
     try:
-        fp.relative_to((root / ex).resolve())
-        return True
+        return ex in fp.relative_to(root).parts
     except ValueError:
         return False
 
