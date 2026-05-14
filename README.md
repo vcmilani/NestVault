@@ -4,6 +4,8 @@ Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **iso
 
 Cada execução de backup cria uma nova versão dentro do label. O servidor armazena o conteúdo físico apenas uma vez por sha256 — versões diferentes que compartilham arquivos idênticos não duplicam o storage.
 
+Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
+
 > **v3.1** — criptografia em repouso com AES-256-GCM: ativada via `ENCRYPTION_ENABLED=true` + `ENCRYPTION_KEY` (Base64, 32 bytes). Opt-in — desabilitada por padrão para quem já usa LUKS/ZFS/FileVault. Arquivos existentes continuam legíveis; a migração é feita sob demanda via `encrypt-existing` (cliente) ou `POST /maintenance/encrypt-existing`. Download descriptografa em streaming, sem buffer completo em memória. Novo módulo `crypto.py` com chunked AES-256-GCM (1 MB/chunk, nonce único por chunk). Replicação já copia arquivos cifrados — nenhum dado trafega em claro entre volumes.
 >
 > **v3.0** — redundância de dados por replicação entre volumes: cada arquivo pode ser mantido em N cópias físicas em volumes distintos via `REPLICATION_FACTOR` (padrão `1` = comportamento anterior, sem replicação). Downloads fazem fallback automático para cópias sobreviventes. Quando um volume degraded se recupera, arquivos sub-replicados são restaurados em background. Compatível com RAID/ZFS físico — sem replicação por padrão.
@@ -45,6 +47,17 @@ NestVault/
 ├── .gitignore
 └── README.md
 ```
+
+---
+
+## 📱 Clientes disponíveis
+
+| Cliente | Plataforma | Repositório |
+|---------|------------|-------------|
+| **nestvault.py** | Linux / macOS / Windows (CLI Python) | este repositório — `client/nestvault.py` |
+| **NestVault para macOS** | macOS (app nativo SwiftUI) | [github.com/vcmilani/NestVault_Xcode](https://github.com/vcmilani/NestVault_Xcode) |
+
+O servidor expõe uma API REST padrão — qualquer cliente que implemente o [contrato da API](#-endpoints-da-api) funciona sem modificações no servidor.
 
 ---
 
