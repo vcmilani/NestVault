@@ -276,7 +276,14 @@
     for (const unit of u) { if (b < 1024) return b.toFixed(1)+' '+unit; b /= 1024; }
     return b.toFixed(1)+' PB';
   };
-  const fmtDate = s => s ? s.replace('T',' ').slice(0,19) : '—';
+  const fmtDate = s => {
+    if (!s) return '—';
+    const d = new Date(s.includes('Z') || s.includes('+') ? s : s + 'Z');
+    return d.toLocaleString('pt-BR', {
+      year:'numeric', month:'2-digit', day:'2-digit',
+      hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false
+    });
+  };
   const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   const badge = s => `<span class="badge badge-${s}">${s}</span>`;
 
