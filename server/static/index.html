@@ -445,6 +445,11 @@
           <td class="size-cell">${fmtSize(v.total_size_bytes)}</td>
           <td class="num-cell dim-cell">${fmtDuration(v.duration_seconds)}</td>
           <td class="date-cell">${fmtDate(v.version_key)}</td>
+          <td style="padding:4px 14px 4px 6px">
+            <a href="/explorer?label=${encodeURIComponent(label)}&version=${encodeURIComponent(v.version_key)}"
+               onclick="event.stopPropagation()"
+               class="hbtn" style="font-size:10px;padding:2px 8px;text-decoration:none;letter-spacing:.04em">⊞ Explorer</a>
+          </td>
         </tr>
         <tr class="files-row" id="frow-${esc(vid)}" style="display:${isExp?'':'none'}">
           <td colspan="8">
@@ -472,10 +477,11 @@
           <th style="text-align:right">Tamanho</th>
           <th style="text-align:right">Duração</th>
           <th>Criada em</th>
+          <th></th>
         </tr></thead>
         <tbody>
           ${rows}
-          <tr class="diff-row" id="diffrow-${esc(label)}" style="display:none"><td colspan="8"></td></tr>
+          <tr class="diff-row" id="diffrow-${esc(label)}" style="display:none"><td colspan="9"></td></tr>
         </tbody>
       </table>`;
 

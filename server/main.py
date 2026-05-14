@@ -673,6 +673,14 @@ def disks_page():
     return HTMLResponse(page.read_text(encoding="utf-8"))
 
 
+@app.get("/explorer", response_class=HTMLResponse, include_in_schema=False)
+def explorer_page():
+    page = STATIC_DIR / "explorer.html"
+    if not page.exists():
+        return HTMLResponse("<h1>Página não encontrada</h1>", status_code=404)
+    return HTMLResponse(page.read_text(encoding="utf-8"))
+
+
 @app.get("/health", response_model=HealthResponse)
 def health():
     return HealthResponse(status="ok", version="3.1.5", time=datetime.now(timezone.utc).isoformat())
