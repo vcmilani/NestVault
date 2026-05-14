@@ -18,6 +18,11 @@ jobs:
             artifact_path: client/dist/nestvault-linux-x64
             strip: "true"
 
+          - os: ubuntu-24.04-arm
+            asset_name: nestvault-linux-arm64
+            artifact_path: client/dist/nestvault-linux-arm64
+            strip: "true"
+
           - os: macos-latest
             asset_name: nestvault-macos
             artifact_path: client/dist/nestvault-macos
@@ -78,6 +83,7 @@ jobs:
             | Plataforma | Arquivo |
             |---|---|
             | Linux x64 | `nestvault-linux-x64` |
+            | Linux ARM64 | `nestvault-linux-arm64` |
             | macOS | `nestvault-macos` |
             | Windows x64 | `nestvault-windows-x64.exe` |
 

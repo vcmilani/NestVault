@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_compl
 
 import requests
 from rich.console import Console
-from rich.table import Table
+from rich.table import Table, Column
 from rich.panel import Panel
 from rich.progress import (
     Progress, SpinnerColumn, BarColumn, MofNCompleteColumn,
@@ -39,7 +39,7 @@ TEXT  = "#c8d0ce"
 
 
 def _header():
-    console.print(f"\n  [bold {AMBER}]◈[/bold {AMBER}]  [bold {TEXT}]NESTVAULT[/bold {TEXT}]  [{DIM}]v3.1.2[/{DIM}]\n")
+    console.print(f"\n  [bold {AMBER}]◈[/bold {AMBER}]  [bold {TEXT}]NESTVAULT[/bold {TEXT}]  [{DIM}]v3.1.3[/{DIM}]\n")
 
 
 def _kv(key: str, val: str, val_style: str = TEXT):
@@ -72,8 +72,8 @@ def _make_progress() -> Progress:
         SpinnerColumn(style=AMBER),
         TextColumn(f"[{TEXT}]{{task.description}}"),
         BarColumn(style=DIM, complete_style=AMBER, finished_style=GREEN),
-        MofNCompleteColumn(style=TEXT),
-        TimeRemainingColumn(style=DIM),
+        MofNCompleteColumn(table_column=Column(style=TEXT)),
+        TimeRemainingColumn(table_column=Column(style=DIM)),
         console=console,
         transient=False,
     )
@@ -392,7 +392,11 @@ def backup_directory(
         _dim(f"Cache: {len(prev_cache)} arquivo(s) da versao anterior")
 
     pending = []
-    for fp in sorted(root.rglob("*")):
+    collected: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root, onerror=lambda e: _dim(f"Aviso: {e}")):
+        for name in filenames:
+            collected.append(Path(dirpath) / name)
+    for fp in sorted(collected):
         if not fp.is_file() or fp.name in IGNORED_NAMES:
             continue
         if any(_is_excluded(fp, root, ex) for ex in (exclude or [])):
