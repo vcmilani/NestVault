@@ -54,6 +54,8 @@ REPLICATION_FACTOR = int(os.getenv("REPLICATION_FACTOR", "1"))
 # 2+ = replicar para N volumes
 # 0 = espelhar para todos os volumes saudáveis
 
+CLEANUP_MIN_FREE_PCT = float(os.getenv("STORAGE_MIN_FREE_PCT", "5.0"))
+
 # -- Volume health ------------------------------------------------------------
 _degraded_volumes: set[Path] = set()
 
@@ -533,21 +535,28 @@ def _backup_info(b: BackupID, db: Session) -> BackupInfo:
     )
 
 
-def _min_disk_free_percent() -> float:
-    """Retorna o menor % livre entre os volumes saudáveis."""
-    usages = [_safe_disk_usage(v) for v in STORAGE_VOLUMES if v not in _degraded_volumes]
-    usages = [u for u in usages if u]
-    if not usages:
-        return 100.0  # tudo degraded → nada a limpar
-    return min(u.free / u.total * 100 for u in usages)
+def _volumes_with_free_space() -> int:
+    """Conta volumes saudáveis com percentual livre >= CLEANUP_MIN_FREE_PCT."""
+    count = 0
+    for v in STORAGE_VOLUMES:
+        if v in _degraded_volumes:
+            continue
+        u = _safe_disk_usage(v)
+        if u and u.free / u.total * 100 >= CLEANUP_MIN_FREE_PCT:
+            count += 1
+    return count
 
 
 def _auto_cleanup_if_needed(db: Session) -> None:
-    free_pct = _min_disk_free_percent()
-    if free_pct >= 5.0:
+    factor = _target_replicas()
+    ok = _volumes_with_free_space()
+    if ok >= factor:
         return
 
-    log.warning(f"[auto-cleanup] Espaço livre mínimo: {free_pct:.1f}% — abaixo de 5%, iniciando limpeza...")
+    log.warning(
+        f"[auto-cleanup] Apenas {ok}/{len(_healthy_volumes())} volume(s) com ≥{CLEANUP_MIN_FREE_PCT:.0f}% livre "
+        f"— fator de replicação={factor} não pode ser mantido, iniciando limpeza..."
+    )
 
     # Labels com >= 2 versões "done" (as que têm algo a deletar)
     labels_with_versions = (
@@ -576,13 +585,13 @@ def _auto_cleanup_if_needed(db: Session) -> None:
         db.delete(v)
         db.commit()
         removed, _ = _cleanup_orphan_contents(db)
-        free_pct = _min_disk_free_percent()
-        log.info(f"[auto-cleanup] Removida {label}/{key} — {removed} arquivo(s) — livre mín: {free_pct:.1f}%")
-        if free_pct >= 5.0:
-            log.info(f"[auto-cleanup] Espaço normalizado ({free_pct:.1f}%), encerrando.")
+        ok = _volumes_with_free_space()
+        log.info(f"[auto-cleanup] Removida {label}/{key} — {removed} arquivo(s) — volumes com espaço: {ok}/{len(_healthy_volumes())}")
+        if ok >= factor:
+            log.info(f"[auto-cleanup] Replicação pode ser mantida ({ok} volume(s) ok), encerrando.")
             return
 
-    log.info(f"[auto-cleanup] Concluído. Livre mín: {free_pct:.1f}% — todas as labels com 1 versão.")
+    log.info(f"[auto-cleanup] Concluído — todas as labels com 1 versão. Volumes com espaço: {ok}/{len(_healthy_volumes())}.")
 
 
 def _cleanup_orphan_contents(db: Session) -> tuple[int, int]:
