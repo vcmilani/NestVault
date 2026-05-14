@@ -397,7 +397,7 @@ def backup_directory(
         for name in filenames:
             collected.append(Path(dirpath) / name)
     for fp in sorted(collected):
-        if fp.name in IGNORED_NAMES:
+        if not fp.is_file() or fp.name in IGNORED_NAMES:
             continue
         if any(_is_excluded(fp, root, ex) for ex in (exclude or [])):
             continue
