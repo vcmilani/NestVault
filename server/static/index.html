@@ -444,7 +444,7 @@
           <td class="num-cell">${v.file_count}</td>
           <td class="size-cell">${fmtSize(v.total_size_bytes)}</td>
           <td class="num-cell dim-cell">${fmtDuration(v.duration_seconds)}</td>
-          <td class="date-cell">${fmtDate(v.created_at)}</td>
+          <td class="date-cell">${fmtDate(v.version_key)}</td>
         </tr>
         <tr class="files-row" id="frow-${esc(vid)}" style="display:${isExp?'':'none'}">
           <td colspan="8">
