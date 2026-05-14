@@ -1069,6 +1069,10 @@ def main():
     pee.add_argument("--server", default=DEFAULT_SERVER)
 
     args = parser.parse_args()
+
+    if hasattr(args, "label") and args.label is not None and not args.label.strip():
+        parser.error("--label nao pode ser vazio")
+
     _header()
 
     if args.command == "backup":
