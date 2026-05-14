@@ -558,7 +558,24 @@ def _auto_cleanup_if_needed(db: Session) -> None:
         f"— fator de replicação={factor} não pode ser mantido, iniciando limpeza..."
     )
 
-    # Labels com >= 2 versões "done" (as que têm algo a deletar)
+    # 1ª prioridade: versões incomplete e failed — sempre deletáveis
+    stale = (
+        db.query(BackupVersion)
+        .filter(BackupVersion.status.in_(["incomplete", "failed"]))
+        .all()
+    )
+    if stale:
+        for v in stale:
+            db.delete(v)
+        db.commit()
+        _cleanup_orphan_contents(db)
+        ok = _volumes_with_free_space()
+        log.info(f"[auto-cleanup] {len(stale)} versão(ões) incomplete/failed removida(s) — volumes com espaço: {ok}/{len(_healthy_volumes())}")
+        if ok >= factor:
+            log.info(f"[auto-cleanup] Replicação pode ser mantida ({ok} volume(s) ok), encerrando.")
+            return
+
+    # 2ª prioridade: versões done antigas (mantém sempre a mais recente por label)
     labels_with_versions = (
         db.query(BackupVersion.backup_label)
         .filter(BackupVersion.status == "done")
