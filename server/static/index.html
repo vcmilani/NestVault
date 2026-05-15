@@ -256,6 +256,28 @@
     <div id="cloudJobsWrap"><div class="loading">Carregando jobs</div></div>
   </div>
 
+  <!-- Modal: autenticação OAuth manual (para IPs privados) -->
+  <div id="cloudAuthModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:center;justify-content:center">
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:28px;min-width:360px;max-width:520px;width:90%">
+      <div style="font-size:13px;font-weight:600;margin-bottom:18px" id="authModalTitle">Conectar conta</div>
+
+      <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px"><strong>1.</strong> Adicione este URI de redirecionamento nas configurações OAuth do provedor:</div>
+      <div id="authRedirectUri" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:8px 10px;font-size:11px;font-family:monospace;margin-bottom:16px;word-break:break-all;user-select:all"></div>
+
+      <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px"><strong>2.</strong> Clique para autorizar — o browser tentará abrir o endereço <code>localhost</code>:</div>
+      <a id="authLink" href="#" target="_blank" rel="noopener" style="display:inline-block;font-size:12px;background:var(--accent);color:#fff;padding:6px 14px;border-radius:4px;text-decoration:none;margin-bottom:16px">Abrir página de autorização ↗</a>
+
+      <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px"><strong>3.</strong> Se a página não carregar (IP privado), copie a URL completa da barra do browser e cole aqui:</div>
+      <textarea id="authPastedUrl" rows="3" placeholder="http://localhost:8000/cloud/callback/gdrive?code=4%2F0A...&state=..." style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:11px;box-sizing:border-box;resize:vertical;font-family:monospace"></textarea>
+      <div id="authError" style="color:#f87171;font-size:11px;margin-top:6px;display:none"></div>
+
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+        <button class="hbtn" onclick="closeAuthModal()">Cancelar</button>
+        <button class="hbtn" onclick="submitAuthCode()" style="background:var(--accent);color:#fff">Conectar</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Modal: criar job -->
   <div id="cloudModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:center;justify-content:center">
     <div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:28px;min-width:360px;max-width:480px;width:90%">
@@ -743,11 +765,52 @@
     }).join('')}</tbody></table>`;
   }
 
+  let _authState = null, _authProvider = null;
+
   async function connectCloud(provider) {
-    const r = await fetch(`/cloud/accounts/${provider}/auth`, {headers: H()});
+    const r = await fetch(`/cloud/accounts/${provider}/auth?manual=true`, {headers: H()});
     if (!r.ok) { showError('Erro ao gerar URL de autenticação'); return; }
-    const {url} = await r.json();
-    window.location.href = url;
+    const {url, state, redirect_uri} = await r.json();
+
+    _authState = state;
+    _authProvider = provider;
+
+    const names = {gdrive: 'Google Drive', onedrive: 'OneDrive'};
+    document.getElementById('authModalTitle').textContent = `Conectar ${names[provider] || provider}`;
+    document.getElementById('authRedirectUri').textContent = redirect_uri;
+    document.getElementById('authLink').href = url;
+    document.getElementById('authPastedUrl').value = '';
+    document.getElementById('authError').style.display = 'none';
+    document.getElementById('cloudAuthModal').style.display = 'flex';
+  }
+
+  function closeAuthModal() {
+    document.getElementById('cloudAuthModal').style.display = 'none';
+    _authState = null; _authProvider = null;
+  }
+
+  async function submitAuthCode() {
+    const errEl = document.getElementById('authError');
+    errEl.style.display = 'none';
+    const pasted = document.getElementById('authPastedUrl').value.trim();
+    if (!pasted) { errEl.textContent = 'Cole a URL redirecionada'; errEl.style.display = 'block'; return; }
+
+    let code;
+    try { code = new URL(pasted).searchParams.get('code'); } catch { code = pasted; }
+    if (!code) { errEl.textContent = 'Código não encontrado — cole a URL completa da barra do browser'; errEl.style.display = 'block'; return; }
+
+    const r = await fetch(`/cloud/accounts/${_authProvider}/exchange`, {
+      method: 'POST',
+      headers: {...H(), 'Content-Type': 'application/json'},
+      body: JSON.stringify({code, state: _authState}),
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      errEl.textContent = d.detail || 'Erro ao conectar conta';
+      errEl.style.display = 'block'; return;
+    }
+    closeAuthModal();
+    loadCloud();
   }
 
   async function disconnectAccount(id, email) {

@@ -1,5 +1,5 @@
 """FastAPI router para /cloud/* — contas e jobs de cloud backup."""
-import asyncio, os, secrets, logging
+import asyncio, os, re, secrets, logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Literal
 
@@ -36,6 +36,14 @@ def _get_provider(name: str):
 
 def _callback_uri(provider: str) -> str:
     return f"{BASE_URL}/cloud/callback/{provider}"
+
+
+def _localhost_callback_uri(provider: str) -> str:
+    """URI de redirect usando localhost — necessário quando Google/Microsoft
+    rejeitam IPs privados como redirect URI."""
+    m = re.search(r':(\d+)$', BASE_URL.split('//')[-1])
+    port = int(m.group(1)) if m else 8000
+    return f"http://localhost:{port}/cloud/callback/{provider}"
 
 
 def _require_credential(credential_id: int, db: Session) -> CloudCredential:
@@ -114,6 +122,11 @@ class FolderOut(BaseModel):
 class AuthUrlOut(BaseModel):
     url: str
     state: str
+    redirect_uri: str
+
+class ManualExchangeRequest(BaseModel):
+    code: str
+    state: str
 
 
 # -- Contas -------------------------------------------------------------------
@@ -130,13 +143,44 @@ def list_accounts(db: Session = Depends(get_db)):
 
 
 @router.get("/accounts/{provider}/auth", response_model=AuthUrlOut)
-def get_auth_url(provider: str):
+def get_auth_url(provider: str, manual: bool = Query(False)):
     provider_obj = _get_provider(provider)
     state = secrets.token_urlsafe(24)
-    redirect_uri = _callback_uri(provider)
+    redirect_uri = _localhost_callback_uri(provider) if manual else _callback_uri(provider)
     _pending_states[state] = {"provider": provider, "redirect_uri": redirect_uri}
     url = provider_obj.get_auth_url(redirect_uri=redirect_uri, state=state)
-    return AuthUrlOut(url=url, state=state)
+    return AuthUrlOut(url=url, state=state, redirect_uri=redirect_uri)
+
+
+@router.post("/accounts/{provider}/exchange", response_model=AccountOut, status_code=201)
+async def manual_exchange(provider: str, req: ManualExchangeRequest, db: Session = Depends(get_db)):
+    """Troca o código OAuth pelo token manualmente (fluxo para IPs privados)."""
+    pending = _pending_states.pop(req.state, None)
+    if not pending or pending["provider"] != provider:
+        raise HTTPException(400, "State inválido ou expirado — reinicie o processo de autenticação")
+
+    provider_obj = _get_provider(provider)
+    tokens = await provider_obj.exchange_code(code=req.code, redirect_uri=pending["redirect_uri"])
+    if not tokens.get("refresh_token"):
+        raise HTTPException(400, "Provedor não retornou refresh_token. No Google, certifique-se de usar prompt=consent na primeira autorização.")
+
+    info = await provider_obj.get_account_info(tokens["access_token"])
+    cred = CloudCredential(
+        provider=provider,
+        email=info["email"],
+        display_name=info.get("display_name"),
+        access_token=tokens["access_token"],
+        refresh_token=encrypt_token(tokens["refresh_token"]),
+        token_expiry=tokens.get("expiry"),
+    )
+    db.add(cred)
+    db.commit()
+    db.refresh(cred)
+    log.info(f"[cloud] Conta conectada (manual): {info['email']} ({provider})")
+    return AccountOut(
+        id=cred.id, provider=cred.provider, email=cred.email,
+        display_name=cred.display_name, created_at=str(cred.created_at),
+    )
 
 
 @router.get("/callback/{provider}", include_in_schema=False)
