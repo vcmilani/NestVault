@@ -37,6 +37,15 @@
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
   .hbtn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 12px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s}
   .hbtn:hover{border-color:var(--amber);color:var(--amber)}
+  .hbtn:disabled{opacity:.4;cursor:not-allowed;pointer-events:none}
+  .small-btn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:2px 8px;font-family:var(--mono);font-size:10px;cursor:pointer;letter-spacing:.04em;transition:all .15s;display:inline-flex;align-items:center;gap:3px;white-space:nowrap}
+  .small-btn:hover{border-color:var(--amber);color:var(--amber)}
+  .small-btn:disabled{opacity:.35;cursor:not-allowed;pointer-events:none}
+  .small-btn.btn-run:hover{border-color:var(--green);color:var(--green)}
+  .small-btn.btn-run.is-running{border-color:var(--amber-dim);color:var(--amber);pointer-events:none}
+  .small-btn.btn-danger:hover{border-color:var(--red);color:var(--red)}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .spin{display:inline-block;animation:spin .8s linear infinite}
   .last-updated{font-size:11px;color:var(--text-mute)}
 
   /* Layout */
@@ -173,6 +182,7 @@
     header{padding:0 16px}
     .header-right{gap:12px}
     .hbtn{min-height:40px;padding:8px 12px}
+    .small-btn{min-height:32px;padding:4px 10px}
     tbody tr td{padding:12px 10px}
     tbody tr td:first-child{padding-left:14px}
     .row-version td{padding:11px 14px 11px 28px}
@@ -265,7 +275,7 @@
       <div id="authRedirectUri" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:8px 10px;font-size:11px;font-family:monospace;margin-bottom:16px;word-break:break-all;user-select:all"></div>
 
       <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px"><strong>2.</strong> Clique para autorizar — o browser tentará abrir o endereço <code>localhost</code>:</div>
-      <a id="authLink" href="#" target="_blank" rel="noopener" style="display:inline-block;font-size:12px;background:var(--accent);color:#fff;padding:6px 14px;border-radius:4px;text-decoration:none;margin-bottom:16px">Abrir página de autorização ↗</a>
+      <a id="authLink" href="#" target="_blank" rel="noopener" style="display:inline-block;font-size:12px;background:var(--amber);color:var(--bg);padding:6px 14px;border-radius:4px;text-decoration:none;margin-bottom:16px">Abrir página de autorização ↗</a>
 
       <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px"><strong>3.</strong> Se a página não carregar (IP privado), copie a URL completa da barra do browser e cole aqui:</div>
       <textarea id="authPastedUrl" rows="3" placeholder="http://localhost:8000/cloud/callback/gdrive?code=4%2F0A...&state=..." style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:11px;box-sizing:border-box;resize:vertical;font-family:monospace"></textarea>
@@ -273,7 +283,7 @@
 
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
         <button class="hbtn" onclick="closeAuthModal()">Cancelar</button>
-        <button class="hbtn" onclick="submitAuthCode()" style="background:var(--accent);color:#fff">Conectar</button>
+        <button id="authConnectBtn" class="hbtn" onclick="submitAuthCode()" style="background:var(--amber);color:var(--bg)">Conectar</button>
       </div>
     </div>
   </div>
@@ -284,10 +294,15 @@
       <div id="cloudModalTitle" style="font-size:13px;font-weight:600;margin-bottom:18px">Novo job de backup</div>
       <label style="font-size:11px;color:var(--text-dim)">Conta</label>
       <select id="jCredential" style="width:100%;margin:4px 0 12px;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px"></select>
-      <label style="font-size:11px;color:var(--text-dim)">Pasta no cloud (ID)</label>
-      <input id="jFolderId" placeholder="ID da pasta" style="width:100%;margin:4px 0 12px;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px;box-sizing:border-box">
-      <label style="font-size:11px;color:var(--text-dim)">Nome da pasta (exibição)</label>
-      <input id="jFolderName" placeholder="Ex: Documentos" style="width:100%;margin:4px 0 12px;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px;box-sizing:border-box">
+      <label style="font-size:11px;color:var(--text-dim)">Pasta no cloud</label>
+      <select id="jFolderSelect" style="width:100%;margin:4px 0 4px;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px;box-sizing:border-box">
+        <option value="">— selecione a conta primeiro —</option>
+      </select>
+      <div id="jFolderManualWrap" style="display:none;margin-top:6px">
+        <input id="jFolderId" placeholder="ID da pasta" style="width:100%;margin:0 0 6px;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px;box-sizing:border-box">
+        <input id="jFolderName" placeholder="Nome da pasta" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px;box-sizing:border-box">
+      </div>
+      <a id="jFolderManualLink" href="#" onclick="toggleFolderManual(event)" style="font-size:10px;color:var(--text-dim);display:block;margin:3px 0 12px">inserir ID manualmente</a>
       <label style="font-size:11px;color:var(--text-dim)">Label de destino no NestVault</label>
       <input id="jLabel" placeholder="Ex: gdrive-documentos" style="width:100%;margin:4px 0 12px;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px;box-sizing:border-box">
       <label style="font-size:11px;color:var(--text-dim)">Agendamento (cron, opcional)</label>
@@ -733,7 +748,7 @@
       <td>${providerLabel[a.provider]||a.provider}</td>
       <td>${esc(a.email)}</td>
       <td>${esc(a.display_name||'')}</td>
-      <td><button class="small-btn" onclick="disconnectAccount(${a.id},'${esc(a.email)}')">Desconectar</button>
+      <td style="white-space:nowrap"><button class="small-btn btn-danger" onclick="disconnectAccount(${a.id},'${esc(a.email)}')">Desconectar</button>
           <button class="small-btn" onclick="openJobModal(${a.id})">+ Job</button></td>
     </tr>`).join('')}</tbody></table>`;
   }
@@ -743,7 +758,7 @@
     const jobs = r.ok ? await r.json() : [];
     _jobsCache = Object.fromEntries(jobs.map(j => [j.id, j]));
     const el = document.getElementById('cloudJobsWrap');
-    if (!jobs.length) { el.innerHTML = '<div class="empty">Nenhum job configurado — conecte uma conta e clique em "+ Job"</div>'; return; }
+    if (!jobs.length) { stopCloudPoll(); el.innerHTML = '<div class="empty">Nenhum job configurado — conecte uma conta e clique em "+ Job"</div>'; return; }
     el.innerHTML = `<table class="backup-table"><thead><tr>
       <th>Provider</th><th>Pasta</th><th>Label destino</th><th>Cron</th><th>Último run</th><th>Status</th><th></th>
     </tr></thead><tbody>${jobs.map(j => {
@@ -758,17 +773,32 @@
         <td><code>${esc(j.cron_expr||'manual')}</code></td>
         <td>${j.last_run_at ? j.last_run_at.slice(0,19).replace('T',' ') : '—'}</td>
         <td title="${esc(j.last_run_message||'')}">  ${status}</td>
-        <td>
-          <button class="small-btn" onclick="runJobNow(${j.id})" title="${esc(j.last_run_message||'')}">▶ Run</button>
+        <td style="white-space:nowrap">${
+          j.last_run_status === 'running'
+            ? `<button class="small-btn btn-run is-running" disabled><span class="spin">⟳</span> Running</button>`
+            : `<button class="small-btn btn-run" onclick="runJobNow(${j.id})" title="${esc(j.last_run_message||'')}">▶ Run</button>`
+        }
           <button class="small-btn" onclick="editJob(${j.id})">✎</button>
-          <button class="small-btn" onclick="deleteJob(${j.id})">✕</button>
+          <button class="small-btn btn-danger" onclick="deleteJob(${j.id})">✕</button>
         </td>
       </tr>`;
     }).join('')}</tbody></table>`;
+    if (jobs.some(j => j.last_run_status === 'running')) startCloudPoll(); else stopCloudPoll();
   }
 
   let _authState = null, _authProvider = null;
   let _editingJobId = null, _jobsCache = {};
+  let _cloudPollTimer = null;
+
+  function startCloudPoll() {
+    if (_cloudPollTimer) return;
+    _cloudPollTimer = setInterval(() => loadCloudJobs(), 2500);
+  }
+
+  function stopCloudPoll() {
+    clearInterval(_cloudPollTimer);
+    _cloudPollTimer = null;
+  }
 
   async function connectCloud(provider) {
     const r = await fetch(`/cloud/accounts/${provider}/auth?manual=true`, {headers: H()});
@@ -802,11 +832,14 @@
     try { code = new URL(pasted).searchParams.get('code'); } catch { code = pasted; }
     if (!code) { errEl.textContent = 'Código não encontrado — cole a URL completa da barra do browser'; errEl.style.display = 'block'; return; }
 
+    const btn = document.getElementById('authConnectBtn');
+    btn.disabled = true; btn.textContent = 'Conectando...';
     const r = await fetch(`/cloud/accounts/${_authProvider}/exchange`, {
       method: 'POST',
       headers: {...H(), 'Content-Type': 'application/json'},
       body: JSON.stringify({code, state: _authState}),
     });
+    btn.disabled = false; btn.textContent = 'Conectar';
     if (!r.ok) {
       const d = await r.json().catch(() => ({}));
       errEl.textContent = d.detail || 'Erro ao conectar conta';
@@ -822,6 +855,43 @@
     loadCloud();
   }
 
+  function _resetFolderSelect(msg = '— carregando pastas... —') {
+    const sel = document.getElementById('jFolderSelect');
+    sel.innerHTML = `<option value="">${msg}</option>`;
+    document.getElementById('jFolderManualWrap').style.display = 'none';
+    document.getElementById('jFolderManualLink').textContent = 'inserir ID manualmente';
+  }
+
+  function toggleFolderManual(e) {
+    e.preventDefault();
+    const wrap = document.getElementById('jFolderManualWrap');
+    const link = document.getElementById('jFolderManualLink');
+    const hidden = wrap.style.display === 'none';
+    wrap.style.display = hidden ? 'block' : 'none';
+    link.textContent = hidden ? 'ocultar entrada manual' : 'inserir ID manualmente';
+  }
+
+  async function loadFolderOptions(credentialId, selectValue) {
+    const sel = document.getElementById('jFolderSelect');
+    sel.innerHTML = '<option value="">— carregando... —</option>';
+    try {
+      const r = await fetch(`/cloud/accounts/${credentialId}/folders`, {headers: H()});
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const folders = await r.json();
+      sel.innerHTML =
+        '<option value="__root__">⬡ Todo o Google Drive</option>' +
+        folders.filter(f => f.is_folder).map(f =>
+          `<option value="${esc(f.id)}:${esc(f.name)}">📁 ${esc(f.name)}</option>`
+        ).join('');
+      if (selectValue) {
+        sel.value = selectValue;
+        if (!sel.value) sel.value = '';
+      }
+    } catch {
+      sel.innerHTML = '<option value="">— erro ao carregar pastas —</option>';
+    }
+  }
+
   function openJobModal(credentialId) {
     _editingJobId = null;
     document.getElementById('cloudModalTitle').textContent = 'Novo job de backup';
@@ -834,10 +904,17 @@
         `<option value="${a.id}" ${a.id===credentialId?'selected':''}>${providerLabel[a.provider]||a.provider} — ${esc(a.email)}</option>`
       ).join('');
     });
+    _resetFolderSelect();
+    loadFolderOptions(credentialId);
     ['jFolderId','jFolderName','jLabel','jCron'].forEach(id => document.getElementById(id).value = '');
     document.getElementById('jError').style.display = 'none';
     document.getElementById('cloudModal').style.display = 'flex';
   }
+
+  document.getElementById('jCredential').addEventListener('change', e => {
+    const credId = parseInt(e.target.value);
+    if (credId) loadFolderOptions(credId);
+  });
 
   function editJob(jobId) {
     const j = _jobsCache[jobId];
@@ -848,8 +925,18 @@
     const sel = document.getElementById('jCredential');
     sel.disabled = true;
     sel.innerHTML = `<option value="${j.credential_id}">${providerLabel[j.provider]||j.provider} — ${esc(j.email)}</option>`;
-    document.getElementById('jFolderId').value = j.folder_id;
-    document.getElementById('jFolderName').value = j.folder_name;
+    _resetFolderSelect();
+    const targetVal = j.folder_id === 'root' ? '__root__' : `${j.folder_id}:${j.folder_name}`;
+    loadFolderOptions(j.credential_id, targetVal).then(() => {
+      const fsel = document.getElementById('jFolderSelect');
+      if (!fsel.value) {
+        document.getElementById('jFolderId').value = j.folder_id;
+        document.getElementById('jFolderName').value = j.folder_name;
+        const wrap = document.getElementById('jFolderManualWrap');
+        wrap.style.display = 'block';
+        document.getElementById('jFolderManualLink').textContent = 'ocultar entrada manual';
+      }
+    });
     document.getElementById('jLabel').value = j.target_label;
     document.getElementById('jCron').value = j.cron_expr || '';
     document.getElementById('jError').style.display = 'none';
@@ -864,14 +951,27 @@
   async function saveJob() {
     const errEl = document.getElementById('jError');
     errEl.style.display = 'none';
-    const folder_id   = document.getElementById('jFolderId').value.trim();
-    const folder_name = document.getElementById('jFolderName').value.trim();
+    let folder_id, folder_name;
+    const selVal = document.getElementById('jFolderSelect').value;
+    if (selVal === '__root__') {
+      folder_id = 'root'; folder_name = 'Google Drive (inteiro)';
+    } else if (selVal && selVal.includes(':')) {
+      const colon = selVal.indexOf(':');
+      folder_id   = selVal.slice(0, colon);
+      folder_name = selVal.slice(colon + 1);
+    } else {
+      folder_id   = document.getElementById('jFolderId').value.trim();
+      folder_name = document.getElementById('jFolderName').value.trim();
+    }
     const target_label = document.getElementById('jLabel').value.trim();
     const cron_expr   = document.getElementById('jCron').value.trim() || null;
     if (!folder_id || !folder_name || !target_label) {
-      errEl.textContent = 'Preencha pasta (ID), nome da pasta e label destino';
+      errEl.textContent = 'Selecione uma pasta (ou insira o ID manualmente) e preencha o label destino';
       errEl.style.display = 'block'; return;
     }
+    const btn = document.getElementById('jSaveBtn');
+    const origText = btn.textContent;
+    btn.disabled = true; btn.textContent = 'Salvando...';
     let r;
     if (_editingJobId) {
       r = await fetch(`/cloud/jobs/${_editingJobId}`, {
@@ -886,6 +986,7 @@
       };
       r = await fetch('/cloud/jobs', {method:'POST', headers:{...H(),'Content-Type':'application/json'}, body: JSON.stringify(body)});
     }
+    btn.disabled = false; btn.textContent = origText;
     if (!r.ok) { const d = await r.json(); errEl.textContent = d.detail||'Erro ao salvar job'; errEl.style.display='block'; return; }
     closeJobModal();
     loadCloudJobs();
@@ -894,7 +995,8 @@
   async function runJobNow(jobId) {
     const r = await fetch(`/cloud/jobs/${jobId}/run`, {method:'POST', headers: H()});
     if (!r.ok) { const d = await r.json(); showError(d.detail||'Erro ao iniciar job'); return; }
-    setTimeout(loadCloudJobs, 1500);
+    await loadCloudJobs();
+    startCloudPoll();
   }
 
   async function deleteJob(jobId) {
