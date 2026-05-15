@@ -105,6 +105,8 @@ class GoogleDriveProvider(CloudProvider):
                     headers={"Authorization": f"Bearer {access_token}"},
                     params=params,
                 )
+                if r.is_error:
+                    log.error(f"[gdrive] list_folder {folder_id} → HTTP {r.status_code}: {r.text}")
                 r.raise_for_status()
                 data = r.json()
                 for f in data.get("files", []):

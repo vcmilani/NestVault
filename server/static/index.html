@@ -281,7 +281,7 @@
   <!-- Modal: criar job -->
   <div id="cloudModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:center;justify-content:center">
     <div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:28px;min-width:360px;max-width:480px;width:90%">
-      <div style="font-size:13px;font-weight:600;margin-bottom:18px">Novo job de backup</div>
+      <div id="cloudModalTitle" style="font-size:13px;font-weight:600;margin-bottom:18px">Novo job de backup</div>
       <label style="font-size:11px;color:var(--text-dim)">Conta</label>
       <select id="jCredential" style="width:100%;margin:4px 0 12px;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px"></select>
       <label style="font-size:11px;color:var(--text-dim)">Pasta no cloud (ID)</label>
@@ -295,7 +295,7 @@
       <div id="jError" style="color:#e05;font-size:11px;margin-bottom:10px;display:none"></div>
       <div style="display:flex;gap:8px;justify-content:flex-end">
         <button class="hbtn" onclick="closeJobModal()">Cancelar</button>
-        <button class="hbtn" style="background:var(--amber);color:#000" onclick="saveJob()">Criar job</button>
+        <button id="jSaveBtn" class="hbtn" style="background:var(--amber);color:#000" onclick="saveJob()">Criar job</button>
       </div>
     </div>
   </div>
@@ -741,6 +741,7 @@
   async function loadCloudJobs() {
     const r = await fetch('/cloud/jobs', {headers: H()});
     const jobs = r.ok ? await r.json() : [];
+    _jobsCache = Object.fromEntries(jobs.map(j => [j.id, j]));
     const el = document.getElementById('cloudJobsWrap');
     if (!jobs.length) { el.innerHTML = '<div class="empty">Nenhum job configurado — conecte uma conta e clique em "+ Job"</div>'; return; }
     el.innerHTML = `<table class="backup-table"><thead><tr>
@@ -759,6 +760,7 @@
         <td title="${esc(j.last_run_message||'')}">  ${status}</td>
         <td>
           <button class="small-btn" onclick="runJobNow(${j.id})" title="${esc(j.last_run_message||'')}">▶ Run</button>
+          <button class="small-btn" onclick="editJob(${j.id})">✎</button>
           <button class="small-btn" onclick="deleteJob(${j.id})">✕</button>
         </td>
       </tr>`;
@@ -766,6 +768,7 @@
   }
 
   let _authState = null, _authProvider = null;
+  let _editingJobId = null, _jobsCache = {};
 
   async function connectCloud(provider) {
     const r = await fetch(`/cloud/accounts/${provider}/auth?manual=true`, {headers: H()});
@@ -820,10 +823,12 @@
   }
 
   function openJobModal(credentialId) {
+    _editingJobId = null;
+    document.getElementById('cloudModalTitle').textContent = 'Novo job de backup';
+    document.getElementById('jSaveBtn').textContent = 'Criar job';
     const sel = document.getElementById('jCredential');
-    // Mantém apenas a opção da conta selecionada (já temos o id)
+    sel.disabled = false;
     sel.innerHTML = `<option value="${credentialId}">${credentialId}</option>`;
-    // Preenche com nomes reais
     fetch('/cloud/accounts', {headers: H()}).then(r => r.json()).then(accounts => {
       sel.innerHTML = accounts.map(a =>
         `<option value="${a.id}" ${a.id===credentialId?'selected':''}>${providerLabel[a.provider]||a.provider} — ${esc(a.email)}</option>`
@@ -834,26 +839,54 @@
     document.getElementById('cloudModal').style.display = 'flex';
   }
 
+  function editJob(jobId) {
+    const j = _jobsCache[jobId];
+    if (!j) return;
+    _editingJobId = jobId;
+    document.getElementById('cloudModalTitle').textContent = 'Editar job de backup';
+    document.getElementById('jSaveBtn').textContent = 'Salvar';
+    const sel = document.getElementById('jCredential');
+    sel.disabled = true;
+    sel.innerHTML = `<option value="${j.credential_id}">${providerLabel[j.provider]||j.provider} — ${esc(j.email)}</option>`;
+    document.getElementById('jFolderId').value = j.folder_id;
+    document.getElementById('jFolderName').value = j.folder_name;
+    document.getElementById('jLabel').value = j.target_label;
+    document.getElementById('jCron').value = j.cron_expr || '';
+    document.getElementById('jError').style.display = 'none';
+    document.getElementById('cloudModal').style.display = 'flex';
+  }
+
   function closeJobModal() {
     document.getElementById('cloudModal').style.display = 'none';
+    _editingJobId = null;
   }
 
   async function saveJob() {
     const errEl = document.getElementById('jError');
     errEl.style.display = 'none';
-    const body = {
-      credential_id: parseInt(document.getElementById('jCredential').value),
-      folder_id:    document.getElementById('jFolderId').value.trim(),
-      folder_name:  document.getElementById('jFolderName').value.trim(),
-      target_label: document.getElementById('jLabel').value.trim(),
-      cron_expr:    document.getElementById('jCron').value.trim() || null,
-    };
-    if (!body.folder_id || !body.folder_name || !body.target_label) {
+    const folder_id   = document.getElementById('jFolderId').value.trim();
+    const folder_name = document.getElementById('jFolderName').value.trim();
+    const target_label = document.getElementById('jLabel').value.trim();
+    const cron_expr   = document.getElementById('jCron').value.trim() || null;
+    if (!folder_id || !folder_name || !target_label) {
       errEl.textContent = 'Preencha pasta (ID), nome da pasta e label destino';
       errEl.style.display = 'block'; return;
     }
-    const r = await fetch('/cloud/jobs', {method:'POST', headers:{...H(),'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    if (!r.ok) { const d = await r.json(); errEl.textContent = d.detail||'Erro ao criar job'; errEl.style.display='block'; return; }
+    let r;
+    if (_editingJobId) {
+      r = await fetch(`/cloud/jobs/${_editingJobId}`, {
+        method: 'PATCH',
+        headers: {...H(), 'Content-Type': 'application/json'},
+        body: JSON.stringify({folder_id, folder_name, target_label, cron_expr}),
+      });
+    } else {
+      const body = {
+        credential_id: parseInt(document.getElementById('jCredential').value),
+        folder_id, folder_name, target_label, cron_expr,
+      };
+      r = await fetch('/cloud/jobs', {method:'POST', headers:{...H(),'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    }
+    if (!r.ok) { const d = await r.json(); errEl.textContent = d.detail||'Erro ao salvar job'; errEl.style.display='block'; return; }
     closeJobModal();
     loadCloudJobs();
   }

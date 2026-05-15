@@ -4,7 +4,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from database import (
@@ -64,7 +64,7 @@ async def _fresh_token(credential: CloudCredential, db: Session) -> str:
     needs_refresh = (
         not credential.access_token
         or credential.token_expiry is None
-        or credential.token_expiry <= datetime.now(timezone.utc) + timedelta(minutes=5)
+        or credential.token_expiry.replace(tzinfo=timezone.utc) <= datetime.now(timezone.utc) + timedelta(minutes=5)
     )
     if needs_refresh:
         provider = _get_provider(credential.provider)
@@ -84,6 +84,12 @@ class AccountOut(BaseModel):
     display_name: Optional[str]
     created_at: str
 
+def _clean_folder_id(v: str) -> str:
+    """Aceita URL completa do Drive ou só o ID; extrai só o ID."""
+    if "/" in v:
+        v = v.rstrip("/").split("/")[-1]
+    return v.split("?")[0]
+
 class JobCreate(BaseModel):
     credential_id: int
     folder_id: str
@@ -92,12 +98,20 @@ class JobCreate(BaseModel):
     cron_expr: Optional[str] = None
     enabled: bool = True
 
+    @field_validator("folder_id")
+    @classmethod
+    def clean_folder_id(cls, v): return _clean_folder_id(v)
+
 class JobUpdate(BaseModel):
     folder_id: Optional[str] = None
     folder_name: Optional[str] = None
     target_label: Optional[str] = None
     cron_expr: Optional[str] = None
     enabled: Optional[bool] = None
+
+    @field_validator("folder_id")
+    @classmethod
+    def clean_folder_id(cls, v): return _clean_folder_id(v) if v else v
 
 class JobOut(BaseModel):
     id: int
