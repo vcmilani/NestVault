@@ -13,7 +13,7 @@ from sqlalchemy import (
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
-import os
+import os, hashlib, base64
 
 DB_PATH = os.getenv("DB_PATH", "./backup.db")
 
@@ -113,6 +113,64 @@ class VersionFile(Base):
 
     version = relationship("BackupVersion", back_populates="files")
     content = relationship("FileContent", back_populates="refs")
+
+
+class CloudCredential(Base):
+    __tablename__ = "cloud_credentials"
+
+    id           = Column(Integer, primary_key=True)
+    provider     = Column(String, nullable=False, index=True)  # "gdrive" | "onedrive"
+    email        = Column(String, nullable=False)
+    display_name = Column(String, nullable=True)
+    access_token = Column(String, nullable=True)
+    refresh_token = Column(String, nullable=False)  # armazenado criptografado
+    token_expiry = Column(DateTime, nullable=True)
+    created_at   = Column(DateTime, default=datetime.utcnow)
+
+    jobs = relationship("CloudBackupJob", back_populates="credential", cascade="all, delete-orphan")
+
+
+class CloudBackupJob(Base):
+    __tablename__ = "cloud_backup_jobs"
+
+    id              = Column(Integer, primary_key=True)
+    credential_id   = Column(Integer, ForeignKey("cloud_credentials.id"), nullable=False, index=True)
+    folder_id       = Column(String, nullable=False)
+    folder_name     = Column(String, nullable=False)
+    target_label    = Column(String, nullable=False)
+    cron_expr       = Column(String, nullable=True)
+    enabled         = Column(Boolean, default=True, nullable=False)
+    last_run_at     = Column(DateTime, nullable=True)
+    last_run_status = Column(String, nullable=True)   # "running" | "success" | "error"
+    last_run_message = Column(String, nullable=True)
+    created_at      = Column(DateTime, default=datetime.utcnow)
+
+    credential = relationship("CloudCredential", back_populates="jobs")
+
+
+# -- Token encryption ---------------------------------------------------------
+def _token_cipher():
+    api_key = os.getenv("BACKUP_API_KEY", "")
+    if not api_key:
+        return None
+    from cryptography.fernet import Fernet
+    key = base64.urlsafe_b64encode(hashlib.sha256(api_key.encode()).digest())
+    return Fernet(key)
+
+
+def encrypt_token(token: str) -> str:
+    cipher = _token_cipher()
+    return cipher.encrypt(token.encode()).decode() if cipher else token
+
+
+def decrypt_token(encrypted: str) -> str:
+    cipher = _token_cipher()
+    if not cipher:
+        return encrypted
+    try:
+        return cipher.decrypt(encrypted.encode()).decode()
+    except Exception:
+        return encrypted  # já em texto simples (migração de banco sem API_KEY)
 
 
 def init_db():

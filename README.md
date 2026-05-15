@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v3.1`
+# 🗄️ NestVault  `v4.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 

@@ -24,6 +24,9 @@ from sqlalchemy.orm import Session
 
 from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile
 import crypto
+import storage
+from cloud.router import router as cloud_router
+import scheduler as sched
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,183 +35,59 @@ logging.basicConfig(
 )
 log = logging.getLogger("backup-server")
 
-# -- Config -------------------------------------------------------------------
-_raw_dirs    = os.getenv("STORAGE_DIRS") or os.getenv("STORAGE_DIR", "./storage")
-STORAGE_VOLUMES: list[Path] = [Path(p.strip()) for p in _raw_dirs.split(",") if p.strip()]
-STORAGE_DIR  = STORAGE_VOLUMES[0]   # alias para retrocompatibilidade
-for _v in STORAGE_VOLUMES:
-    _v.mkdir(parents=True, exist_ok=True)
+# -- Config (aliases de storage para retrocompatibilidade) --------------------
+STORAGE_VOLUMES      = storage.STORAGE_VOLUMES
+STORAGE_DIR          = storage.STORAGE_DIR
+ENCRYPTION_ENABLED   = storage.ENCRYPTION_ENABLED
+CHUNK_SIZE           = storage.CHUNK_SIZE
+REPLICATION_FACTOR   = storage.REPLICATION_FACTOR
+CLEANUP_MIN_FREE_PCT = storage.CLEANUP_MIN_FREE_PCT
 
 API_KEY      = os.getenv("BACKUP_API_KEY", "")
 STATIC_DIR   = Path(__file__).parent / "static"
 AUTH_ENABLED = bool(API_KEY)
 
-ENCRYPTION_ENABLED = os.getenv("ENCRYPTION_ENABLED", "false").lower() == "true"
-_encryption_key: bytes | None = None
-
-# Buffer de leitura/escrita - 1 MB e bem mais rapido que 64KB no I/O
-CHUNK_SIZE = 1024 * 1024
-
-REPLICATION_FACTOR = int(os.getenv("REPLICATION_FACTOR", "1"))
-# 1 = sem replicação (padrão — comportamento original, compatível com RAID físico/ZFS)
-# 2+ = replicar para N volumes
-# 0 = espelhar para todos os volumes saudáveis
-
-CLEANUP_MIN_FREE_PCT = float(os.getenv("STORAGE_MIN_FREE_PCT", "5.0"))
-
-# -- Volume health ------------------------------------------------------------
-_degraded_volumes: set[Path] = set()
+# Atalhos locais para os helpers de storage
+_degraded_volumes        = storage._degraded_volumes
+_safe_disk_usage         = storage.safe_disk_usage
+_healthy_volumes         = storage.healthy_volumes
+_target_replicas         = storage.target_replicas
+_content_path            = storage.content_path
+_ensure_replicas         = storage.ensure_replicas
+_rereplicate_to_volume   = storage.rereplicate_to_volume
+_backfill_content_copies = storage.backfill_content_copies
+_volume_health_monitor   = storage.volume_health_monitor
+_volumes_with_free_space = storage.volumes_with_free_space
 
 
-def _safe_disk_usage(v: Path) -> tuple | None:
-    """Retorna disk_usage ou None se o volume estiver inacessível (marca como degraded)."""
+def _pick_volume() -> Path:
     try:
-        result = shutil.disk_usage(v)
-        _degraded_volumes.discard(v)
-        return result
-    except OSError:
-        if v not in _degraded_volumes:
-            log.error(f"[volume] {v} inacessível — marcado como degraded")
-            _degraded_volumes.add(v)
-        return None
-
-
-def _healthy_volumes() -> list[Path]:
-    return [v for v in STORAGE_VOLUMES if v not in _degraded_volumes]
-
-
-def _target_replicas() -> int:
-    healthy = len(_healthy_volumes())
-    factor  = REPLICATION_FACTOR if REPLICATION_FACTOR > 0 else len(STORAGE_VOLUMES)
-    if healthy < factor:
-        log.warning(f"[replication] fator={factor} > volumes saudáveis={healthy}")
-    return min(factor, max(1, healthy))
-
-
-def _ensure_replicas(sha256: str, source_path: Path, db: Session) -> None:
-    """Copia para volumes adicionais até atingir _target_replicas()."""
-    target  = _target_replicas()
-    copies  = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).all()
-    vol_set = {c.volume_path for c in copies}
-    added   = []
-    for vol in _healthy_volumes():
-        if len(copies) >= target:
-            break
-        if str(vol) in vol_set:
-            continue
-        try:
-            dest = _content_path(sha256, vol)
-            log.info(f"[replication] {sha256[:8]}… → {vol}")
-            shutil.copy2(str(source_path), str(dest))
-            copy = FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(vol))
-            db.add(copy)
-            copies.append(copy)
-            vol_set.add(str(vol))
-            added.append(str(vol))
-            log.info(f"[replication] {sha256[:8]}… copiado para {vol} com sucesso")
-        except OSError as e:
-            log.warning(f"[replication] Falha ao replicar {sha256} para {vol}: {e}")
-    if added:
-        log.info(f"[replication] {sha256[:8]}… replicação concluída — {len(added)} nova(s) cópia(s): {added}")
-
-
-def _rereplicate_to_volume(v: Path) -> None:
-    db = SessionLocal()
-    try:
-        log.info(f"[rereplicate] Iniciando re-replicação para {v}")
-        shas_on_v = {r.sha256 for r in db.query(FileContentCopy.sha256)
-                                          .filter(FileContentCopy.volume_path == str(v)).all()}
-        target = _target_replicas()
-        underfilled = (
-            db.query(FileContent.sha256, func.count(FileContentCopy.id).label("cnt"))
-            .outerjoin(FileContentCopy, FileContentCopy.sha256 == FileContent.sha256)
-            .group_by(FileContent.sha256)
-            .having(func.count(FileContentCopy.id) < target)
-            .all()
-        )
-        total_under = len(underfilled)
-        count = 0
-        for (sha256, _) in underfilled:
-            if sha256 in shas_on_v:
-                continue
-            source = (db.query(FileContentCopy)
-                        .filter(FileContentCopy.sha256 == sha256,
-                                ~FileContentCopy.volume_path.in_([str(d) for d in _degraded_volumes]))
-                        .first())
-            if not source:
-                continue
-            try:
-                dest = _content_path(sha256, v)
-                log.info(f"[rereplicate] [{count + 1}/{total_under}] {sha256[:8]}… → {v}")
-                shutil.copy2(source.stored_at, str(dest))
-                db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(v)))
-                count += 1
-                log.info(f"[rereplicate] [{count}/{total_under}] {sha256[:8]}… copiado com sucesso")
-            except OSError as e:
-                log.warning(f"[rereplicate] Erro em {v}: {e} — abortando")
-                break
-        if count:
-            db.commit()
-            log.info(f"[rereplicate] {count} arquivo(s) re-replicados para {v}")
-        else:
-            log.info(f"[rereplicate] Nenhum arquivo sub-replicado encontrado para {v}")
-    finally:
-        db.close()
-
-
-def _backfill_content_copies() -> None:
-    """Cria FileContentCopy para FileContent sem cópia (instâncias existentes)."""
-    db = SessionLocal()
-    try:
-        existing_shas = {r.sha256 for r in db.query(FileContentCopy.sha256).distinct().all()}
-        to_fill = (db.query(FileContent).filter(~FileContent.sha256.in_(existing_shas)).all()
-                   if existing_shas else db.query(FileContent).all())
-        count = 0
-        for fc in to_fill:
-            p = Path(fc.stored_at)
-            vol = str(p.parents[2])  # {volume}/_content/{xx}/{sha256} → parents[2] = volume
-            db.add(FileContentCopy(sha256=fc.sha256, stored_at=fc.stored_at, volume_path=vol))
-            count += 1
-        if count:
-            db.commit()
-            log.info(f"[backfill] {count} entrada(s) migradas para file_content_copies")
-        else:
-            log.info("[backfill] Nenhuma entrada para migrar — file_content_copies já atualizado")
-    except Exception as e:
-        log.error(f"[backfill] Erro: {e}")
-    finally:
-        db.close()
-
-
-async def _volume_health_monitor() -> None:
-    """Tenta recuperar volumes degraded a cada 60 s."""
-    while True:
-        await asyncio.sleep(60)
-        for v in list(_degraded_volumes):
-            usage = _safe_disk_usage(v)
-            if usage:
-                log.info(f"[volume] {v} recuperado — iniciando re-replicação")
-                asyncio.get_event_loop().run_in_executor(None, _rereplicate_to_volume, v)
+        return storage.pick_volume()
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global _encryption_key
     init_db()
     if ENCRYPTION_ENABLED:
-        _encryption_key = crypto.load_key()  # lança ValueError se inválida — falha rápido
+        storage.encryption_key = crypto.load_key()  # lança ValueError se inválida — falha rápido
         log.info("Criptografia: habilitada (AES-256-GCM)")
     else:
         log.info("Criptografia: desabilitada")
     asyncio.get_event_loop().run_in_executor(None, _backfill_content_copies)
     monitor = asyncio.create_task(_volume_health_monitor())
+    sched.scheduler.start()
+    sched.reload_jobs_from_db()
     log.info(f"Servidor iniciado — {len(STORAGE_VOLUMES)} volume(s): {[str(v) for v in STORAGE_VOLUMES]}")
     log.info(f"Auth: {'habilitada' if AUTH_ENABLED else 'desabilitada'}")
     yield
     monitor.cancel()
+    sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="3.1.6", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="4.0.0", lifespan=lifespan)
+app.include_router(cloud_router)
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -709,7 +588,7 @@ def explorer_page():
 
 @app.get("/health", response_model=HealthResponse)
 def health():
-    return HealthResponse(status="ok", version="3.1.6", time=datetime.now(timezone.utc).isoformat())
+    return HealthResponse(status="ok", version="4.0.0", time=datetime.now(timezone.utc).isoformat())
 
 
 @app.get("/storage/info", response_model=StorageInfoResponse, dependencies=[Depends(require_api_key)])
@@ -1029,7 +908,7 @@ async def upload_file(
                     log.info(f"[upload] cifrando {original_path!r} ({size / 1024 / 1024:.2f} MB) — sha256={sha256[:8]}…")
                     tmp_enc = dest.parent / f"_enc_{os.urandom(4).hex()}"
                     try:
-                        crypto.encrypt_stream(dest, tmp_enc, _encryption_key)
+                        crypto.encrypt_stream(dest, tmp_enc, storage.encryption_key)
                         shutil.move(str(tmp_enc), str(dest))
                         log.info(f"[upload] {sha256[:8]}… cifrado com sucesso")
                     except Exception:
@@ -1135,7 +1014,7 @@ def download_file(file_id: int, db: Session = Depends(get_db)):
             if p.exists():
                 if is_encrypted:
                     return StreamingResponse(
-                        crypto.decrypt_chunks(p, _encryption_key),
+                        crypto.decrypt_chunks(p, storage.encryption_key),
                         media_type="application/octet-stream",
                         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
                     )
@@ -1286,7 +1165,7 @@ def encrypt_existing_files(db: Session = Depends(get_db)):
             log.info(f"[encrypt-existing] [{i}/{total}] cifrando cópia em {copy.volume_path}")
             tmp_enc = p.parent / f"_enc_{os.urandom(4).hex()}"
             try:
-                crypto.encrypt_stream(p, tmp_enc, _encryption_key)
+                crypto.encrypt_stream(p, tmp_enc, storage.encryption_key)
                 shutil.move(str(tmp_enc), str(p))
                 log.info(f"[encrypt-existing] [{i}/{total}] cópia em {copy.volume_path} cifrada com sucesso")
             except Exception as e:
