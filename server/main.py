@@ -942,6 +942,7 @@ async def upload_file(
                     else:
                         try:
                             _verify_stored_file(sha256, stored, encrypted=fc.encrypted)
+                            log.info(f"[integrity] {original_path!r} verificado OK — sha256={sha256[:8]}… (dedup)")
                             _ensure_replicas(sha256, stored, db)
                             tmp_path.unlink(missing_ok=True)
                         except HTTPException:
@@ -960,12 +961,13 @@ async def upload_file(
                         crypto.encrypt_stream(dest, tmp_enc, storage.encryption_key)
                         shutil.move(str(tmp_enc), str(dest))
                         _verify_stored_file(sha256, dest, encrypted=True)
-                        log.info(f"[upload] {sha256[:8]}… cifrado com sucesso")
+                        log.info(f"[integrity] {original_path!r} cifrado e verificado OK — sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
                     except Exception:
                         tmp_enc.unlink(missing_ok=True)
                         raise
                 else:
                     _verify_stored_file(sha256, dest, encrypted=False)
+                    log.info(f"[integrity] {original_path!r} verificado OK — sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
                 fc = FileContent(sha256=sha256, stored_at=str(dest), size=size,
                                  encrypted=ENCRYPTION_ENABLED)
                 db.add(fc)
