@@ -5,7 +5,7 @@ Extracted from main.py so that the cloud backup module can reuse
 volume selection, replication, and encryption logic without
 creating a circular import.
 """
-import os, shutil, logging, asyncio
+import os, shutil, logging, asyncio, threading
 from pathlib import Path
 
 log = logging.getLogger("backup-server")
@@ -29,16 +29,19 @@ STORAGE_FALLBACK_THRESHOLD_PCT = float(os.getenv("STORAGE_FALLBACK_THRESHOLD_PCT
 
 # -- Volume health ------------------------------------------------------------
 _degraded_volumes: set[Path] = set()
+_deg_lock = threading.Lock()
 
 
 def safe_disk_usage(v: Path):
     try:
         result = shutil.disk_usage(v)
-        _degraded_volumes.discard(v)
+        with _deg_lock:
+            _degraded_volumes.discard(v)
         return result
     except OSError:
-        if v not in _degraded_volumes:
-            log.error(f"[volume] {v} inacessível — marcado como degraded")
+        with _deg_lock:
+            if v not in _degraded_volumes:
+                log.error(f"[volume] {v} inacessível — marcado como degraded")
             _degraded_volumes.add(v)
         return None
 
@@ -158,6 +161,7 @@ def cleanup_excess_copies(db) -> int:
             return (not is_primary, not is_healthy)
 
         copies.sort(key=_sort_key)
+        kept = copies[:target]
         for copy in copies[target:]:
             try:
                 Path(copy.stored_at).unlink(missing_ok=True)
@@ -165,6 +169,9 @@ def cleanup_excess_copies(db) -> int:
                 log.warning(f"[cleanup-excess] Falha ao deletar {copy.stored_at}: {e}")
             db.delete(copy)
             removed += 1
+        # Garantir que FileContent.stored_at aponta para uma cópia ainda existente
+        if primary and kept and primary.stored_at not in {c.stored_at for c in kept}:
+            primary.stored_at = kept[0].stored_at
     if removed:
         db.commit()
     log.info(f"[cleanup-excess] concluído — {removed} cópia(s) excedente(s) removida(s)")
@@ -227,6 +234,7 @@ def rereplicate_to_volume(v: Path) -> None:
 
 def backfill_content_copies() -> None:
     from database import SessionLocal, FileContent, FileContentCopy
+    from sqlalchemy.exc import IntegrityError
     db = SessionLocal()
     try:
         existing_shas = {r.sha256 for r in db.query(FileContentCopy.sha256).distinct().all()}
@@ -236,8 +244,12 @@ def backfill_content_copies() -> None:
         for fc in to_fill:
             p = Path(fc.stored_at)
             vol = str(p.parents[2])
-            db.add(FileContentCopy(sha256=fc.sha256, stored_at=fc.stored_at, volume_path=vol))
-            count += 1
+            try:
+                db.add(FileContentCopy(sha256=fc.sha256, stored_at=fc.stored_at, volume_path=vol))
+                db.flush()
+                count += 1
+            except IntegrityError:
+                db.rollback()  # upload concorrente já criou a entrada — ok
         if count:
             db.commit()
             log.info(f"[backfill] {count} entrada(s) migradas para file_content_copies")
@@ -252,8 +264,10 @@ def backfill_content_copies() -> None:
 async def volume_health_monitor() -> None:
     while True:
         await asyncio.sleep(60)
-        for v in list(_degraded_volumes):
+        with _deg_lock:
+            degraded_snapshot = list(_degraded_volumes)
+        for v in degraded_snapshot:
             usage = safe_disk_usage(v)
             if usage:
                 log.info(f"[volume] {v} recuperado — iniciando re-replicação")
-                asyncio.get_event_loop().run_in_executor(None, rereplicate_to_volume, v)
+                asyncio.get_running_loop().run_in_executor(None, rereplicate_to_volume, v)
