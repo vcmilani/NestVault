@@ -90,6 +90,73 @@ def ensure_replicas(sha256: str, source_path: Path, db) -> None:
         log.info(f"[replication] {sha256[:8]}… → {len(added)} nova(s) cópia(s): {added}")
 
 
+def rereplicate_all(db) -> tuple[int, int]:
+    from database import FileContent, FileContentCopy
+    from sqlalchemy import func
+    target = target_replicas()
+    degraded_strs = [str(d) for d in _degraded_volumes]
+    underfilled = (
+        db.query(FileContent.sha256, func.count(FileContentCopy.id).label("cnt"))
+        .outerjoin(FileContentCopy, FileContentCopy.sha256 == FileContent.sha256)
+        .group_by(FileContent.sha256)
+        .having(func.count(FileContentCopy.id) < target)
+        .all()
+    )
+    replicated = skipped = 0
+    log.info(f"[rereplicate-all] {len(underfilled)} arquivo(s) sub-replicado(s) — alvo: {target}")
+    for sha256, _ in underfilled:
+        q = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256)
+        if degraded_strs:
+            q = q.filter(~FileContentCopy.volume_path.in_(degraded_strs))
+        source = q.first()
+        if not source:
+            log.warning(f"[rereplicate-all] {sha256[:8]}… sem fonte acessível — pulando")
+            skipped += 1
+            continue
+        ensure_replicas(sha256, Path(source.stored_at), db)
+        replicated += 1
+    db.commit()
+    log.info(f"[rereplicate-all] concluído — {replicated} replicado(s), {skipped} pulado(s)")
+    return replicated, skipped
+
+
+def cleanup_excess_copies(db) -> int:
+    from database import FileContent, FileContentCopy
+    from sqlalchemy import func
+    target = target_replicas()
+    overfilled = (
+        db.query(FileContent.sha256, func.count(FileContentCopy.id).label("cnt"))
+        .outerjoin(FileContentCopy, FileContentCopy.sha256 == FileContent.sha256)
+        .group_by(FileContent.sha256)
+        .having(func.count(FileContentCopy.id) > target)
+        .all()
+    )
+    removed = 0
+    log.info(f"[cleanup-excess] {len(overfilled)} arquivo(s) com cópias excedentes — alvo: {target}")
+    for sha256, _ in overfilled:
+        primary = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+        primary_path = primary.stored_at if primary else None
+        copies = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).all()
+
+        def _sort_key(c: FileContentCopy):
+            is_primary = c.stored_at == primary_path
+            is_healthy = Path(c.volume_path) not in _degraded_volumes
+            return (not is_primary, not is_healthy)
+
+        copies.sort(key=_sort_key)
+        for copy in copies[target:]:
+            try:
+                Path(copy.stored_at).unlink(missing_ok=True)
+            except OSError as e:
+                log.warning(f"[cleanup-excess] Falha ao deletar {copy.stored_at}: {e}")
+            db.delete(copy)
+            removed += 1
+    if removed:
+        db.commit()
+    log.info(f"[cleanup-excess] concluído — {removed} cópia(s) excedente(s) removida(s)")
+    return removed
+
+
 def volumes_with_free_space() -> int:
     count = 0
     for v in STORAGE_VOLUMES:

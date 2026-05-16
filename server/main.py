@@ -55,6 +55,8 @@ _target_replicas         = storage.target_replicas
 _content_path            = storage.content_path
 _ensure_replicas         = storage.ensure_replicas
 _rereplicate_to_volume   = storage.rereplicate_to_volume
+_rereplicate_all         = storage.rereplicate_all
+_cleanup_excess_copies   = storage.cleanup_excess_copies
 _backfill_content_copies = storage.backfill_content_copies
 _volume_health_monitor   = storage.volume_health_monitor
 _volumes_with_free_space = storage.volumes_with_free_space
@@ -238,6 +240,12 @@ class OrphanCleanupResponse(BaseModel):
 class RereplicateResponse(BaseModel):
     replicated: int
     skipped: int
+    target_copies: int
+
+class ReconcileResponse(BaseModel):
+    replicated: int
+    skipped: int
+    cleaned: int
     target_copies: int
 
 class EncryptExistingResponse(BaseModel):
@@ -1094,37 +1102,21 @@ def force_cleanup_orphans(db: Session = Depends(get_db)):
 @app.post("/maintenance/rereplicate", response_model=RereplicateResponse, dependencies=[Depends(require_api_key)])
 def force_rereplicate(db: Session = Depends(get_db)):
     """Re-replica conteúdos com menos cópias que REPLICATION_FACTOR. Útil após adicionar um disco novo."""
-    target = _target_replicas()
-    degraded_strs = [str(d) for d in _degraded_volumes]
+    replicated, skipped = _rereplicate_all(db)
+    return RereplicateResponse(replicated=replicated, skipped=skipped, target_copies=_target_replicas())
 
-    underfilled = (
-        db.query(FileContent.sha256, func.count(FileContentCopy.id).label("cnt"))
-        .outerjoin(FileContentCopy, FileContentCopy.sha256 == FileContent.sha256)
-        .group_by(FileContent.sha256)
-        .having(func.count(FileContentCopy.id) < target)
-        .all()
+
+@app.post("/maintenance/reconcile-replication", response_model=ReconcileResponse, dependencies=[Depends(require_api_key)])
+def reconcile_replication(db: Session = Depends(get_db)):
+    """Remove cópias excedentes e preenche arquivos sub-replicados conforme REPLICATION_FACTOR."""
+    cleaned = _cleanup_excess_copies(db)
+    replicated, skipped = _rereplicate_all(db)
+    return ReconcileResponse(
+        replicated=replicated,
+        skipped=skipped,
+        cleaned=cleaned,
+        target_copies=_target_replicas(),
     )
-
-    replicated = 0
-    skipped = 0
-    total_under = len(underfilled)
-    log.info(f"[maintenance/rereplicate] {total_under} arquivo(s) com replicação abaixo do fator {target}")
-    for idx, (sha256, _) in enumerate(underfilled, 1):
-        q = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256)
-        if degraded_strs:
-            q = q.filter(~FileContentCopy.volume_path.in_(degraded_strs))
-        source = q.first()
-        if not source:
-            log.warning(f"[maintenance/rereplicate] [{idx}/{total_under}] {sha256[:8]}… sem fonte acessível — pulando")
-            skipped += 1
-            continue
-        log.info(f"[maintenance/rereplicate] [{idx}/{total_under}] {sha256[:8]}… replicando a partir de {source.volume_path}")
-        _ensure_replicas(sha256, Path(source.stored_at), db)
-        replicated += 1
-
-    db.commit()
-    log.info(f"[maintenance/rereplicate] concluído — {replicated} replicado(s), {skipped} pulado(s) (sem fonte acessível)")
-    return RereplicateResponse(replicated=replicated, skipped=skipped, target_copies=target)
 
 
 @app.post("/maintenance/encrypt-existing", response_model=EncryptExistingResponse, dependencies=[Depends(require_api_key)])

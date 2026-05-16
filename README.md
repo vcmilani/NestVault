@@ -402,7 +402,7 @@ export BACKUP_API_KEY="uma-chave-secreta-forte-aqui"
 
 ## 🚀 Comandos
 
-O cliente possui nove subcomandos: `backup`, `backups`, `versions`, `restore`, `cleanup`, `delete-label`, `cleanup-orphans`, `rereplicate` e `encrypt-existing`.
+O cliente possui dez subcomandos: `backup`, `backups`, `versions`, `restore`, `cleanup`, `delete-label`, `cleanup-orphans`, `rereplicate`, `reconcile-replication` e `encrypt-existing`.
 
 ---
 
@@ -783,6 +783,32 @@ Re-replicacao concluida: 312 arquivo(s) replicado(s), 0 pulado(s) (fonte inacess
 ```
 
 Se `skipped > 0`, significa que alguns arquivos têm a única cópia em um volume `degraded` — eles não puderam ser replicados. Recupere o disco e execute o comando novamente.
+
+---
+
+### reconcile-replication
+
+Reconcilia o acervo inteiro com o `REPLICATION_FACTOR` atual do servidor, resolvendo **ambas** as direções:
+
+- **Sub-replicados** (fator aumentou ou disco foi adicionado): cria cópias faltantes
+- **Sobre-replicados** (fator diminuiu): remove cópias excedentes do disco e do banco
+
+```bash
+nestvault reconcile-replication \
+  --server http://192.168.1.100:8000
+```
+
+| Opção | Descrição |
+|-------|-----------|
+| `--server` | URL do servidor |
+
+Exemplo de saída:
+
+```
+Reconciliacao concluida: 40 replicado(s), 80 copia(s) excedente(s) removida(s), 0 pulado(s) — alvo: 1 copia(s)
+```
+
+Se `skipped > 0`, algum arquivo tem a única cópia em volume `degraded`. Recupere o disco e execute novamente.
 
 ---
 
@@ -1254,6 +1280,7 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 |--------|----------|-----------|
 | `POST` | `/maintenance/cleanup-orphans` | Remove todos os arquivos físicos não referenciados por nenhuma versão |
 | `POST` | `/maintenance/rereplicate` | Re-replica conteúdos com menos cópias que `REPLICATION_FACTOR` |
+| `POST` | `/maintenance/reconcile-replication` | Reconcilia replicação: remove cópias excedentes e preenche faltantes conforme `REPLICATION_FACTOR` |
 | `POST` | `/maintenance/encrypt-existing` | Cifra arquivos físicos ainda não criptografados (requer `ENCRYPTION_ENABLED=true`) |
 
 ### Cloud Backup *(v4.0)*
@@ -1280,6 +1307,8 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 > `/maintenance/cleanup-orphans` — retorna `{ "files_removed": N, "bytes_freed": N }`. Útil após deleções em massa. Operação **síncrona**.
 >
 > `/maintenance/rereplicate` — retorna `{ "replicated": N, "skipped": N, "target_copies": N }`. `replicated` = arquivos que receberam ao menos uma nova cópia. `skipped` = arquivos cuja única cópia está em volume `degraded`. Operação **síncrona** — pode demorar em acervos grandes.
+>
+> `/maintenance/reconcile-replication` — retorna `{ "replicated": N, "skipped": N, "cleaned": N, "target_copies": N }`. Remove cópias excedentes e preenche arquivos sub-replicados em uma única chamada. Útil ao reduzir ou aumentar `REPLICATION_FACTOR`. Operação **síncrona** — pode demorar em acervos grandes.
 >
 > `/maintenance/encrypt-existing` — retorna `{ "files_encrypted": N, "bytes_processed": N, "skipped": N }`. `skipped` inclui arquivos sem cópia acessível (volume degraded) e erros de I/O. Operação **síncrona** — use timeout longo em acervos grandes (cliente usa 600 s). Retorna `400` se `ENCRYPTION_ENABLED=false`.
 
