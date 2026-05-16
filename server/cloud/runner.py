@@ -37,7 +37,7 @@ async def _fresh_access_token(credential: CloudCredential, db) -> str:
     needs_refresh = (
         not credential.access_token
         or credential.token_expiry is None
-        or credential.token_expiry.replace(tzinfo=timezone.utc) <= datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=5)
+        or credential.token_expiry <= datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=5)
     )
     if needs_refresh:
         provider = _get_provider(credential.provider)
