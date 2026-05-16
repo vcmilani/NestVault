@@ -42,6 +42,7 @@ ENCRYPTION_ENABLED   = storage.ENCRYPTION_ENABLED
 CHUNK_SIZE           = storage.CHUNK_SIZE
 REPLICATION_FACTOR   = storage.REPLICATION_FACTOR
 CLEANUP_MIN_FREE_PCT = storage.CLEANUP_MIN_FREE_PCT
+STORAGE_FALLBACK_THRESHOLD_PCT = storage.STORAGE_FALLBACK_THRESHOLD_PCT
 
 API_KEY      = os.getenv("BACKUP_API_KEY", "")
 STATIC_DIR   = Path(__file__).parent / "static"
@@ -88,7 +89,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="4.1.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="4.2.0", lifespan=lifespan)
 app.include_router(cloud_router)
 
 if STATIC_DIR.exists():
@@ -293,14 +294,6 @@ class CompareResponse(BaseModel):
 
 
 # -- Helpers ------------------------------------------------------------------
-def _pick_volume() -> Path:
-    """Escolhe o volume saudável com mais espaço livre para o próximo upload."""
-    healthy = _healthy_volumes()
-    if not healthy:
-        raise HTTPException(503, "Nenhum volume de storage disponível")
-    return max(healthy, key=lambda v: _safe_disk_usage(v).free)
-
-
 def _content_path(sha256: str, volume: Path) -> Path:
     dest = volume / "_content" / sha256[:2] / sha256
     dest.parent.mkdir(parents=True, exist_ok=True)

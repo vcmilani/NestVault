@@ -23,6 +23,9 @@ encryption_key: bytes | None = None  # set by main.py lifespan: storage.encrypti
 CHUNK_SIZE = 1024 * 1024
 REPLICATION_FACTOR = int(os.getenv("REPLICATION_FACTOR", "1"))
 CLEANUP_MIN_FREE_PCT = float(os.getenv("STORAGE_MIN_FREE_PCT", "5.0"))
+# Limiar abaixo do qual um volume é considerado esgotado e o próximo da fila assume.
+# Usa o mesmo padrão de CLEANUP_MIN_FREE_PCT (5%) mas pode ser configurado independentemente.
+STORAGE_FALLBACK_THRESHOLD_PCT = float(os.getenv("STORAGE_FALLBACK_THRESHOLD_PCT", str(CLEANUP_MIN_FREE_PCT)))
 
 # -- Volume health ------------------------------------------------------------
 _degraded_volumes: set[Path] = set()
@@ -53,10 +56,21 @@ def target_replicas() -> int:
 
 
 def pick_volume() -> Path:
-    hvols = healthy_volumes()
-    if not hvols:
+    hvols_set = set(healthy_volumes())
+    if not hvols_set:
         raise RuntimeError("Nenhum volume de storage disponível")
-    return max(hvols, key=lambda v: (safe_disk_usage(v) or type("_", (), {"free": 0})()).free)
+
+    # Percorre em ordem de declaração (prioridade decrescente).
+    # Usa o primeiro volume que ainda tem espaço acima do limiar de esgotamento.
+    for vol in STORAGE_VOLUMES:
+        if vol not in hvols_set:
+            continue
+        usage = safe_disk_usage(vol)
+        if usage and (usage.free / usage.total * 100) > STORAGE_FALLBACK_THRESHOLD_PCT:
+            return vol
+
+    # Todos os volumes estão esgotados — último recurso: o com mais espaço livre.
+    return max(hvols_set, key=lambda v: (safe_disk_usage(v) or type("_", (), {"free": 0})()).free)
 
 
 def content_path(sha256: str, volume: Path) -> Path:

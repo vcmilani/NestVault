@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v4.1`
+# 🗄️ NestVault  `v4.2`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -6,6 +6,8 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v4.2** — prioridade de escrita por ordem de declaração dos discos: `STORAGE_DIRS` agora define também a ordem de prioridade de escrita. O servidor usa o primeiro disco da lista que ainda tenha espaço livre acima do limiar configurável `STORAGE_FALLBACK_THRESHOLD_PCT` (padrão 5%). Quando um disco esgota, o próximo da lista assume automaticamente — sem intervenção manual. Apenas quando todos os discos estão esgotados o servidor recorre ao de maior espaço livre. Útil para cenários com um disco de fallback grande compartilhado com o sistema (ex.: disco de 2 TB declarado por último). Corrigida duplicação silenciosa da função `_pick_volume()` em `main.py` que tornava o wrapper correto código morto.
+>
 > **v4.1** — verificação de integridade pós-escrita: após cada upload, o servidor relê o arquivo do disco e confronta o SHA-256, detectando corrupção silenciosa de I/O antes de registrar o conteúdo no banco. Em modo com criptografia, a verificação usa `decrypt_chunks()` que autentica os GCM tags por chunk. Na deduplicação (arquivo já existente), o conteúdo em disco é verificado antes de aceitar a referência — arquivos corrompidos desde o upload original são detectados e o backup falha com erro 500 em vez de referenciar dados inválidos.
 >
 > **v4.0** — cloud backup: o servidor conecta-se a contas **Google Drive** e **OneDrive** e baixa arquivos de pastas configuradas, armazenando-os localmente como versões NestVault (deduplicação, criptografia e replicação funcionam transparentemente). Suporte a múltiplas contas e múltiplas pastas por conta. Agendamento cron nativo no servidor via APScheduler — sem depender do cron do sistema. Autenticação OAuth2 implementada diretamente via `httpx`, sem SDKs de terceiros. Tokens armazenados criptografados no banco (Fernet + SHA-256 da API key). Novo módulo `cloud/` + `scheduler.py` + `storage.py` (helpers extraídos de `main.py`). Duas novas tabelas no banco: `cloud_credentials` e `cloud_backup_jobs`. Novos endpoints `/cloud/*` e seção "Cloud Backup" no dashboard.
