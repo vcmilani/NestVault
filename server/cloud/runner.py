@@ -37,7 +37,7 @@ async def _fresh_access_token(credential: CloudCredential, db) -> str:
     needs_refresh = (
         not credential.access_token
         or credential.token_expiry is None
-        or credential.token_expiry.replace(tzinfo=timezone.utc) <= datetime.now(timezone.utc) + timedelta(minutes=5)
+        or credential.token_expiry.replace(tzinfo=timezone.utc) <= datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=5)
     )
     if needs_refresh:
         provider = _get_provider(credential.provider)
@@ -61,7 +61,7 @@ async def run_cloud_backup_job(job_id: int) -> None:
             return
 
         log.info(f"[cloud-runner] Iniciando job {job_id}: {job.credential.provider}/{job.folder_name} → {job.target_label}")
-        job.last_run_at     = datetime.now(timezone.utc)
+        job.last_run_at     = datetime.now(timezone.utc).replace(tzinfo=None)
         job.last_run_status = "running"
         job.last_run_message = None
         db.commit()
@@ -77,7 +77,7 @@ async def run_cloud_backup_job(job_id: int) -> None:
             db.commit()
 
         # Cria BackupVersion; marca running anteriores como incomplete
-        version_key = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        version_key = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y%m%dT%H%M%S")
         db.query(BackupVersion).filter(
             BackupVersion.backup_label == job.target_label,
             BackupVersion.status == "running",
@@ -162,8 +162,8 @@ async def run_cloud_backup_job(job_id: int) -> None:
                 log.error(f"[cloud-runner] Erro ao processar {msg}")
                 db.rollback()
 
-        version.status      = "done"
-        version.finished_at = datetime.now(timezone.utc)
+        version.status      = "failed" if (processed == 0 and errors) else "done"
+        version.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
         db.commit()
 
         summary = f"{processed}/{total} arquivo(s) processado(s)"
@@ -182,7 +182,7 @@ async def run_cloud_backup_job(job_id: int) -> None:
         if version and version.id:
             try:
                 version.status      = "failed"
-                version.finished_at = datetime.now(timezone.utc)
+                version.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 db.commit()
             except Exception:
                 pass
