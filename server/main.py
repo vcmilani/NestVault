@@ -322,6 +322,18 @@ def _verify_stored_file(sha256: str, dest: Path, encrypted: bool) -> None:
         raise HTTPException(500, "Corrupção detectada: sha256 do disco não confere com o esperado")
 
 
+def _purge_corrupted_content(sha256: str, db: Session) -> None:
+    copies = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).all()
+    for copy in copies:
+        Path(copy.stored_at).unlink(missing_ok=True)
+        db.delete(copy)
+    fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+    if fc:
+        db.delete(fc)
+    db.flush()
+    log.warning(f"[integrity] {sha256[:8]}… corrompido — {len(copies)} cópia(s) purgadas do disco e banco")
+
+
 async def _stream_request_to_disk(request: Request, volume: Path) -> tuple[str, int, Path]:
     """
     Faz streaming do body raw da request para disco calculando sha256 em paralelo.
@@ -924,11 +936,21 @@ async def upload_file(
                 if first_copy:
                     stored = Path(first_copy.stored_at)
                     if not stored.exists():
-                        raise HTTPException(500, f"Arquivo ausente no disco: {stored}")
-                    _verify_stored_file(sha256, stored, encrypted=fc.encrypted)
-                    _ensure_replicas(sha256, stored, db)
-                tmp_path.unlink(missing_ok=True)
-            else:
+                        log.warning(f"[integrity] {sha256[:8]}… ausente no disco — purgando e re-enviando")
+                        _purge_corrupted_content(sha256, db)
+                        fc = None
+                    else:
+                        try:
+                            _verify_stored_file(sha256, stored, encrypted=fc.encrypted)
+                            _ensure_replicas(sha256, stored, db)
+                            tmp_path.unlink(missing_ok=True)
+                        except HTTPException:
+                            _purge_corrupted_content(sha256, db)
+                            fc = None
+                else:
+                    tmp_path.unlink(missing_ok=True)
+
+            if not fc:
                 dest = _content_path(sha256, volume)
                 shutil.move(str(tmp_path), str(dest))
                 if ENCRYPTION_ENABLED:
