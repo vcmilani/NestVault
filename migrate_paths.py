@@ -28,9 +28,8 @@ from datetime import datetime
 from pathlib import Path
 
 MIGRATIONS = [
-    ("/media/Data/storage_backup",      "/media/Data/disk1"),
-    ("/media/DataExtra/storage_backup", "/media/DataExtra/disk2"),
-    ("/media/Data1TB/storage_backup",   "/media/Data1TB/disk_1TB"),
+    ("/mnt/disk1",      "/media/disk1"),
+    ("/mnt/disk2",      "/media/disk2")
 ]
 
 
