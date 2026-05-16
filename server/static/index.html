@@ -11,17 +11,9 @@
 <link rel="manifest" href="/static/manifest.json">
 <title>NestVault</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/theme.css">
+<script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
 <style>
-  :root {
-    --bg:#0d0f0f; --bg2:#131616; --bg3:#1a1e1e;
-    --border:#232929; --border2:#2e3636;
-    --text:#c8d0ce; --text-dim:#5a6666; --text-mute:#3a4444;
-    --amber:#e8a940; --amber-dim:#7a5520;
-    --green:#4ecb8d; --green-dim:#1d5a3d;
-    --red:#e05c5c; --red-dim:#5a2020;
-    --blue:#5ba4cf; --purple:#a78bfa;
-    --mono:'IBM Plex Mono',monospace;
-  }
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
   body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;min-height:100vh}
   body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.04) 2px,rgba(0,0,0,.04) 4px);pointer-events:none;z-index:999}
@@ -125,7 +117,7 @@
   @keyframes dots{0%,20%{content:'.'}40%{content:'..'}60%,100%{content:'...'}}
 
   /* Login */
-  .login-overlay{position:fixed;inset:0;background:rgba(13,15,15,.93);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
+  .login-overlay{position:fixed;inset:0;background:var(--overlay-bg);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
   .login-box{border:1px solid var(--border2);border-top:2px solid var(--amber);background:var(--bg2);padding:40px 48px;width:min(400px,calc(100vw - 32px));animation:fadeUp .3s ease}
   .login-title{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--amber);margin-bottom:6px}
   .login-sub{font-size:11px;color:var(--text-dim);margin-bottom:28px}
@@ -167,6 +159,7 @@
   /* Disk tags in backup row */
   .disk-tag{display:inline-block;padding:1px 6px;font-size:9px;letter-spacing:.05em;background:var(--bg3);border:1px solid var(--green-dim);color:var(--green);margin:1px 2px;white-space:nowrap;cursor:default}
   .disk-tag-loading{color:var(--text-mute);font-size:10px}
+  .disk-empty{color:var(--text-mute)}
 
   ::-webkit-scrollbar{width:6px;height:6px}
   ::-webkit-scrollbar-track{background:var(--bg)}
@@ -220,6 +213,7 @@
   <div class="header-right">
     <div class="status-dot" id="statusDot"></div>
     <span class="last-updated" id="lastUpdated">—</span>
+    <button class="hbtn" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
     <button class="hbtn" onclick="loadAll()">↻ Refresh</button>
     <a class="hbtn" href="/disks" style="text-decoration:none">⊞ Discos</a>
     <button class="hbtn" id="logoutBtn">⌀ API Key</button>
@@ -484,12 +478,11 @@
       const cell = document.getElementById(`disks-${label}`);
       if (!cell) continue;
       if (!disks.length) {
-        cell.innerHTML = '<span style="color:var(--text-mute)">—</span>';
+        cell.innerHTML = '<span class="disk-empty">—</span>';
         continue;
       }
       const diskParts = disks.map(d => d.volume_path.replace(/\\/g,'/').split('/').filter(Boolean));
-      const lastSegs = diskParts.map(p => p[p.length - 1] || '');
-      const lastIdentical = lastSegs.length > 1 && lastSegs.every(s => s === lastSegs[0]);
+      const lastIdentical = diskParts.length > 1 && diskParts.every(p => (p[p.length-1]||'') === (diskParts[0][diskParts[0].length-1]||''));
       cell.innerHTML = disks.map((d, i) => {
         const parts = diskParts[i];
         const name = (lastIdentical && parts.length >= 2) ? parts[parts.length - 2] : (parts[parts.length - 1] || d.volume_path);
@@ -1043,6 +1036,18 @@
   // Carrega cloud junto com o restante
   const _origLoadAll = loadAll;
   loadAll = async function() { await _origLoadAll(); loadCloud(); };
+
+  function toggleTheme() {
+    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+    if (isLight) { document.documentElement.removeAttribute('data-theme'); localStorage.setItem('nv-theme','dark'); }
+    else { document.documentElement.setAttribute('data-theme','light'); localStorage.setItem('nv-theme','light'); }
+    updateThemeBtn();
+  }
+  function updateThemeBtn() {
+    const btn = document.getElementById('themeBtn');
+    if (btn) btn.textContent = document.documentElement.getAttribute('data-theme') === 'light' ? '☾ Escuro' : '☀ Claro';
+  }
+  updateThemeBtn();
 </script>
 </body>
 </html>

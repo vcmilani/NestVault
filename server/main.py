@@ -745,7 +745,7 @@ def backup_disks(label: str, db: Session = Depends(get_db)):
             func.coalesce(func.sum(FileContent.size), 0).label("total_bytes"),
         )
         .join(FileContent, FileContent.sha256 == FileContentCopy.sha256)
-        .filter(FileContentCopy.sha256.in_(select(sha_subq)))
+        .filter(FileContentCopy.sha256.in_(sha_subq))
         .group_by(FileContentCopy.volume_path)
         .all()
     )

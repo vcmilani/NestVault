@@ -9,17 +9,9 @@
 <link rel="icon" type="image/svg+xml" href="/static/icon_web.svg">
 <title>NestVault — Explorer</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/theme.css">
+<script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
 <style>
-  :root {
-    --bg:#0d0f0f; --bg2:#131616; --bg3:#1a1e1e;
-    --border:#232929; --border2:#2e3636;
-    --text:#c8d0ce; --text-dim:#5a6666; --text-mute:#3a4444;
-    --amber:#e8a940; --amber-dim:#7a5520;
-    --green:#4ecb8d; --green-dim:#1d5a3d;
-    --red:#e05c5c; --red-dim:#5a2020;
-    --blue:#5ba4cf; --purple:#a78bfa;
-    --mono:'IBM Plex Mono',monospace;
-  }
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
   body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;min-height:100vh}
   body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.04) 2px,rgba(0,0,0,.04) 4px);pointer-events:none;z-index:999}
@@ -111,7 +103,7 @@
   .files-placeholder{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--text-mute);font-size:11px;letter-spacing:.06em;gap:10px}
   .files-placeholder-icon{font-size:24px;opacity:.25}
 
-  .login-overlay{position:fixed;inset:0;background:rgba(13,15,15,.93);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
+  .login-overlay{position:fixed;inset:0;background:var(--overlay-bg);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
   .login-box{border:1px solid var(--border2);border-top:2px solid var(--amber);background:var(--bg2);padding:40px 48px;width:min(400px,calc(100vw - 32px));animation:fadeUp .3s ease}
   .login-title{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--amber);margin-bottom:6px}
   .login-sub{font-size:11px;color:var(--text-dim);margin-bottom:28px}
@@ -153,6 +145,7 @@
     <div><div class="logo-text">NestVault</div><div class="logo-sub">Explorer</div></div>
   </div>
   <div class="header-right">
+    <button class="hbtn" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
     <a class="hbtn" href="/">← Dashboard</a>
     <a class="hbtn" href="/disks">⊞ Discos</a>
     <button class="hbtn" id="logoutBtn">⌀ API Key</button>
@@ -535,6 +528,18 @@
     else { loadFiles(); }
   }
   init();
+
+  function toggleTheme() {
+    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+    if (isLight) { document.documentElement.removeAttribute('data-theme'); localStorage.setItem('nv-theme','dark'); }
+    else { document.documentElement.setAttribute('data-theme','light'); localStorage.setItem('nv-theme','light'); }
+    updateThemeBtn();
+  }
+  function updateThemeBtn() {
+    const btn = document.getElementById('themeBtn');
+    if (btn) btn.textContent = document.documentElement.getAttribute('data-theme') === 'light' ? '☾ Escuro' : '☀ Claro';
+  }
+  updateThemeBtn();
 </script>
 </body>
 </html>
