@@ -11,6 +11,7 @@ from database import (
     get_db, CloudCredential, CloudBackupJob,
     encrypt_token, decrypt_token,
 )
+from auth import require_api_key
 
 log = logging.getLogger("backup-server")
 
@@ -18,6 +19,9 @@ router = APIRouter(prefix="/cloud", tags=["cloud"])
 
 # Estado OAuth em memória: state_token → {"redirect_uri", "provider"}
 _pending_states: dict[str, dict] = {}
+
+# Lock por job_id para impedir execuções paralelas do mesmo job
+_job_locks: dict[int, asyncio.Lock] = {}
 
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000").rstrip("/")
 
@@ -145,7 +149,7 @@ class ManualExchangeRequest(BaseModel):
 
 # -- Contas -------------------------------------------------------------------
 
-@router.get("/accounts", response_model=list[AccountOut])
+@router.get("/accounts", response_model=list[AccountOut], dependencies=[Depends(require_api_key)])
 def list_accounts(db: Session = Depends(get_db)):
     return [
         AccountOut(
@@ -156,7 +160,7 @@ def list_accounts(db: Session = Depends(get_db)):
     ]
 
 
-@router.get("/accounts/{provider}/auth", response_model=AuthUrlOut)
+@router.get("/accounts/{provider}/auth", response_model=AuthUrlOut, dependencies=[Depends(require_api_key)])
 def get_auth_url(provider: str, manual: bool = Query(False)):
     provider_obj = _get_provider(provider)
     state = secrets.token_urlsafe(24)
@@ -166,7 +170,7 @@ def get_auth_url(provider: str, manual: bool = Query(False)):
     return AuthUrlOut(url=url, state=state, redirect_uri=redirect_uri)
 
 
-@router.post("/accounts/{provider}/exchange", response_model=AccountOut, status_code=201)
+@router.post("/accounts/{provider}/exchange", response_model=AccountOut, status_code=201, dependencies=[Depends(require_api_key)])
 async def manual_exchange(provider: str, req: ManualExchangeRequest, db: Session = Depends(get_db)):
     """Troca o código OAuth pelo token manualmente (fluxo para IPs privados)."""
     pending = _pending_states.pop(req.state, None)
@@ -232,7 +236,7 @@ async def oauth_callback(
     return RedirectResponse(url="/?cloud_connected=1")
 
 
-@router.delete("/accounts/{credential_id}", status_code=204)
+@router.delete("/accounts/{credential_id}", status_code=204, dependencies=[Depends(require_api_key)])
 def disconnect_account(credential_id: int, db: Session = Depends(get_db)):
     c = _require_credential(credential_id, db)
     db.delete(c)
@@ -242,7 +246,7 @@ def disconnect_account(credential_id: int, db: Session = Depends(get_db)):
 
 # -- Navegação de pastas ------------------------------------------------------
 
-@router.get("/accounts/{credential_id}/folders", response_model=list[FolderOut])
+@router.get("/accounts/{credential_id}/folders", response_model=list[FolderOut], dependencies=[Depends(require_api_key)])
 async def list_root_folders(credential_id: int, db: Session = Depends(get_db)):
     c = _require_credential(credential_id, db)
     token = await _fresh_token(c, db)
@@ -251,7 +255,7 @@ async def list_root_folders(credential_id: int, db: Session = Depends(get_db)):
     return [FolderOut(id=e.file_id, name=e.name, is_folder=e.is_folder) for e in entries if e.is_folder]
 
 
-@router.get("/accounts/{credential_id}/folders/{folder_id}", response_model=list[FolderOut])
+@router.get("/accounts/{credential_id}/folders/{folder_id}", response_model=list[FolderOut], dependencies=[Depends(require_api_key)])
 async def list_subfolder(credential_id: int, folder_id: str, db: Session = Depends(get_db)):
     c = _require_credential(credential_id, db)
     token = await _fresh_token(c, db)
@@ -280,12 +284,12 @@ def _job_out(j: CloudBackupJob) -> JobOut:
     )
 
 
-@router.get("/jobs", response_model=list[JobOut])
+@router.get("/jobs", response_model=list[JobOut], dependencies=[Depends(require_api_key)])
 def list_jobs(db: Session = Depends(get_db)):
     return [_job_out(j) for j in db.query(CloudBackupJob).order_by(CloudBackupJob.created_at).all()]
 
 
-@router.post("/jobs", response_model=JobOut, status_code=201)
+@router.post("/jobs", response_model=JobOut, status_code=201, dependencies=[Depends(require_api_key)])
 def create_job(req: JobCreate, db: Session = Depends(get_db)):
     _require_credential(req.credential_id, db)
     job = CloudBackupJob(
@@ -306,12 +310,12 @@ def create_job(req: JobCreate, db: Session = Depends(get_db)):
     return _job_out(job)
 
 
-@router.get("/jobs/{job_id}", response_model=JobOut)
+@router.get("/jobs/{job_id}", response_model=JobOut, dependencies=[Depends(require_api_key)])
 def get_job(job_id: int, db: Session = Depends(get_db)):
     return _job_out(_require_job(job_id, db))
 
 
-@router.patch("/jobs/{job_id}", response_model=JobOut)
+@router.patch("/jobs/{job_id}", response_model=JobOut, dependencies=[Depends(require_api_key)])
 def update_job(job_id: int, req: JobUpdate, db: Session = Depends(get_db)):
     job = _require_job(job_id, db)
     if req.folder_id   is not None: job.folder_id   = req.folder_id
@@ -331,7 +335,7 @@ def update_job(job_id: int, req: JobUpdate, db: Session = Depends(get_db)):
     return _job_out(job)
 
 
-@router.delete("/jobs/{job_id}", status_code=204)
+@router.delete("/jobs/{job_id}", status_code=204, dependencies=[Depends(require_api_key)])
 def delete_job(job_id: int, db: Session = Depends(get_db)):
     job = _require_job(job_id, db)
     from scheduler import remove_job
@@ -341,17 +345,21 @@ def delete_job(job_id: int, db: Session = Depends(get_db)):
     log.info(f"[cloud] Job {job_id} removido")
 
 
-@router.post("/jobs/{job_id}/run", status_code=202)
+@router.post("/jobs/{job_id}/run", status_code=202, dependencies=[Depends(require_api_key)])
 async def run_job_now(job_id: int, db: Session = Depends(get_db)):
-    job = _require_job(job_id, db)
-    if job.last_run_status == "running":
+    _require_job(job_id, db)
+    lock = _job_locks.setdefault(job_id, asyncio.Lock())
+    if lock.locked():
         raise HTTPException(409, "Job já está em execução")
     from cloud.runner import run_cloud_backup_job
-    asyncio.create_task(run_cloud_backup_job(job_id))
+    async def _run():
+        async with lock:
+            await run_cloud_backup_job(job_id)
+    asyncio.create_task(_run())
     return {"status": "started", "job_id": job_id}
 
 
-@router.get("/jobs/{job_id}/status")
+@router.get("/jobs/{job_id}/status", dependencies=[Depends(require_api_key)])
 def job_status(job_id: int, db: Session = Depends(get_db)):
     job = _require_job(job_id, db)
     return {

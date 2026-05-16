@@ -21,10 +21,12 @@ from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile
 import crypto
 import storage
+from auth import require_api_key, API_KEY, AUTH_ENABLED
 from cloud.router import router as cloud_router
 import scheduler as sched
 
@@ -44,9 +46,7 @@ REPLICATION_FACTOR   = storage.REPLICATION_FACTOR
 CLEANUP_MIN_FREE_PCT = storage.CLEANUP_MIN_FREE_PCT
 STORAGE_FALLBACK_THRESHOLD_PCT = storage.STORAGE_FALLBACK_THRESHOLD_PCT
 
-API_KEY      = os.getenv("BACKUP_API_KEY", "")
 STATIC_DIR   = Path(__file__).parent / "static"
-AUTH_ENABLED = bool(API_KEY)
 
 # Atalhos locais para os helpers de storage
 _degraded_volumes        = storage._degraded_volumes
@@ -78,7 +78,7 @@ async def lifespan(_: FastAPI):
         log.info("Criptografia: habilitada (AES-256-GCM)")
     else:
         log.info("Criptografia: desabilitada")
-    asyncio.get_event_loop().run_in_executor(None, _backfill_content_copies)
+    asyncio.get_running_loop().run_in_executor(None, _backfill_content_copies)
     monitor = asyncio.create_task(_volume_health_monitor())
     sched.scheduler.start()
     sched.reload_jobs_from_db()
@@ -94,14 +94,6 @@ app.include_router(cloud_router)
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-
-# -- Auth ---------------------------------------------------------------------
-def require_api_key(x_api_key: Optional[str] = Header(None)):
-    if not AUTH_ENABLED:
-        return
-    if not x_api_key or not secrets.compare_digest(x_api_key, API_KEY):
-        raise HTTPException(401, "API key invalida")
 
 
 # -- Schemas: Requests --------------------------------------------------------
@@ -454,18 +446,6 @@ def _backup_info(b: BackupID, db: Session) -> BackupInfo:
     )
 
 
-def _volumes_with_free_space() -> int:
-    """Conta volumes saudáveis com percentual livre >= CLEANUP_MIN_FREE_PCT."""
-    count = 0
-    for v in STORAGE_VOLUMES:
-        if v in _degraded_volumes:
-            continue
-        u = _safe_disk_usage(v)
-        if u and u.free / u.total * 100 >= CLEANUP_MIN_FREE_PCT:
-            count += 1
-    return count
-
-
 def _auto_cleanup_if_needed(db: Session) -> None:
     factor = _target_replicas()
     ok = _volumes_with_free_space()
@@ -519,8 +499,8 @@ def _auto_cleanup_if_needed(db: Session) -> None:
     for v in deletable:
         label, key = v.backup_label, v.version_key
         db.delete(v)
+        removed, _ = _cleanup_orphan_contents_no_commit(db)
         db.commit()
-        removed, _ = _cleanup_orphan_contents(db)
         ok = _volumes_with_free_space()
         log.info(f"[auto-cleanup] Removida {label}/{key} — {removed} arquivo(s) — volumes com espaço: {ok}/{len(_healthy_volumes())}")
         if ok >= factor:
@@ -536,6 +516,13 @@ def _cleanup_orphan_contents(db: Session) -> tuple[int, int]:
     Usa subquery em vez de N+1 queries.
     Retorna (arquivos_removidos, bytes_liberados).
     """
+    removed, bytes_freed = _cleanup_orphan_contents_no_commit(db)
+    db.commit()
+    return removed, bytes_freed
+
+
+def _cleanup_orphan_contents_no_commit(db: Session) -> tuple[int, int]:
+    """Variante sem db.commit() — para uso em loops onde o commit é controlado pelo caller."""
     used_shas = db.query(VersionFile.sha256).distinct().subquery()
     orphans = (
         db.query(FileContent)
@@ -573,7 +560,6 @@ def _cleanup_orphan_contents(db: Session) -> tuple[int, int]:
         removed += 1
     if removed:
         log.debug(f"[cleanup-orphans] {removed} arquivo(s) — {bytes_freed / 1024:.1f} KB liberados")
-    db.commit()
     return removed, bytes_freed
 
 
@@ -628,7 +614,7 @@ def explorer_page():
 
 @app.get("/health", response_model=HealthResponse)
 def health():
-    return HealthResponse(status="ok", version="4.1.0", time=datetime.now(timezone.utc).isoformat())
+    return HealthResponse(status="ok", version=app.version, time=datetime.now(timezone.utc).isoformat())
 
 
 @app.get("/storage/info", response_model=StorageInfoResponse, dependencies=[Depends(require_api_key)])
@@ -638,18 +624,25 @@ def storage_info(db: Session = Depends(get_db)):
     usage_used  = sum(u.used  for u in usages)
     usage_free  = sum(u.free  for u in usages)
 
-    # Keeper = versão "done" mais recente de cada label
-    keeper_ids: list[int] = []
-    labels = db.query(BackupID.label).all()
-    for (label,) in labels:
-        latest = (
-            db.query(BackupVersion.id)
-            .filter(BackupVersion.backup_label == label, BackupVersion.status == "done")
-            .order_by(BackupVersion.version_key.desc())
-            .first()
+    # Keeper = versão "done" mais recente de cada label — 1 query via subquery com MAX
+    latest_key_sq = (
+        db.query(
+            BackupVersion.backup_label,
+            func.max(BackupVersion.version_key).label("latest_key"),
         )
-        if latest:
-            keeper_ids.append(latest[0])
+        .filter(BackupVersion.status == "done")
+        .group_by(BackupVersion.backup_label)
+        .subquery()
+    )
+    keeper_ids: list[int] = [
+        row.id for row in (
+            db.query(BackupVersion.id)
+            .join(latest_key_sq,
+                  (BackupVersion.backup_label == latest_key_sq.c.backup_label) &
+                  (BackupVersion.version_key  == latest_key_sq.c.latest_key))
+            .all()
+        )
+    ]
 
     if keeper_ids:
         kept_shas = (
@@ -712,15 +705,63 @@ def create_backup(req: BackupCreate, db: Session = Depends(get_db)):
 
 @app.get("/backups", response_model=list[BackupInfo], dependencies=[Depends(require_api_key)])
 def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db)):
-    """
-    Lista backups com stats — usa uma unica query agregada
-    para o tamanho total de cada label, evitando N+1.
-    """
+    """Lista backups com stats — 3 queries fixas independente de N (sem N+1)."""
     q = db.query(BackupID).order_by(BackupID.created_at.desc())
     if client_name:
         q = q.filter(BackupID.client_name == client_name)
     backups = q.all()
-    return [_backup_info(b, db) for b in backups]
+    if not backups:
+        return []
+
+    # Versão done mais recente + contagem por label — 1 query
+    latest_sq = (
+        db.query(
+            BackupVersion.backup_label,
+            func.max(BackupVersion.version_key).label("latest_key"),
+            func.count(BackupVersion.id).label("version_count"),
+        )
+        .filter(BackupVersion.status == "done")
+        .group_by(BackupVersion.backup_label)
+        .subquery()
+    )
+    latest_rows = (
+        db.query(BackupVersion.backup_label, BackupVersion.id, BackupVersion.version_key,
+                 latest_sq.c.version_count)
+        .join(latest_sq, (BackupVersion.backup_label == latest_sq.c.backup_label) &
+                         (BackupVersion.version_key  == latest_sq.c.latest_key))
+        .all()
+    )
+    latest_by_label: dict[str, tuple[int, str, int]] = {
+        row.backup_label: (row.id, row.version_key, row.version_count) for row in latest_rows
+    }
+
+    # File count + total size para as versões mais recentes — 1 query
+    version_ids = [v[0] for v in latest_by_label.values()]
+    stats_by_vid: dict[int, tuple[int, int]] = {}
+    if version_ids:
+        for row in (
+            db.query(VersionFile.version_id,
+                     func.count(VersionFile.id).label("fc"),
+                     func.coalesce(func.sum(FileContent.size), 0).label("sz"))
+            .outerjoin(FileContent, FileContent.sha256 == VersionFile.sha256)
+            .filter(VersionFile.version_id.in_(version_ids))
+            .group_by(VersionFile.version_id)
+            .all()
+        ):
+            stats_by_vid[row.version_id] = (row.fc, int(row.sz))
+
+    result = []
+    for b in backups:
+        latest = latest_by_label.get(b.label)
+        vid, latest_key, version_count = latest if latest else (None, None, 0)
+        fc_count, total_size = stats_by_vid.get(vid, (0, 0)) if vid else (0, 0)
+        result.append(BackupInfo(
+            id=b.id, label=b.label, client_name=b.client_name, prefix=b.prefix,
+            status=b.status, created_at=str(b.created_at),
+            last_version=latest_key, version_count=version_count,
+            file_count=fc_count, total_size_bytes=total_size,
+        ))
+    return result
 
 
 @app.get("/backups/{label}", response_model=BackupInfo, dependencies=[Depends(require_api_key)])
@@ -796,13 +837,41 @@ def create_version(label: str, req: VersionCreate, db: Session = Depends(get_db)
 
 @app.get("/backups/{label}/versions", response_model=list[VersionInfo], dependencies=[Depends(require_api_key)])
 def list_versions(label: str, db: Session = Depends(get_db)):
-    """Lista versoes com stats agregados — uma query por versao via _version_stats."""
+    """Lista versoes com stats — 2 queries fixas (sem N+1)."""
     _get_backup_or_404(label, db)
     versions = (db.query(BackupVersion)
                 .filter(BackupVersion.backup_label == label)
                 .order_by(BackupVersion.version_key.desc())
                 .all())
-    return [_version_stats(v, db) for v in versions]
+    if not versions:
+        return []
+
+    vids = [v.id for v in versions]
+    stats_by_vid: dict[int, tuple[int, int]] = {}
+    for row in (
+        db.query(VersionFile.version_id,
+                 func.count(VersionFile.id).label("fc"),
+                 func.coalesce(func.sum(FileContent.size), 0).label("sz"))
+        .outerjoin(FileContent, FileContent.sha256 == VersionFile.sha256)
+        .filter(VersionFile.version_id.in_(vids))
+        .group_by(VersionFile.version_id)
+        .all()
+    ):
+        stats_by_vid[row.version_id] = (row.fc, int(row.sz))
+
+    result = []
+    for v in versions:
+        fc_count, total_size = stats_by_vid.get(v.id, (0, 0))
+        duration = None
+        if v.finished_at and v.created_at:
+            duration = round((v.finished_at - v.created_at).total_seconds(), 1)
+        result.append(VersionInfo(
+            id=v.id, version_key=v.version_key, backup_label=v.backup_label,
+            status=v.status, created_at=str(v.created_at),
+            finished_at=str(v.finished_at) if v.finished_at else None,
+            duration_seconds=duration, file_count=fc_count, total_size_bytes=total_size,
+        ))
+    return result
 
 
 @app.get("/backups/{label}/versions/{version_key}", response_model=VersionInfo, dependencies=[Depends(require_api_key)])
@@ -814,7 +883,7 @@ def get_version(label: str, version_key: str, db: Session = Depends(get_db)):
 def finish_version(label: str, version_key: str, req: VersionFinish, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     v = _get_version_or_404(label, version_key, db)
     v.status = req.status
-    v.finished_at = datetime.now(timezone.utc)
+    v.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
     db.commit()
     if req.status == "done":
         log.info(f"[versao] {label}/{version_key} finalizada → disparando auto-cleanup em background")
@@ -830,6 +899,8 @@ def absorb_version(label: str, version_key: str, req: AbsorbRequest, db: Session
     arquivos ausentes do cliente (deletados) sao preservados via absorb da versao anterior.
     """
     dest = _get_version_or_404(label, version_key, db)
+    if dest.status != "running":
+        raise HTTPException(409, f"Versão destino está '{dest.status}' — absorb só permitido em versões running")
     src  = _get_version_or_404(label, req.source_version_key, db)
 
     existing = db.query(VersionFile.original_path).filter(VersionFile.version_id == dest.id).subquery()
@@ -902,28 +973,39 @@ def check_file(req: CheckRequest, db: Session = Depends(get_db)):
 # -- Check batch --------------------------------------------------------------
 @app.post("/check/batch", response_model=list[CheckBatchResultItem], dependencies=[Depends(require_api_key)])
 def check_batch(req: CheckBatchRequest, db: Session = Depends(get_db)):
-    """Verifica N arquivos em uma unica request. Resultados na mesma ordem da entrada."""
+    """Verifica N arquivos em duas queries IN — sem N+1."""
     v = _get_version_or_404(req.backup_label, req.version_key, db)
+    paths   = [i.original_path for i in req.files]
+    sha256s = [i.sha256 for i in req.files]
+
+    # VersionFiles já registrados nesta versão para estas paths (pode conter sha256 diferente)
+    registered: dict[tuple[str, str], int] = {
+        (row.original_path, row.sha256): row.id
+        for row in (
+            db.query(VersionFile.original_path, VersionFile.sha256, VersionFile.id)
+            .filter(VersionFile.version_id == v.id,
+                    VersionFile.original_path.in_(paths))
+            .all()
+        )
+    }
+    # FileContents que já existem no storage
+    existing_contents: set[str] = {
+        row.sha256
+        for row in db.query(FileContent.sha256).filter(FileContent.sha256.in_(sha256s)).all()
+    }
+
     results: list[CheckBatchResultItem] = []
     for item in req.files:
-        vf = (db.query(VersionFile.id)
-              .filter(VersionFile.version_id    == v.id,
-                      VersionFile.original_path == item.original_path,
-                      VersionFile.sha256        == item.sha256)
-              .first())
-        if vf:
+        fid = registered.get((item.original_path, item.sha256))
+        if fid is not None:
             results.append(CheckBatchResultItem(
                 needs_upload=False, content_exists=True,
-                reason="Ja registrado nesta versao", file_id=vf[0]))
-            continue
-        content_exists = db.query(FileContent.sha256).filter(
-            FileContent.sha256 == item.sha256
-        ).first() is not None
-        results.append(CheckBatchResultItem(
-            needs_upload=True,
-            content_exists=content_exists,
-            reason="Conteudo ja no storage — apenas registrar" if content_exists else "Upload necessario",
-        ))
+                reason="Ja registrado nesta versao", file_id=fid))
+        else:
+            ce = item.sha256 in existing_contents
+            results.append(CheckBatchResultItem(
+                needs_upload=True, content_exists=ce,
+                reason="Conteudo ja no storage — apenas registrar" if ce else "Upload necessario"))
     return results
 
 
@@ -1006,10 +1088,17 @@ async def upload_file(
                     log.info(f"[integrity] {original_path!r} verificado OK — sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
                 fc = FileContent(sha256=sha256, stored_at=str(dest), size=size,
                                  encrypted=ENCRYPTION_ENABLED)
-                db.add(fc)
-                db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(volume)))
-                db.flush()
-                _ensure_replicas(sha256, dest, db)
+                try:
+                    db.add(fc)
+                    db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(volume)))
+                    db.flush()
+                except IntegrityError:
+                    # Upload concorrente do mesmo sha256 venceu — usar o registro já criado
+                    db.rollback()
+                    dest.unlink(missing_ok=True)
+                    fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+                else:
+                    _ensure_replicas(sha256, dest, db)
         except Exception:
             tmp_path.unlink(missing_ok=True)
             raise
