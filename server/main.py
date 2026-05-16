@@ -88,7 +88,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="4.0.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="4.1.0", lifespan=lifespan)
 app.include_router(cloud_router)
 
 if STATIC_DIR.exists():
@@ -305,6 +305,28 @@ def _content_path(sha256: str, volume: Path) -> Path:
     dest = volume / "_content" / sha256[:2] / sha256
     dest.parent.mkdir(parents=True, exist_ok=True)
     return dest
+
+
+def _verify_stored_file(sha256: str, dest: Path, encrypted: bool) -> None:
+    h = hashlib.sha256()
+    try:
+        if encrypted:
+            for chunk in crypto.decrypt_chunks(dest, storage.encryption_key):
+                h.update(chunk)
+        else:
+            with open(dest, "rb") as f:
+                while True:
+                    chunk = f.read(1 << 20)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+    except Exception as exc:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(500, f"Falha ao verificar arquivo no disco: {exc}") from exc
+
+    if h.hexdigest() != sha256:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(500, "Corrupção detectada: sha256 do disco não confere com o esperado")
 
 
 async def _stream_request_to_disk(request: Request, volume: Path) -> tuple[str, int, Path]:
@@ -596,7 +618,7 @@ def explorer_page():
 
 @app.get("/health", response_model=HealthResponse)
 def health():
-    return HealthResponse(status="ok", version="4.0.0", time=datetime.now(timezone.utc).isoformat())
+    return HealthResponse(status="ok", version="4.1.0", time=datetime.now(timezone.utc).isoformat())
 
 
 @app.get("/storage/info", response_model=StorageInfoResponse, dependencies=[Depends(require_api_key)])
@@ -905,10 +927,14 @@ async def upload_file(
         try:
             fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
             if fc:
-                tmp_path.unlink(missing_ok=True)
                 first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).first()
                 if first_copy:
-                    _ensure_replicas(sha256, Path(first_copy.stored_at), db)
+                    stored = Path(first_copy.stored_at)
+                    if not stored.exists():
+                        raise HTTPException(500, f"Arquivo ausente no disco: {stored}")
+                    _verify_stored_file(sha256, stored, encrypted=fc.encrypted)
+                    _ensure_replicas(sha256, stored, db)
+                tmp_path.unlink(missing_ok=True)
             else:
                 dest = _content_path(sha256, volume)
                 shutil.move(str(tmp_path), str(dest))
@@ -918,10 +944,13 @@ async def upload_file(
                     try:
                         crypto.encrypt_stream(dest, tmp_enc, storage.encryption_key)
                         shutil.move(str(tmp_enc), str(dest))
+                        _verify_stored_file(sha256, dest, encrypted=True)
                         log.info(f"[upload] {sha256[:8]}… cifrado com sucesso")
                     except Exception:
                         tmp_enc.unlink(missing_ok=True)
                         raise
+                else:
+                    _verify_stored_file(sha256, dest, encrypted=False)
                 fc = FileContent(sha256=sha256, stored_at=str(dest), size=size,
                                  encrypted=ENCRYPTION_ENABLED)
                 db.add(fc)
