@@ -269,6 +269,11 @@ class DiskVolumeInfo(BaseModel):
     content_bytes: int
     status: Literal["ok", "degraded"]
 
+class BackupDiskEntry(BaseModel):
+    volume_path: str
+    file_count: int
+    total_bytes: int
+
 class CompareFileEntry(BaseModel):
     original_path: str
     sha256: str
@@ -721,6 +726,37 @@ def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db
 @app.get("/backups/{label}", response_model=BackupInfo, dependencies=[Depends(require_api_key)])
 def get_backup(label: str, db: Session = Depends(get_db)):
     return _backup_info(_get_backup_or_404(label, db), db)
+
+
+@app.get("/backups/{label}/disks", response_model=list[BackupDiskEntry], dependencies=[Depends(require_api_key)])
+def backup_disks(label: str, db: Session = Depends(get_db)):
+    _get_backup_or_404(label, db)
+    sha_subq = (
+        db.query(VersionFile.sha256)
+        .join(BackupVersion, BackupVersion.id == VersionFile.version_id)
+        .filter(BackupVersion.backup_label == label)
+        .distinct()
+        .subquery()
+    )
+    rows = (
+        db.query(
+            FileContentCopy.volume_path,
+            func.count(FileContentCopy.sha256).label("file_count"),
+            func.coalesce(func.sum(FileContent.size), 0).label("total_bytes"),
+        )
+        .join(FileContent, FileContent.sha256 == FileContentCopy.sha256)
+        .filter(FileContentCopy.sha256.in_(select(sha_subq)))
+        .group_by(FileContentCopy.volume_path)
+        .all()
+    )
+    return [
+        BackupDiskEntry(
+            volume_path=r.volume_path,
+            file_count=r.file_count,
+            total_bytes=int(r.total_bytes),
+        )
+        for r in rows
+    ]
 
 
 @app.delete("/backups/{label}", response_model=BackupDeletedResponse, dependencies=[Depends(require_api_key)])

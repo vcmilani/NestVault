@@ -164,6 +164,10 @@
   .diff-mod td:first-child{color:var(--amber)}
   .delta-pos{color:var(--green)}.delta-neg{color:var(--red)}
 
+  /* Disk tags in backup row */
+  .disk-tag{display:inline-block;padding:1px 6px;font-size:9px;letter-spacing:.05em;background:var(--bg3);border:1px solid var(--green-dim);color:var(--green);margin:1px 2px;white-space:nowrap;cursor:default}
+  .disk-tag-loading{color:var(--text-mute);font-size:10px}
+
   ::-webkit-scrollbar{width:6px;height:6px}
   ::-webkit-scrollbar-track{background:var(--bg)}
   ::-webkit-scrollbar-thumb{background:var(--border2)}
@@ -435,9 +439,10 @@
           <td class="num-cell">${b.file_count.toLocaleString('pt-BR')}</td>
           <td class="size-cell">${fmtSize(b.total_size_bytes)}</td>
           <td class="date-cell">${b.last_version ? fmtDate(b.last_version) : '—'}</td>
+          <td id="disks-${esc(b.label)}" onclick="event.stopPropagation()" style="white-space:nowrap"><span class="disk-tag-loading">·</span></td>
         </tr>
         <tr class="versions-row" id="vrow-${esc(b.label)}" style="display:${isExp?'':'none'}">
-          <td colspan="7">
+          <td colspan="8">
             <div class="versions-container">
               <div class="versions-head">
                 <span>Versões — ${esc(b.label)}</span>
@@ -458,9 +463,39 @@
           <th style="text-align:right">Arquivos</th>
           <th style="text-align:right">Tamanho</th>
           <th>Última versão</th>
+          <th>Discos</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
+    loadAllDiskInfo(backups);
+  }
+
+  async function loadAllDiskInfo(backups) {
+    const results = await Promise.allSettled(
+      backups.map(b =>
+        fetch(`/backups/${encodeURIComponent(b.label)}/disks`, {headers: H()})
+          .then(r => r.ok ? r.json() : [])
+          .then(disks => ({label: b.label, disks}))
+      )
+    );
+    for (const r of results) {
+      if (r.status !== 'fulfilled') continue;
+      const {label, disks} = r.value;
+      const cell = document.getElementById(`disks-${label}`);
+      if (!cell) continue;
+      if (!disks.length) {
+        cell.innerHTML = '<span style="color:var(--text-mute)">—</span>';
+        continue;
+      }
+      const diskParts = disks.map(d => d.volume_path.replace(/\\/g,'/').split('/').filter(Boolean));
+      const lastSegs = diskParts.map(p => p[p.length - 1] || '');
+      const lastIdentical = lastSegs.length > 1 && lastSegs.every(s => s === lastSegs[0]);
+      cell.innerHTML = disks.map((d, i) => {
+        const parts = diskParts[i];
+        const name = (lastIdentical && parts.length >= 2) ? parts[parts.length - 2] : (parts[parts.length - 1] || d.volume_path);
+        return `<span class="disk-tag" title="${esc(d.volume_path)} — ${d.file_count} arq. · ${fmtSize(d.total_bytes)}">${esc(name)}</span>`;
+      }).join('');
+    }
   }
 
   async function toggleVersions(label, row) {
