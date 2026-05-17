@@ -21,7 +21,7 @@ log = logging.getLogger("backup-server")
 _CLIENT_ID     = os.getenv("ONEDRIVE_CLIENT_ID", "")
 _CLIENT_SECRET = os.getenv("ONEDRIVE_CLIENT_SECRET", "")
 _AUTHORITY     = "https://login.microsoftonline.com/consumers/oauth2/v2.0"
-_SCOPES        = "https://graph.microsoft.com/Files.Read offline_access openid profile email"
+_SCOPES        = "https://graph.microsoft.com/Files.Read https://graph.microsoft.com/User.Read offline_access openid profile email"
 _GRAPH_BASE    = "https://graph.microsoft.com/v1.0"
 
 

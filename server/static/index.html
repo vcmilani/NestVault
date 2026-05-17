@@ -777,7 +777,7 @@
       <td>${esc(a.email)}</td>
       <td>${esc(a.display_name||'')}</td>
       <td style="white-space:nowrap"><button class="small-btn btn-danger" onclick="disconnectAccount(${a.id},'${esc(a.email)}')">Desconectar</button>
-          <button class="small-btn" onclick="openJobModal(${a.id})">+ Job</button></td>
+          <button class="small-btn" onclick="openJobModal(${a.id}, '${a.provider}')">+ Job</button></td>
     </tr>`).join('')}</tbody></table>`;
   }
 
@@ -903,7 +903,7 @@
     link.textContent = hidden ? 'ocultar entrada manual' : 'inserir ID manualmente';
   }
 
-  async function loadFolderOptions(credentialId, selectValue) {
+  async function loadFolderOptions(credentialId, selectValue, provider = '') {
     const sel = document.getElementById('jFolderSelect');
     sel.innerHTML = '<option value="">— carregando... —</option>';
     try {
@@ -911,7 +911,7 @@
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const folders = await r.json();
       sel.innerHTML =
-        '<option value="__root__">⬡ Todo o Google Drive</option>' +
+        `<option value="__root__">${providerLabel[provider] || '⬡ ' + provider} (inteiro)</option>` +
         folders.filter(f => f.is_folder).map(f =>
           `<option value="${esc(f.id)}:${esc(f.name)}">📁 ${esc(f.name)}</option>`
         ).join('');
@@ -924,7 +924,7 @@
     }
   }
 
-  function openJobModal(credentialId) {
+  function openJobModal(credentialId, provider = '') {
     _editingJobId = null;
     document.getElementById('cloudModalTitle').textContent = 'Novo job de backup';
     document.getElementById('jSaveBtn').textContent = 'Criar job';
@@ -933,11 +933,11 @@
     sel.innerHTML = `<option value="${credentialId}">${credentialId}</option>`;
     fetch('/cloud/accounts', {headers: H()}).then(r => r.json()).then(accounts => {
       sel.innerHTML = accounts.map(a =>
-        `<option value="${a.id}" ${a.id===credentialId?'selected':''}>${providerLabel[a.provider]||a.provider} — ${esc(a.email)}</option>`
+        `<option value="${a.id}" data-provider="${a.provider}" ${a.id===credentialId?'selected':''}>${providerLabel[a.provider]||a.provider} — ${esc(a.email)}</option>`
       ).join('');
     });
     _resetFolderSelect();
-    loadFolderOptions(credentialId);
+    loadFolderOptions(credentialId, undefined, provider);
     ['jFolderId','jFolderName','jLabel','jCron'].forEach(id => document.getElementById(id).value = '');
     document.getElementById('jError').style.display = 'none';
     document.getElementById('cloudModal').style.display = 'flex';
@@ -945,7 +945,8 @@
 
   document.getElementById('jCredential').addEventListener('change', e => {
     const credId = parseInt(e.target.value);
-    if (credId) loadFolderOptions(credId);
+    const prov = e.target.options[e.target.selectedIndex]?.dataset.provider || '';
+    if (credId) loadFolderOptions(credId, undefined, prov);
   });
 
   function editJob(jobId) {
@@ -959,7 +960,7 @@
     sel.innerHTML = `<option value="${j.credential_id}">${providerLabel[j.provider]||j.provider} — ${esc(j.email)}</option>`;
     _resetFolderSelect();
     const targetVal = j.folder_id === 'root' ? '__root__' : `${j.folder_id}:${j.folder_name}`;
-    loadFolderOptions(j.credential_id, targetVal).then(() => {
+    loadFolderOptions(j.credential_id, targetVal, j.provider).then(() => {
       const fsel = document.getElementById('jFolderSelect');
       if (!fsel.value) {
         document.getElementById('jFolderId').value = j.folder_id;
@@ -986,7 +987,10 @@
     let folder_id, folder_name;
     const selVal = document.getElementById('jFolderSelect').value;
     if (selVal === '__root__') {
-      folder_id = 'root'; folder_name = 'Google Drive (inteiro)';
+      const _credSel = document.getElementById('jCredential');
+      const _prov = _credSel.options[_credSel.selectedIndex]?.dataset.provider || '';
+      const _provName = {gdrive: 'Google Drive', onedrive: 'OneDrive'}[_prov] || _prov;
+      folder_id = 'root'; folder_name = `${_provName} (inteiro)`;
     } else if (selVal && selVal.includes(':')) {
       const colon = selVal.indexOf(':');
       folder_id   = selVal.slice(0, colon);
