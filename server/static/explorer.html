@@ -9,17 +9,9 @@
 <link rel="icon" type="image/svg+xml" href="/static/icon_web.svg">
 <title>NestVault — Explorer</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/theme.css">
+<script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
 <style>
-  :root {
-    --bg:#0d0f0f; --bg2:#131616; --bg3:#1a1e1e;
-    --border:#232929; --border2:#2e3636;
-    --text:#c8d0ce; --text-dim:#5a6666; --text-mute:#3a4444;
-    --amber:#e8a940; --amber-dim:#7a5520;
-    --green:#4ecb8d; --green-dim:#1d5a3d;
-    --red:#e05c5c; --red-dim:#5a2020;
-    --blue:#5ba4cf; --purple:#a78bfa;
-    --mono:'IBM Plex Mono',monospace;
-  }
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
   body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;min-height:100vh}
   body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.04) 2px,rgba(0,0,0,.04) 4px);pointer-events:none;z-index:999}
@@ -58,13 +50,23 @@
   .cbtn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 10px;font-family:var(--mono);font-size:10px;cursor:pointer;letter-spacing:.06em;transition:all .15s;white-space:nowrap;flex-shrink:0}
   .cbtn:hover{border-color:var(--amber);color:var(--amber)}
 
-  .tree-wrap{border:1px solid var(--border);animation:fadeUp .35s .05s ease both;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  /* Two-panel layout */
+  .explorer-layout{display:flex;border:1px solid var(--border);animation:fadeUp .35s .05s ease both;height:calc(100vh - 295px);min-height:400px}
+  .tree-panel{width:320px;min-width:160px;flex-shrink:0;border-right:1px solid var(--border);overflow-y:auto;overflow-x:auto;background:var(--bg2)}
+  .tree-panel .t-count{display:none}
+  .files-panel{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
+  .files-header{padding:8px 16px;border-bottom:1px solid var(--border);background:var(--bg2);display:flex;align-items:baseline;gap:12px;flex-shrink:0;min-height:37px}
+  .fh-path{font-size:11px;color:var(--amber);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+  .fh-meta{font-size:10px;color:var(--text-mute);flex-shrink:0;white-space:nowrap}
+  .files-list{flex:1;overflow-y:auto;overflow-x:auto}
 
   /* Tree rows */
   .tree-row{display:flex;align-items:center;border-bottom:1px solid var(--border);min-height:33px;transition:background .1s}
   .tree-row:last-child{border-bottom:none}
   .dir-row{cursor:pointer}
   .dir-row:hover{background:var(--bg3)}
+  .dir-row.selected{background:rgba(232,169,64,.06);box-shadow:inset 2px 0 0 var(--amber)}
+  .dir-row.selected .t-name{color:var(--amber)}
   .file-row{background:var(--bg)}
   .file-row:hover{background:rgba(91,164,207,.025)}
   .t-chevron{width:16px;flex-shrink:0;text-align:center;font-size:9px;color:var(--text-mute);transition:transform .15s;margin-right:2px}
@@ -72,7 +74,7 @@
   .t-icon{font-size:11px;margin-right:6px;flex-shrink:0}
   .dir-row .t-icon{color:var(--amber)}
   .file-row .t-icon{color:var(--text-mute)}
-  .t-name{flex:1;min-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:8px;font-size:12px}
+  .t-name{flex:1;min-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:8px;font-size:12px}
   .dir-row .t-name{color:var(--text)}
   .file-row .t-name{color:var(--text-dim)}
   .t-meta{display:flex;align-items:center;gap:14px;padding-right:14px;flex-shrink:0}
@@ -84,7 +86,7 @@
   .dir-children{display:block}
   .dir-children.collapsed{display:none}
 
-  /* Filter flat list */
+  /* Flat filter list */
   .flat-head{padding:8px 14px;background:var(--bg3);border-bottom:1px solid var(--border);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim)}
   .flat-row{display:flex;align-items:center;border-bottom:1px solid var(--border);min-height:33px;padding:5px 14px;gap:8px;background:var(--bg);transition:background .1s}
   .flat-row:hover{background:rgba(91,164,207,.025)}
@@ -98,7 +100,10 @@
   .empty{padding:40px;text-align:center;color:var(--text-mute);font-size:11px;line-height:1.8}
   .empty a{color:var(--amber)}
 
-  .login-overlay{position:fixed;inset:0;background:rgba(13,15,15,.93);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
+  .files-placeholder{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--text-mute);font-size:11px;letter-spacing:.06em;gap:10px}
+  .files-placeholder-icon{font-size:24px;opacity:.25}
+
+  .login-overlay{position:fixed;inset:0;background:var(--overlay-bg);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
   .login-box{border:1px solid var(--border2);border-top:2px solid var(--amber);background:var(--bg2);padding:40px 48px;width:min(400px,calc(100vw - 32px));animation:fadeUp .3s ease}
   .login-title{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--amber);margin-bottom:6px}
   .login-sub{font-size:11px;color:var(--text-dim);margin-bottom:28px}
@@ -120,6 +125,10 @@
     .stats-bar{grid-template-columns:repeat(2,1fr)}
     .t-hash{display:none}
     .hbtn{min-height:40px;padding:8px 12px}
+    .explorer-layout{flex-direction:column;height:auto;min-height:300px}
+    .tree-panel{width:100%;max-height:40vh;border-right:none;border-bottom:1px solid var(--border)}
+    .tree-panel .t-count{display:none}
+    .files-panel{min-height:200px;max-height:60vh}
   }
   @media(max-width:480px){
     .t-count{display:none}
@@ -136,6 +145,7 @@
     <div><div class="logo-text">NestVault</div><div class="logo-sub">Explorer</div></div>
   </div>
   <div class="header-right">
+    <button class="hbtn" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
     <a class="hbtn" href="/">← Dashboard</a>
     <a class="hbtn" href="/disks">⊞ Discos</a>
     <button class="hbtn" id="logoutBtn">⌀ API Key</button>
@@ -166,8 +176,19 @@
     <button class="cbtn" onclick="collapseAll()">⊟ Colapsar</button>
   </div>
 
-  <div class="tree-wrap" id="treeWrap">
-    <div class="loading">Carregando</div>
+  <div class="explorer-layout">
+    <div class="tree-panel" id="dirTree">
+      <div class="loading">Carregando</div>
+    </div>
+    <div class="files-panel">
+      <div class="files-header" id="filesHeader"></div>
+      <div class="files-list" id="filesList">
+        <div class="files-placeholder">
+          <span class="files-placeholder-icon">▸</span>
+          Selecione uma pasta
+        </div>
+      </div>
+    </div>
   </div>
 </main>
 
@@ -190,9 +211,11 @@
   const LABEL   = qp.get('label')   || '';
   const VERSION = qp.get('version') || '';
 
-  let allFiles = [];
-  let treeRoot = null;
-  let _nodeId  = 0;
+  let allFiles     = [];
+  let treeRoot     = null;
+  let nodeMap      = new Map();
+  let selectedPath = null;
+  let _nodeId      = 0;
 
   const H = () => ({ 'X-API-Key': API_KEY });
 
@@ -231,7 +254,9 @@
 
   // -- Tree building ----------------------------------------------------------
   function buildTree(files) {
-    const root = { type:'dir', name:'', children: new Map(), files:[] };
+    const root = { type:'dir', name:'', path:'', children: new Map(), files:[] };
+    nodeMap.clear();
+    nodeMap.set('', root);
     for (const f of files) {
       const norm  = f.original_path.replace(/\\/g, '/').replace(/^\//, '');
       const parts = norm.split('/').filter(Boolean);
@@ -240,7 +265,10 @@
       for (let i = 0; i < parts.length - 1; i++) {
         const part = parts[i];
         if (!node.children.has(part)) {
-          node.children.set(part, { type:'dir', name:part, children: new Map(), files:[] });
+          const childPath = node.path ? node.path + '/' + part : part;
+          const child = { type:'dir', name:part, path:childPath, children: new Map(), files:[] };
+          node.children.set(part, child);
+          nodeMap.set(childPath, child);
         }
         node = node.children.get(part);
       }
@@ -266,21 +294,18 @@
     return { count, size, dirs, depth };
   }
 
-  // -- Tree rendering ---------------------------------------------------------
-  function renderTree(node, depth) {
+  // -- Left panel: dir tree ---------------------------------------------------
+  function renderDirTree(node, depth) {
     let html = '';
-    const pad = depth * 20;
-
-    const sortedDirs  = [...node.children.entries()]
+    const pad = depth * 18;
+    const sortedDirs = [...node.children.entries()]
       .sort(([a], [b]) => a.localeCompare(b, 'pt', { sensitivity:'base' }));
-    const sortedFiles = [...node.files]
-      .sort((a, b) => a._basename.localeCompare(b._basename, 'pt', { sensitivity:'base' }));
-
     for (const [name, child] of sortedDirs) {
-      const id = `dn${_nodeId++}`;
-      const st = child._stats || { count:0, size:0 };
+      const id  = `dn${_nodeId++}`;
+      const st  = child._stats || { count:0, size:0 };
+      const sel = selectedPath === child.path ? ' selected' : '';
       html += `
-<div class="tree-row dir-row open" onclick="toggleDir(this,'${id}')">
+<div class="tree-row dir-row open${sel}" data-path="${esc(child.path)}" data-child-id="${id}">
   <span style="display:inline-block;width:${pad}px;flex-shrink:0"></span>
   <span class="t-chevron">▶</span>
   <span class="t-icon">▸</span>
@@ -290,13 +315,86 @@
     <span class="t-size">${fmtSize(st.size)}</span>
   </div>
 </div>
-<div id="${id}" class="dir-children">${renderTree(child, depth + 1)}</div>`;
+<div id="${id}" class="dir-children">${renderDirTree(child, depth + 1)}</div>`;
     }
+    return html;
+  }
 
-    for (const f of sortedFiles) {
-      html += `
+  function _renderDirTree() {
+    _nodeId = 0;
+    const st  = treeRoot._stats || { count:0, size:0 };
+    const sel = selectedPath === '' ? ' selected' : '';
+    document.getElementById('dirTree').innerHTML = `
+<div class="tree-row dir-row open${sel}" data-path="" data-child-id="rootChildren">
+  <span class="t-chevron">▶</span>
+  <span class="t-icon">◈</span>
+  <span class="t-name" style="letter-spacing:.04em">raiz/</span>
+  <div class="t-meta">
+    <span class="t-count">${st.count} arq.</span>
+    <span class="t-size">${fmtSize(st.size)}</span>
+  </div>
+</div>
+<div id="rootChildren" class="dir-children">${renderDirTree(treeRoot, 0)}</div>`;
+  }
+
+  // -- Dir click (event delegation) ------------------------------------------
+  document.addEventListener('click', e => {
+    const row = e.target.closest('.dir-row');
+    if (!row) return;
+    const childId = row.dataset.childId;
+    if (childId) {
+      const children = document.getElementById(childId);
+      if (children) {
+        if (row.classList.toggle('open')) {
+          children.classList.remove('collapsed');
+        } else {
+          children.classList.add('collapsed');
+        }
+      }
+    }
+    const path = row.dataset.path;
+    if (path !== undefined) selectDir(path);
+  });
+
+  function selectDir(path) {
+    selectedPath = path;
+    document.querySelectorAll('#dirTree .dir-row.selected')
+      .forEach(el => el.classList.remove('selected'));
+    for (const row of document.querySelectorAll('#dirTree .dir-row')) {
+      if (row.dataset.path === path) { row.classList.add('selected'); break; }
+    }
+    const q = document.getElementById('filterInput').value.trim();
+    if (!q) {
+      const node = nodeMap.get(path);
+      if (node) renderFileList(node);
+    }
+  }
+
+  function expandAll() {
+    document.querySelectorAll('#dirTree .dir-row').forEach(el => el.classList.add('open'));
+    document.querySelectorAll('#dirTree .dir-children').forEach(el => el.classList.remove('collapsed'));
+  }
+  function collapseAll() {
+    document.querySelectorAll('#dirTree .dir-row:not([data-path=""])').forEach(el => el.classList.remove('open'));
+    document.querySelectorAll('#dirTree .dir-children:not(#rootChildren)').forEach(el => el.classList.add('collapsed'));
+  }
+
+  // -- Right panel: file list -------------------------------------------------
+  function renderFileList(node) {
+    const header = document.getElementById('filesHeader');
+    const list   = document.getElementById('filesList');
+    const pathDisplay = node.path ? node.path + '/' : 'raiz/';
+    const directFiles = [...node.files].sort((a,b) =>
+      a._basename.localeCompare(b._basename, 'pt', { sensitivity:'base' }));
+    header.innerHTML =
+      `<span class="fh-path">${esc(pathDisplay)}</span>` +
+      `<span class="fh-meta">${directFiles.length} arq. · ${node.children.size} subpasta(s)</span>`;
+    if (!directFiles.length) {
+      list.innerHTML = '<div class="empty">Nenhum arquivo direto nesta pasta</div>';
+      return;
+    }
+    list.innerHTML = directFiles.map(f => `
 <div class="tree-row file-row">
-  <span style="display:inline-block;width:${pad + 20}px;flex-shrink:0"></span>
   <span class="t-chevron" style="visibility:hidden">▶</span>
   <span class="t-icon">·</span>
   <span class="t-name" title="${esc(f.original_path)}">${esc(f._basename)}</span>
@@ -305,51 +403,34 @@
     <span class="t-size">${fmtSize(f.size || 0)}</span>
     <button class="t-dl" onclick="dlFile(${f.id},'${esc(f._basename)}')" title="Baixar arquivo">↓ baixar</button>
   </div>
-</div>`;
-    }
-
-    return html;
-  }
-
-  function toggleDir(el, id) {
-    const children = document.getElementById(id);
-    if (el.classList.toggle('open')) {
-      children.classList.remove('collapsed');
-    } else {
-      children.classList.add('collapsed');
-    }
-  }
-
-  function expandAll() {
-    document.querySelectorAll('.dir-row').forEach(el => el.classList.add('open'));
-    document.querySelectorAll('.dir-children').forEach(el => el.classList.remove('collapsed'));
-  }
-  function collapseAll() {
-    document.querySelectorAll('.dir-row').forEach(el => el.classList.remove('open'));
-    document.querySelectorAll('.dir-children').forEach(el => el.classList.add('collapsed'));
-  }
-
-  function _renderTree() {
-    _nodeId = 0;
-    document.getElementById('treeWrap').innerHTML = renderTree(treeRoot, 0);
+</div>`).join('');
   }
 
   // -- Filter -----------------------------------------------------------------
   function onFilter(q) {
     q = q.trim();
-    if (!q) { _renderTree(); return; }
-
-    const ql      = q.toLowerCase();
-    const matched = allFiles.filter(f => f.original_path.toLowerCase().includes(ql));
-    const wrap    = document.getElementById('treeWrap');
-
-    if (!matched.length) {
-      wrap.innerHTML = `<div class="empty">Nenhum arquivo encontrado para "<strong>${esc(q)}</strong>"</div>`;
+    const header = document.getElementById('filesHeader');
+    const list   = document.getElementById('filesList');
+    if (!q) {
+      if (selectedPath !== null) {
+        const node = nodeMap.get(selectedPath);
+        if (node) { renderFileList(node); return; }
+      }
+      header.innerHTML = '';
+      list.innerHTML = '<div class="files-placeholder"><span class="files-placeholder-icon">▸</span>Selecione uma pasta</div>';
       return;
     }
-
+    const ql      = q.toLowerCase();
+    const matched = allFiles.filter(f => f.original_path.toLowerCase().includes(ql));
+    header.innerHTML =
+      `<span class="fh-path">busca: &quot;${esc(q)}&quot;</span>` +
+      `<span class="fh-meta">${matched.length} resultado(s)</span>`;
+    if (!matched.length) {
+      list.innerHTML = `<div class="empty">Nenhum arquivo encontrado para "<strong>${esc(q)}</strong>"</div>`;
+      return;
+    }
     const re   = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-    const rows = matched.map(f => {
+    list.innerHTML = matched.map(f => {
       const escaped     = esc(f.original_path);
       const highlighted = escaped.replace(re, m => `<em>${m}</em>`);
       return `
@@ -363,8 +444,6 @@
   </div>
 </div>`;
     }).join('');
-
-    wrap.innerHTML = `<div class="flat-head">${matched.length} resultado(s)</div>${rows}`;
   }
 
   // -- Download ---------------------------------------------------------------
@@ -387,17 +466,23 @@
 
   // -- Load -------------------------------------------------------------------
   async function loadFiles() {
-    const wrap = document.getElementById('treeWrap');
+    const dirTree     = document.getElementById('dirTree');
+    const filesHeader = document.getElementById('filesHeader');
+    const filesList   = document.getElementById('filesList');
 
     if (!LABEL || !VERSION) {
-      wrap.innerHTML = `<div class="empty">Nenhuma versão selecionada.<br><a href="/">← Voltar ao dashboard</a></div>`;
+      dirTree.innerHTML   = '';
+      filesHeader.innerHTML = '';
+      filesList.innerHTML = `<div class="empty">Nenhuma versão selecionada.<br><a href="/">← Voltar ao dashboard</a></div>`;
       return;
     }
 
     document.getElementById('bcLabel').textContent   = LABEL;
     document.getElementById('bcVersion').textContent = VERSION;
     document.title = `NestVault — ${LABEL} / ${VERSION}`;
-    wrap.innerHTML = '<div class="loading">Carregando</div>';
+    dirTree.innerHTML   = '<div class="loading">Carregando</div>';
+    filesHeader.innerHTML = '';
+    filesList.innerHTML = '';
 
     try {
       const url = `/files?backup_label=${encodeURIComponent(LABEL)}&version_key=${encodeURIComponent(VERSION)}`;
@@ -407,23 +492,29 @@
       allFiles = await r.json();
 
       if (!allFiles.length) {
-        wrap.innerHTML = '<div class="empty">Nenhum arquivo nesta versão</div>';
+        dirTree.innerHTML   = '';
+        filesHeader.innerHTML = '';
+        filesList.innerHTML = '<div class="empty">Nenhum arquivo nesta versão</div>';
         ['sFiles','sDirs','sSize','sDepth'].forEach(id =>
           document.getElementById(id).textContent = '0');
         return;
       }
 
-      treeRoot        = buildTree(allFiles);
-      const stats     = computeStats(treeRoot);
+      treeRoot    = buildTree(allFiles);
+      const stats = computeStats(treeRoot);
 
       document.getElementById('sFiles').textContent = stats.count.toLocaleString('pt-BR');
       document.getElementById('sDirs').textContent  = stats.dirs.toLocaleString('pt-BR');
       document.getElementById('sSize').textContent  = fmtSize(stats.size);
       document.getElementById('sDepth').textContent = stats.depth;
 
-      _renderTree();
+      selectedPath = '';
+      _renderDirTree();
+      renderFileList(treeRoot);
     } catch(e) {
-      wrap.innerHTML = `<div class="empty">Erro ao carregar arquivos: ${esc(e.message)}</div>`;
+      dirTree.innerHTML   = `<div class="empty">Erro ao carregar: ${esc(e.message)}</div>`;
+      filesHeader.innerHTML = '';
+      filesList.innerHTML = '';
       showError('Não foi possível carregar: ' + e.message);
     }
   }
@@ -437,6 +528,18 @@
     else { loadFiles(); }
   }
   init();
+
+  function toggleTheme() {
+    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+    if (isLight) { document.documentElement.removeAttribute('data-theme'); localStorage.setItem('nv-theme','dark'); }
+    else { document.documentElement.setAttribute('data-theme','light'); localStorage.setItem('nv-theme','light'); }
+    updateThemeBtn();
+  }
+  function updateThemeBtn() {
+    const btn = document.getElementById('themeBtn');
+    if (btn) btn.textContent = document.documentElement.getAttribute('data-theme') === 'light' ? '☾ Escuro' : '☀ Claro';
+  }
+  updateThemeBtn();
 </script>
 </body>
 </html>
