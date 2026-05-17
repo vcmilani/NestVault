@@ -18,11 +18,11 @@ class CloudProvider(ABC):
     provider_name: str
 
     @abstractmethod
-    def get_auth_url(self, redirect_uri: str, state: str) -> str:
+    def get_auth_url(self, redirect_uri: str, state: str, **kwargs) -> str:
         """Retorna URL de autorização OAuth2 para redirecionar o usuário."""
 
     @abstractmethod
-    async def exchange_code(self, code: str, redirect_uri: str) -> dict:
+    async def exchange_code(self, code: str, redirect_uri: str, **kwargs) -> dict:
         """Troca authorization code por tokens.
         Retorna: {"access_token", "refresh_token", "expiry" (datetime | None)}
         """

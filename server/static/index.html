@@ -856,8 +856,12 @@
     const pasted = document.getElementById('authPastedUrl').value.trim();
     if (!pasted) { errEl.textContent = 'Cole a URL redirecionada'; errEl.style.display = 'block'; return; }
 
-    let code;
-    try { code = new URL(pasted).searchParams.get('code'); } catch { code = pasted; }
+    let code, state = _authState;
+    try {
+      const u = new URL(pasted);
+      code = u.searchParams.get('code');
+      state = u.searchParams.get('state') || _authState;
+    } catch { code = pasted; }
     if (!code) { errEl.textContent = 'Código não encontrado — cole a URL completa da barra do browser'; errEl.style.display = 'block'; return; }
 
     const btn = document.getElementById('authConnectBtn');
@@ -865,7 +869,7 @@
     const r = await fetch(`/cloud/accounts/${_authProvider}/exchange`, {
       method: 'POST',
       headers: {...H(), 'Content-Type': 'application/json'},
-      body: JSON.stringify({code, state: _authState}),
+      body: JSON.stringify({code, state}),
     });
     btn.disabled = false; btn.textContent = 'Conectar';
     if (!r.ok) {

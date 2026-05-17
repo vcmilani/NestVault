@@ -31,7 +31,7 @@ _TOKEN_URI = "https://oauth2.googleapis.com/token"
 class GoogleDriveProvider(CloudProvider):
     provider_name = "gdrive"
 
-    def get_auth_url(self, redirect_uri: str, state: str) -> str:
+    def get_auth_url(self, redirect_uri: str, state: str, **kwargs) -> str:
         params = {
             "client_id":     _CLIENT_ID,
             "redirect_uri":  redirect_uri,
@@ -43,7 +43,7 @@ class GoogleDriveProvider(CloudProvider):
         }
         return f"{_AUTH_URI}?{urlencode(params)}"
 
-    async def exchange_code(self, code: str, redirect_uri: str) -> dict:
+    async def exchange_code(self, code: str, redirect_uri: str, **kwargs) -> dict:
         async with httpx.AsyncClient() as client:
             r = await client.post(_TOKEN_URI, data={
                 "code":          code,

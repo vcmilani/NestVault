@@ -7,7 +7,7 @@ Requer variáveis de ambiente:
 Escopos: Files.Read offline_access openid profile email
 Tenant:  common (aceita contas pessoais e corporativas)
 """
-import os, hashlib, logging
+import os, hashlib, logging, secrets, base64
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
@@ -20,35 +20,59 @@ log = logging.getLogger("backup-server")
 
 _CLIENT_ID     = os.getenv("ONEDRIVE_CLIENT_ID", "")
 _CLIENT_SECRET = os.getenv("ONEDRIVE_CLIENT_SECRET", "")
-_AUTHORITY     = "https://login.microsoftonline.com/common/oauth2/v2.0"
+_AUTHORITY     = "https://login.microsoftonline.com/consumers/oauth2/v2.0"
 _SCOPES        = "https://graph.microsoft.com/Files.Read offline_access openid profile email"
 _GRAPH_BASE    = "https://graph.microsoft.com/v1.0"
+
+
+def generate_pkce() -> tuple[str, str]:
+    """Retorna (code_verifier, code_challenge) para PKCE S256."""
+    verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()
+    ).rstrip(b"=").decode()
+    return verifier, challenge
 
 
 class OneDriveProvider(CloudProvider):
     provider_name = "onedrive"
 
-    def get_auth_url(self, redirect_uri: str, state: str) -> str:
+    def get_auth_url(self, redirect_uri: str, state: str, code_challenge: str) -> str:
         params = {
-            "client_id":     _CLIENT_ID,
-            "response_type": "code",
-            "redirect_uri":  redirect_uri,
-            "scope":         _SCOPES,
-            "response_mode": "query",
-            "state":         state,
+            "client_id":             _CLIENT_ID,
+            "response_type":         "code",
+            "redirect_uri":          redirect_uri,
+            "scope":                 _SCOPES,
+            "response_mode":         "query",
+            "state":                 state,
+            "code_challenge":        code_challenge,
+            "code_challenge_method": "S256",
         }
         return f"{_AUTHORITY}/authorize?{urlencode(params)}"
 
-    async def exchange_code(self, code: str, redirect_uri: str) -> dict:
+    async def exchange_code(self, code: str, redirect_uri: str, code_verifier: str) -> dict:
+        log.info(
+            f"[onedrive] exchange_code → client_id={'OK' if _CLIENT_ID else 'VAZIO'} "
+            f"secret={'OK' if _CLIENT_SECRET else 'VAZIO'} "
+            f"redirect_uri={redirect_uri!r} "
+            f"code_len={len(code)} verifier_len={len(code_verifier)}"
+        )
         async with httpx.AsyncClient() as client:
             r = await client.post(f"{_AUTHORITY}/token", data={
                 "client_id":     _CLIENT_ID,
-                "client_secret": _CLIENT_SECRET,
                 "code":          code,
                 "redirect_uri":  redirect_uri,
                 "grant_type":    "authorization_code",
+                "scope":         _SCOPES,
+                "code_verifier": code_verifier,
             })
-            r.raise_for_status()
+            if not r.is_success:
+                body = r.text
+                log.error(f"[onedrive] exchange_code falhou {r.status_code}: {body}")
+                raise httpx.HTTPStatusError(
+                    f"{r.status_code} {r.reason_phrase} — {body}",
+                    request=r.request, response=r,
+                )
             data = r.json()
         return {
             "access_token":  data["access_token"],
@@ -60,11 +84,17 @@ class OneDriveProvider(CloudProvider):
         async with httpx.AsyncClient() as client:
             r = await client.post(f"{_AUTHORITY}/token", data={
                 "client_id":     _CLIENT_ID,
-                "client_secret": _CLIENT_SECRET,
                 "refresh_token": refresh_token,
                 "grant_type":    "refresh_token",
+                "scope":         _SCOPES,
             })
-            r.raise_for_status()
+            if not r.is_success:
+                body = r.text
+                log.error(f"[onedrive] refresh_tokens falhou {r.status_code}: {body}")
+                raise httpx.HTTPStatusError(
+                    f"{r.status_code} {r.reason_phrase} — {body}",
+                    request=r.request, response=r,
+                )
             data = r.json()
         return {
             "access_token": data["access_token"],
@@ -77,6 +107,8 @@ class OneDriveProvider(CloudProvider):
                 f"{_GRAPH_BASE}/me",
                 headers={"Authorization": f"Bearer {access_token}"},
             )
+            if not r.is_success:
+                log.error(f"[onedrive] get_account_info falhou {r.status_code}: {r.text}")
             r.raise_for_status()
             data = r.json()
         email = data.get("mail") or data.get("userPrincipalName", "")

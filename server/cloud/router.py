@@ -43,11 +43,10 @@ def _callback_uri(provider: str) -> str:
 
 
 def _localhost_callback_uri(provider: str) -> str:
-    """URI de redirect usando localhost — necessário quando Google/Microsoft
-    rejeitam IPs privados como redirect URI."""
+    """URI de redirect para fluxo manual — exibe o código ao usuário sem trocá-lo."""
     m = re.search(r':(\d+)$', BASE_URL.split('//')[-1])
     port = int(m.group(1)) if m else 8000
-    return f"http://localhost:{port}/cloud/callback/{provider}"
+    return f"http://localhost:{port}/cloud/manual-redirect/{provider}"
 
 
 def _require_credential(credential_id: int, db: Session) -> CloudCredential:
@@ -165,8 +164,18 @@ def get_auth_url(provider: str, manual: bool = Query(False)):
     provider_obj = _get_provider(provider)
     state = secrets.token_urlsafe(24)
     redirect_uri = _localhost_callback_uri(provider) if manual else _callback_uri(provider)
-    _pending_states[state] = {"provider": provider, "redirect_uri": redirect_uri}
-    url = provider_obj.get_auth_url(redirect_uri=redirect_uri, state=state)
+
+    extra = {}
+    if provider == "onedrive":
+        from cloud.onedrive import generate_pkce
+        verifier, challenge = generate_pkce()
+        extra["code_verifier"] = verifier
+        kwargs = {"code_challenge": challenge}
+    else:
+        kwargs = {}
+
+    _pending_states[state] = {"provider": provider, "redirect_uri": redirect_uri, **extra}
+    url = provider_obj.get_auth_url(redirect_uri=redirect_uri, state=state, **kwargs)
     return AuthUrlOut(url=url, state=state, redirect_uri=redirect_uri)
 
 
@@ -178,7 +187,10 @@ async def manual_exchange(provider: str, req: ManualExchangeRequest, db: Session
         raise HTTPException(400, "State inválido ou expirado — reinicie o processo de autenticação")
 
     provider_obj = _get_provider(provider)
-    tokens = await provider_obj.exchange_code(code=req.code, redirect_uri=pending["redirect_uri"])
+    exchange_kwargs = {"code": req.code, "redirect_uri": pending["redirect_uri"]}
+    if "code_verifier" in pending:
+        exchange_kwargs["code_verifier"] = pending["code_verifier"]
+    tokens = await provider_obj.exchange_code(**exchange_kwargs)
     if not tokens.get("refresh_token"):
         raise HTTPException(400, "Provedor não retornou refresh_token. No Google, certifique-se de usar prompt=consent na primeira autorização.")
 
@@ -201,6 +213,30 @@ async def manual_exchange(provider: str, req: ManualExchangeRequest, db: Session
     )
 
 
+@router.get("/manual-redirect/{provider}", include_in_schema=False)
+async def manual_redirect_page(
+    provider: str,
+    code: str = Query(...),
+    state: str = Query(...),
+):
+    """Página intermediária para o fluxo manual: exibe o código sem consumi-lo."""
+    from fastapi.responses import HTMLResponse
+    html = f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head><meta charset="utf-8"><title>NestVault — Código de autorização</title>
+<style>body{{font-family:sans-serif;max-width:480px;margin:60px auto;text-align:center}}
+code{{background:#f3f4f6;padding:8px 14px;border-radius:6px;font-size:1.1em;word-break:break-all}}
+p{{color:#555}}</style></head>
+<body>
+<h2>Autorização recebida</h2>
+<p>Copie o código abaixo e cole no campo <strong>Código de autorização</strong> no NestVault:</p>
+<code id="c">{code}</code><br><br>
+<button onclick="navigator.clipboard.writeText(document.getElementById('c').textContent)">Copiar</button>
+<p style="font-size:.85em;margin-top:24px">State: <code>{state}</code></p>
+</body></html>"""
+    return HTMLResponse(html)
+
+
 @router.get("/callback/{provider}", include_in_schema=False)
 async def oauth_callback(
     provider: str,
@@ -216,7 +252,10 @@ async def oauth_callback(
     provider_obj = _get_provider(provider)
     redirect_uri = pending["redirect_uri"]
 
-    tokens = await provider_obj.exchange_code(code=code, redirect_uri=redirect_uri)
+    exchange_kwargs = {"code": code, "redirect_uri": redirect_uri}
+    if "code_verifier" in pending:
+        exchange_kwargs["code_verifier"] = pending["code_verifier"]
+    tokens = await provider_obj.exchange_code(**exchange_kwargs)
     if not tokens.get("refresh_token"):
         raise HTTPException(400, "Google/Microsoft não retornou refresh_token. Certifique-se de que prompt=consent está ativo.")
 
