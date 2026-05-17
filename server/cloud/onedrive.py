@@ -121,10 +121,38 @@ class OneDriveProvider(CloudProvider):
     async def list_folder(self, access_token: str, folder_id: str) -> list[FileEntry]:
         return await self._list_children(access_token, f"/me/drive/items/{folder_id}/children")
 
-    async def _list_children(self, access_token: str, path: str) -> list[FileEntry]:
+    async def list_folder_recursive(
+        self, access_token: str, folder_id: str, prefix: str = ""
+    ) -> list[FileEntry]:
+        # Cria um único cliente com timeout generoso e reutiliza em toda a árvore,
+        # evitando reconectar a cada subpasta em árvores grandes.
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=60.0)) as client:
+            return await self._recurse(client, access_token, folder_id, prefix)
+
+    async def _recurse(
+        self, client: httpx.AsyncClient, access_token: str, folder_id: str, prefix: str
+    ) -> list[FileEntry]:
+        entries = await self._list_children(
+            access_token, f"/me/drive/items/{folder_id}/children", client=client
+        )
+        result: list[FileEntry] = []
+        for e in entries:
+            e.path = f"{prefix}/{e.name}".lstrip("/") if prefix else e.name
+            if e.is_folder:
+                result.extend(await self._recurse(client, access_token, e.file_id, e.path))
+            else:
+                result.append(e)
+        return result
+
+    async def _list_children(
+        self, access_token: str, path: str, *, client: httpx.AsyncClient | None = None
+    ) -> list[FileEntry]:
         results: list[FileEntry] = []
         url: str | None = f"{_GRAPH_BASE}{path}?$select=id,name,folder,file,size,lastModifiedDateTime&$top=1000"
-        async with httpx.AsyncClient() as client:
+        owned = client is None
+        if owned:
+            client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=60.0))
+        try:
             while url:
                 r = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
                 r.raise_for_status()
@@ -146,6 +174,9 @@ class OneDriveProvider(CloudProvider):
                         is_folder=is_folder,
                     ))
                 url = data.get("@odata.nextLink")
+        finally:
+            if owned:
+                await client.aclose()
         return results
 
     async def download_file_to(
