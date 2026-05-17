@@ -82,6 +82,7 @@ async def lifespan(_: FastAPI):
     monitor = asyncio.create_task(_volume_health_monitor())
     sched.scheduler.start()
     sched.reload_jobs_from_db()
+    sched.schedule_daily_digest()
     log.info(f"Servidor iniciado — {len(STORAGE_VOLUMES)} volume(s): {[str(v) for v in STORAGE_VOLUMES]}")
     log.info(f"Auth: {'habilitada' if AUTH_ENABLED else 'desabilitada'}")
     yield

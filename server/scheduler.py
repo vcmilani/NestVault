@@ -1,5 +1,6 @@
-"""APScheduler integrado ao FastAPI — gerencia agendamentos dos cloud backup jobs."""
+"""APScheduler integrado ao FastAPI — gerencia agendamentos dos cloud backup jobs e digest diário."""
 import logging
+import os
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -35,6 +36,20 @@ def remove_job(job_id: int) -> None:
         log.info(f"[scheduler] Job {job_id} removido do scheduler")
     except Exception:
         pass
+
+
+def schedule_daily_digest() -> None:
+    """Agenda o digest diário. Hora configurável via DIGEST_HOUR_UTC (default 21 = 18h BRT)."""
+    from daily_digest import send_daily_digest
+    hour = int(os.getenv("DIGEST_HOUR_UTC", "21"))
+    scheduler.add_job(
+        send_daily_digest,
+        CronTrigger(hour=hour, minute=0),
+        id="daily_digest",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    log.info(f"[scheduler] Daily digest agendado para {hour:02d}:00 UTC ({hour - 3:02d}:00 BRT aprox.)")
 
 
 def reload_jobs_from_db() -> None:
