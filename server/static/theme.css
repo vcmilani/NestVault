@@ -2,7 +2,7 @@
 :root {
   --bg:#0d0f0f; --bg2:#131616; --bg3:#1a1e1e;
   --border:#232929; --border2:#2e3636;
-  --text:#c8d0ce; --text-dim:#5a6666; --text-mute:#3a4444;
+  --text:#c8d0ce; --text-dim:#7e9898; --text-mute:#5e7878;
   --amber:#e8a940; --amber-dim:#7a5520;
   --green:#4ecb8d; --green-dim:#1d5a3d;
   --red:#e05c5c; --red-dim:#5a2020;
@@ -16,7 +16,7 @@ html[data-theme="light"] body::before { background: none; }
 html[data-theme="light"] {
   --bg:#f5f6f5; --bg2:#eceeed; --bg3:#e2e5e3;
   --border:#cfd3d1; --border2:#b8bebc;
-  --text:#1e2424; --text-dim:#4a5a58; --text-mute:#8a9a98;
+  --text:#1e2424; --text-dim:#394847; --text-mute:#536664;
   --amber:#b87010; --amber-dim:#fce9c0;
   --green:#1e7a4a; --green-dim:#c6edd9;
   --red:#b83838; --red-dim:#fad8d8;
