@@ -45,6 +45,7 @@ NestVault/
 │   ├── database.py          ← Modelos SQLite/SQLAlchemy
 │   ├── storage.py           ← Helpers de storage compartilhados (v4.0)
 │   ├── crypto.py            ← Criptografia AES-256-GCM (v3.1)
+│   ├── auth.py              ← Autenticação via API key
 │   ├── scheduler.py         ← APScheduler para jobs de cloud backup (v4.0)
 │   ├── cloud/               ← Módulo de cloud backup (v4.0)
 │   │   ├── base.py          ← Abstração CloudProvider
@@ -93,9 +94,8 @@ Para usar o cloud backup, adicione as credenciais OAuth ao serviço (veja [Confi
 Environment="GDRIVE_CLIENT_ID=<client-id>"
 Environment="GDRIVE_CLIENT_SECRET=<client-secret>"
 
-# OneDrive (Azure Portal → App registrations)
+# OneDrive (Azure Portal → App registrations — public client, sem secret)
 Environment="ONEDRIVE_CLIENT_ID=<client-id>"
-Environment="ONEDRIVE_CLIENT_SECRET=<client-secret>"
 
 # URL pública do servidor (para redirect OAuth — padrão localhost:8000)
 Environment="BASE_URL=http://192.168.1.100:8000"
@@ -312,13 +312,15 @@ export ENCRYPTION_KEY="$(python3 -c 'import os,base64; print(base64.b64encode(os
 export GDRIVE_CLIENT_ID="..."
 export GDRIVE_CLIENT_SECRET="..."
 
-# Cloud backup — OneDrive (portal.azure.com → App registrations)
+# Cloud backup — OneDrive (portal.azure.com → App registrations — public client, sem secret)
 export ONEDRIVE_CLIENT_ID="..."
-export ONEDRIVE_CLIENT_SECRET="..."
 
 # URL base do servidor para OAuth callback (padrão: http://localhost:8000)
 # Deve ser acessível pelo browser do usuário ao autenticar
 export BASE_URL="http://192.168.1.100:8000"
+
+# Threshold mínimo de espaço livre (%) antes de usar o próximo disco da lista (padrão: 5%)
+export STORAGE_FALLBACK_THRESHOLD_PCT=5
 ```
 
 #### Configuração Cloud
@@ -328,7 +330,6 @@ export BASE_URL="http://192.168.1.100:8000"
 | `GDRIVE_CLIENT_ID` | | Client ID do app OAuth2 no Google Cloud Console |
 | `GDRIVE_CLIENT_SECRET` | | Client Secret correspondente |
 | `ONEDRIVE_CLIENT_ID` | | Application (client) ID no Azure Portal |
-| `ONEDRIVE_CLIENT_SECRET` | | Client Secret correspondente |
 | `BASE_URL` | | URL pública do servidor para callback OAuth (padrão: `http://localhost:8000`) |
 
 Sem essas variáveis o servidor funciona normalmente — apenas o cloud backup ficará indisponível.
@@ -364,7 +365,6 @@ Environment="REPLICATION_FACTOR=2"
 # Environment="GDRIVE_CLIENT_ID=<id>"
 # Environment="GDRIVE_CLIENT_SECRET=<secret>"
 # Environment="ONEDRIVE_CLIENT_ID=<id>"
-# Environment="ONEDRIVE_CLIENT_SECRET=<secret>"
 # Environment="BASE_URL=http://192.168.1.100:8000"
 ExecStart=/home/pi/backup_system/server/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
 Restart=always
@@ -946,6 +946,8 @@ pytest tests/ --cov=server --cov-report=term-missing
 | `test_cleanup.py` | `/cleanup`, `/maintenance/cleanup-orphans` — remoção de versões e arquivos órfãos |
 | `test_storage.py` | `GET /storage/info` — volume único e agregação de dois volumes; `reclaimable_bytes` |
 | `test_auth.py` | Rejeição sem chave, rejeição com chave errada, acesso liberado com chave válida |
+| `test_replication.py` | `/maintenance/rereplicate` e `/maintenance/reconcile-replication` — sub-replicação e sobre-replicação |
+| `test_disks.py` | `GET /storage/disks` — status de volumes, contagem de cópias físicas por volume |
 
 ---
 
@@ -963,9 +965,10 @@ O módulo de cloud backup é opcional. Para ativá-lo, registre um aplicativo OA
 
 **OneDrive:**
 1. [Azure Portal](https://portal.azure.com/) → App registrations → New registration
-2. Redirect URI (Web): `http://<ip-do-servidor>:8000/cloud/callback/onedrive`
-3. Certificates & secrets → New client secret
-4. Copie Application (client) ID e o secret → env vars `ONEDRIVE_CLIENT_ID` / `ONEDRIVE_CLIENT_SECRET`
+2. Authentication → Add a platform → **Mobile and desktop applications** (public client — requerido pelo PKCE)
+3. Redirect URI: `http://<ip-do-servidor>:8000/cloud/callback/onedrive`
+4. Marque "Allow public client flows" → Save
+5. Copie o Application (client) ID → env var `ONEDRIVE_CLIENT_ID` (nenhum client secret é necessário)
 
 ### Fluxo de uso
 
@@ -1424,7 +1427,7 @@ Limite: entre 1 e 500 itens por request. O tamanho do lote é definido pelo clie
 ```json
 {
   "status":  "ok",
-  "version": "3.1.5",
+  "version": "4.2.0",
   "time":    "2026-04-25T10:42:31.123456"
 }
 ```
@@ -1661,6 +1664,7 @@ A resposta de `/check/batch` é `list[CheckBatchResultItem]` na mesma ordem dos 
 | `GET /storage/disks` | — | `list[DiskVolumeInfo]` |
 | `POST /maintenance/cleanup-orphans` | — | `OrphanCleanupResponse` |
 | `POST /maintenance/rereplicate` | — | `RereplicateResponse` |
+| `POST /maintenance/reconcile-replication` | — | `ReconcileResponse` |
 | `POST /maintenance/encrypt-existing` | — | `EncryptExistingResponse` |
 
 ---
