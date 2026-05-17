@@ -317,6 +317,11 @@ def force_rereplicate_api(server):
     r.raise_for_status()
     return r.json()
 
+def force_reconcile_api(server):
+    r = _session.post(f"{server}/maintenance/reconcile-replication", headers=build_headers(), timeout=(10, None))
+    r.raise_for_status()
+    return r.json()
+
 
 def force_encrypt_existing_api(server):
     r = _session.post(f"{server}/maintenance/encrypt-existing", headers=build_headers(), timeout=(10, None))
@@ -948,6 +953,30 @@ def rereplicate(server=DEFAULT_SERVER):
         sys.exit(1)
 
 
+# -- Reconcile replication ----------------------------------------------------
+def reconcile_replication(server=DEFAULT_SERVER):
+    _info("Reconciliando replicacao (limpeza de excesso + re-replicacao de faltantes)...")
+    try:
+        result     = force_reconcile_api(server)
+        replicated = result.get("replicated", 0)
+        skipped    = result.get("skipped", 0)
+        cleaned    = result.get("cleaned", 0)
+        target     = result.get("target_copies", 0)
+        _ok(
+            f"Reconciliacao concluida: {replicated} replicado(s), "
+            f"{cleaned} copia(s) excedente(s) removida(s), "
+            f"{skipped} pulado(s) — alvo: {target} copia(s)"
+        )
+        if skipped:
+            _warn(
+                f"{skipped} arquivo(s) sem fonte acessivel (volume degraded). "
+                f"Recupere o disco e execute novamente."
+            )
+    except requests.RequestException as e:
+        _err(f"Erro na reconciliacao: {e}")
+        sys.exit(1)
+
+
 # -- Encrypt existing ---------------------------------------------------------
 def encrypt_existing(server=DEFAULT_SERVER):
     _info("Iniciando criptografia de arquivos existentes...")
@@ -1060,6 +1089,13 @@ def main():
     )
     prr.add_argument("--server", default=DEFAULT_SERVER)
 
+    # reconcile-replication
+    prc = sub.add_parser(
+        "reconcile-replication",
+        help="Reconcilia replicacao: remove excesso ou replica faltantes conforme REPLICATION_FACTOR",
+    )
+    prc.add_argument("--server", default=DEFAULT_SERVER)
+
     # encrypt-existing
     pee = sub.add_parser(
         "encrypt-existing",
@@ -1120,6 +1156,10 @@ def main():
     elif args.command == "rereplicate":
         _kv("Comando", "REREPLICATE")
         rereplicate(args.server)
+
+    elif args.command == "reconcile-replication":
+        _kv("Comando", "RECONCILE-REPLICATION")
+        reconcile_replication(args.server)
 
     elif args.command == "encrypt-existing":
         _kv("Comando", "ENCRYPT-EXISTING")

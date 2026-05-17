@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v3.1`
+# 🗄️ NestVault  `v4.2`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -6,6 +6,12 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v4.2** — prioridade de escrita por ordem de declaração dos discos: `STORAGE_DIRS` agora define também a ordem de prioridade de escrita. O servidor usa o primeiro disco da lista que ainda tenha espaço livre acima do limiar configurável `STORAGE_FALLBACK_THRESHOLD_PCT` (padrão 5%). Quando um disco esgota, o próximo da lista assume automaticamente — sem intervenção manual. Apenas quando todos os discos estão esgotados o servidor recorre ao de maior espaço livre. Útil para cenários com um disco de fallback grande compartilhado com o sistema (ex.: disco de 2 TB declarado por último). Corrigida duplicação silenciosa da função `_pick_volume()` em `main.py` que tornava o wrapper correto código morto.
+>
+> **v4.1** — verificação de integridade pós-escrita: após cada upload, o servidor relê o arquivo do disco e confronta o SHA-256, detectando corrupção silenciosa de I/O antes de registrar o conteúdo no banco. Em modo com criptografia, a verificação usa `decrypt_chunks()` que autentica os GCM tags por chunk. Na deduplicação (arquivo já existente), o conteúdo em disco é verificado antes de aceitar a referência — arquivos corrompidos desde o upload original são detectados e o backup falha com erro 500 em vez de referenciar dados inválidos.
+>
+> **v4.0** — cloud backup: o servidor conecta-se a contas **Google Drive** e **OneDrive** e baixa arquivos de pastas configuradas, armazenando-os localmente como versões NestVault (deduplicação, criptografia e replicação funcionam transparentemente). Suporte a múltiplas contas e múltiplas pastas por conta. Agendamento cron nativo no servidor via APScheduler — sem depender do cron do sistema. Autenticação OAuth2 implementada diretamente via `httpx`, sem SDKs de terceiros. Tokens armazenados criptografados no banco (Fernet + SHA-256 da API key). Novo módulo `cloud/` + `scheduler.py` + `storage.py` (helpers extraídos de `main.py`). Duas novas tabelas no banco: `cloud_credentials` e `cloud_backup_jobs`. Novos endpoints `/cloud/*` e seção "Cloud Backup" no dashboard.
+>
 > **v3.1** — criptografia em repouso com AES-256-GCM: ativada via `ENCRYPTION_ENABLED=true` + `ENCRYPTION_KEY` (Base64, 32 bytes). Opt-in — desabilitada por padrão para quem já usa LUKS/ZFS/FileVault. Arquivos existentes continuam legíveis; a migração é feita sob demanda via `encrypt-existing` (cliente) ou `POST /maintenance/encrypt-existing`. Download descriptografa em streaming, sem buffer completo em memória. Novo módulo `crypto.py` com chunked AES-256-GCM (1 MB/chunk, nonce único por chunk). Replicação já copia arquivos cifrados — nenhum dado trafega em claro entre volumes.
 >
 > **v3.0** — redundância de dados por replicação entre volumes: cada arquivo pode ser mantido em N cópias físicas em volumes distintos via `REPLICATION_FACTOR` (padrão `1` = comportamento anterior, sem replicação). Downloads fazem fallback automático para cópias sobreviventes. Quando um volume degraded se recupera, arquivos sub-replicados são restaurados em background. Compatível com RAID/ZFS físico — sem replicação por padrão.
@@ -37,7 +43,15 @@ NestVault/
 ├── server/
 │   ├── main.py              ← API FastAPI
 │   ├── database.py          ← Modelos SQLite/SQLAlchemy
+│   ├── storage.py           ← Helpers de storage compartilhados (v4.0)
 │   ├── crypto.py            ← Criptografia AES-256-GCM (v3.1)
+│   ├── scheduler.py         ← APScheduler para jobs de cloud backup (v4.0)
+│   ├── cloud/               ← Módulo de cloud backup (v4.0)
+│   │   ├── base.py          ← Abstração CloudProvider
+│   │   ├── gdrive.py        ← GoogleDriveProvider
+│   │   ├── onedrive.py      ← OneDriveProvider
+│   │   ├── runner.py        ← Lógica de execução de job
+│   │   └── router.py        ← Endpoints /cloud/*
 │   ├── requirements.txt
 │   └── static/
 │       └── index.html       ← Dashboard web
@@ -58,6 +72,36 @@ NestVault/
 | **NestVault para macOS** | macOS (app nativo SwiftUI) | [github.com/vcmilani/NestVault_Xcode](https://github.com/vcmilani/NestVault_Xcode) |
 
 O servidor expõe uma API REST padrão — qualquer cliente que implemente o [contrato da API](#-endpoints-da-api) funciona sem modificações no servidor.
+
+---
+
+## ⚠️ Atualizando da v3.x para v4.0
+
+A v4.0 adiciona duas novas tabelas ao banco: `cloud_credentials` e `cloud_backup_jobs`. O `init_db()` cria as tabelas automaticamente no startup — **sem downtime, sem intervenção manual**.
+
+Nenhuma migração de dados existente é necessária. Para verificar:
+
+```bash
+sqlite3 /mnt/hd-externo/backup.db ".tables"
+# Deve listar cloud_credentials e cloud_backup_jobs
+```
+
+Para usar o cloud backup, adicione as credenciais OAuth ao serviço (veja [Configuração Cloud](#configuração-cloud)):
+
+```ini
+# Google Drive (Google Cloud Console)
+Environment="GDRIVE_CLIENT_ID=<client-id>"
+Environment="GDRIVE_CLIENT_SECRET=<client-secret>"
+
+# OneDrive (Azure Portal → App registrations)
+Environment="ONEDRIVE_CLIENT_ID=<client-id>"
+Environment="ONEDRIVE_CLIENT_SECRET=<client-secret>"
+
+# URL pública do servidor (para redirect OAuth — padrão localhost:8000)
+Environment="BASE_URL=http://192.168.1.100:8000"
+```
+
+Sem essas variáveis, o servidor continua funcionando normalmente — o módulo de cloud backup simplesmente não conseguirá autenticar.
 
 ---
 
@@ -263,7 +307,31 @@ export REPLICATION_FACTOR=2
 # Omitir se o disco já tem criptografia (LUKS, ZFS encryption, macOS FileVault)
 export ENCRYPTION_ENABLED=true
 export ENCRYPTION_KEY="$(python3 -c 'import os,base64; print(base64.b64encode(os.urandom(32)).decode())')"
+
+# Cloud backup — Google Drive (Google Cloud Console → APIs & Services → Credentials)
+export GDRIVE_CLIENT_ID="..."
+export GDRIVE_CLIENT_SECRET="..."
+
+# Cloud backup — OneDrive (portal.azure.com → App registrations)
+export ONEDRIVE_CLIENT_ID="..."
+export ONEDRIVE_CLIENT_SECRET="..."
+
+# URL base do servidor para OAuth callback (padrão: http://localhost:8000)
+# Deve ser acessível pelo browser do usuário ao autenticar
+export BASE_URL="http://192.168.1.100:8000"
 ```
+
+#### Configuração Cloud
+
+| Variável | Obrigatório | Descrição |
+|---|:-:|---|
+| `GDRIVE_CLIENT_ID` | | Client ID do app OAuth2 no Google Cloud Console |
+| `GDRIVE_CLIENT_SECRET` | | Client Secret correspondente |
+| `ONEDRIVE_CLIENT_ID` | | Application (client) ID no Azure Portal |
+| `ONEDRIVE_CLIENT_SECRET` | | Client Secret correspondente |
+| `BASE_URL` | | URL pública do servidor para callback OAuth (padrão: `http://localhost:8000`) |
+
+Sem essas variáveis o servidor funciona normalmente — apenas o cloud backup ficará indisponível.
 
 `STORAGE_DIRS` e `STORAGE_DIR` são mutuamente compatíveis: se apenas `STORAGE_DIR` estiver definido, o servidor opera normalmente com um único volume. Se `STORAGE_DIRS` estiver definido, ele tem precedência e pode listar quantos pontos de montagem forem necessários.
 
@@ -292,6 +360,12 @@ Environment="REPLICATION_FACTOR=2"
 # Criptografia em repouso — omitir se o disco já tem criptografia própria
 # Environment="ENCRYPTION_ENABLED=true"
 # Environment="ENCRYPTION_KEY=<chave-base64-32-bytes>"
+# Cloud backup — omitir se não for usar Google Drive / OneDrive
+# Environment="GDRIVE_CLIENT_ID=<id>"
+# Environment="GDRIVE_CLIENT_SECRET=<secret>"
+# Environment="ONEDRIVE_CLIENT_ID=<id>"
+# Environment="ONEDRIVE_CLIENT_SECRET=<secret>"
+# Environment="BASE_URL=http://192.168.1.100:8000"
 ExecStart=/home/pi/backup_system/server/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
 Restart=always
 
@@ -332,7 +406,7 @@ export BACKUP_API_KEY="uma-chave-secreta-forte-aqui"
 
 ## 🚀 Comandos
 
-O cliente possui nove subcomandos: `backup`, `backups`, `versions`, `restore`, `cleanup`, `delete-label`, `cleanup-orphans`, `rereplicate` e `encrypt-existing`.
+O cliente possui dez subcomandos: `backup`, `backups`, `versions`, `restore`, `cleanup`, `delete-label`, `cleanup-orphans`, `rereplicate`, `reconcile-replication` e `encrypt-existing`.
 
 ---
 
@@ -716,6 +790,32 @@ Se `skipped > 0`, significa que alguns arquivos têm a única cópia em um volum
 
 ---
 
+### reconcile-replication
+
+Reconcilia o acervo inteiro com o `REPLICATION_FACTOR` atual do servidor, resolvendo **ambas** as direções:
+
+- **Sub-replicados** (fator aumentou ou disco foi adicionado): cria cópias faltantes
+- **Sobre-replicados** (fator diminuiu): remove cópias excedentes do disco e do banco
+
+```bash
+nestvault reconcile-replication \
+  --server http://192.168.1.100:8000
+```
+
+| Opção | Descrição |
+|-------|-----------|
+| `--server` | URL do servidor |
+
+Exemplo de saída:
+
+```
+Reconciliacao concluida: 40 replicado(s), 80 copia(s) excedente(s) removida(s), 0 pulado(s) — alvo: 1 copia(s)
+```
+
+Se `skipped > 0`, algum arquivo tem a única cópia em volume `degraded`. Recupere o disco e execute novamente.
+
+---
+
 ### encrypt-existing
 
 Cifra todos os arquivos físicos que ainda não foram criptografados. Use após ativar `ENCRYPTION_ENABLED=true` no servidor para migrar um acervo existente. Requer que o servidor esteja rodando com `ENCRYPTION_ENABLED=true`.
@@ -849,6 +949,55 @@ pytest tests/ --cov=server --cov-report=term-missing
 
 ---
 
+## ☁️ Cloud Backup
+
+### Configuração Cloud
+
+O módulo de cloud backup é opcional. Para ativá-lo, registre um aplicativo OAuth2 em cada provedor que desejar usar:
+
+**Google Drive:**
+1. [Google Cloud Console](https://console.cloud.google.com/) → APIs & Services → Credentials → Create OAuth 2.0 Client ID
+2. Tipo: **Web application**
+3. Authorized redirect URI: `http://<ip-do-servidor>:8000/cloud/callback/gdrive`
+4. Copie Client ID e Client Secret → env vars `GDRIVE_CLIENT_ID` / `GDRIVE_CLIENT_SECRET`
+
+**OneDrive:**
+1. [Azure Portal](https://portal.azure.com/) → App registrations → New registration
+2. Redirect URI (Web): `http://<ip-do-servidor>:8000/cloud/callback/onedrive`
+3. Certificates & secrets → New client secret
+4. Copie Application (client) ID e o secret → env vars `ONEDRIVE_CLIENT_ID` / `ONEDRIVE_CLIENT_SECRET`
+
+### Fluxo de uso
+
+1. Abra o dashboard (`http://<ip>:8000/`) → seção **Cloud Backup**
+2. Clique em **+ Google Drive** ou **+ OneDrive** — o browser redireciona para o OAuth do provedor
+3. Após autorizar, a conta aparece na lista — pode conectar múltiplas contas de ambos os provedores
+4. Clique em **+ Job** na conta — selecione a pasta de origem e o label de destino; configure o cron (opcional)
+5. Use **▶ Run** para executar manualmente ou aguarde o próximo disparo agendado
+
+### Funcionamento interno
+
+- O servidor lista recursivamente a pasta configurada no Drive/OneDrive e baixa cada arquivo para storage local
+- Arquivos idênticos (mesmo SHA-256) são detectados por deduplicação — nenhum byte extra no disco
+- Criptografia e replicação funcionam normalmente — o backup cloud é tratado igual ao backup via cliente CLI
+- Tokens de acesso são renovados automaticamente com o refresh_token; refresh_tokens são armazenados criptografados no banco via Fernet
+- Erros por arquivo são tolerados — o job continua e registra o erro na última mensagem
+
+### Cron
+
+Cron usa **5 campos** no formato padrão: `minuto hora dia_mes mês dia_semana`.
+
+| Expressão | Significado |
+|---|---|
+| `0 2 * * *` | Todo dia às 02:00 UTC |
+| `0 */6 * * *` | A cada 6 horas |
+| `30 1 * * 0` | Domingos à 01:30 UTC |
+| `0 3 1 * *` | Dia 1 de cada mês às 03:00 UTC |
+
+Deixar o campo vazio desabilita o agendamento (execução manual apenas).
+
+---
+
 ## 🖥️ Dashboard Web
 
 Acessível pelo browser, servido diretamente pelo FastAPI:
@@ -867,10 +1016,24 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 - **Tabela de backups** — clique em um label para expandir as versões
 - **Versões** — clique em uma versão para ver os arquivos
 - **Comparação de versões** — selecione duas versões com as checkboxes e clique em ⇄ Comparar: veja arquivos adicionados, removidos, modificados e o delta de tamanho de cada um
+- **Cloud Backup** *(v4.0)* — conecte contas Google Drive e OneDrive, gerencie jobs de backup agendados e execute manualmente
 
 ---
 
 ## ⚡ Otimizações
+
+### v4.0
+
+| Componente | Mudança |
+|---|---|
+| **`cloud/` (server)** | Novo módulo com abstração `CloudProvider`, implementações `GoogleDriveProvider` e `OneDriveProvider`. OAuth2 manual via `httpx` — sem SDKs de terceiros (Google Auth, MSAL) |
+| **`scheduler.py` (server)** | APScheduler `AsyncIOScheduler` integrado ao lifespan do FastAPI. Jobs persistidos no banco e restaurados no startup. `add_or_update_job`, `remove_job`, `reload_jobs_from_db` |
+| **`storage.py` (server)** | Helpers de storage extraídos de `main.py` para eliminar importação circular com `cloud/`. `pick_volume`, `content_path`, `ensure_replicas`, `healthy_volumes`, `volume_health_monitor` — compartilhados entre `main.py` e `cloud/runner.py` |
+| **`database.py` — novas tabelas** | `CloudCredential` (conta cloud + tokens OAuth) e `CloudBackupJob` (configuração de job: conta, pasta, label, cron). Tokens criptografados com Fernet; chave derivada do `BACKUP_API_KEY` via SHA-256 |
+| **Runner (server)** | `run_cloud_backup_job` — lista pasta recursivamente, baixa arquivo a arquivo em streaming com SHA-256 single-pass, reutiliza pipeline de deduplicação/criptografia/replicação existente. Token renovado a cada 100 arquivos. Erros por arquivo tolerados |
+| **`/cloud/*` (server)** | 12 novos endpoints para gerenciar contas e jobs. `POST /cloud/jobs/{id}/run` dispara execução via `asyncio.create_task` — resposta 202 imediata |
+| **`index.html`** | Seção "Cloud Backup" no dashboard: conectar contas OAuth, tabela de jobs, execução manual e acompanhamento de status |
+| **Novas dependências** | `httpx>=0.27.0` e `apscheduler>=3.10.0` — apenas 2 pacotes adicionados |
 
 ### v3.1
 
@@ -1121,11 +1284,35 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 |--------|----------|-----------|
 | `POST` | `/maintenance/cleanup-orphans` | Remove todos os arquivos físicos não referenciados por nenhuma versão |
 | `POST` | `/maintenance/rereplicate` | Re-replica conteúdos com menos cópias que `REPLICATION_FACTOR` |
+| `POST` | `/maintenance/reconcile-replication` | Reconcilia replicação: remove cópias excedentes e preenche faltantes conforme `REPLICATION_FACTOR` |
 | `POST` | `/maintenance/encrypt-existing` | Cifra arquivos físicos ainda não criptografados (requer `ENCRYPTION_ENABLED=true`) |
+
+### Cloud Backup *(v4.0)*
+
+| Método | Endpoint | Descrição |
+|--------|----------|-----------|
+| `GET` | `/cloud/accounts` | Lista contas cloud conectadas |
+| `GET` | `/cloud/accounts/{provider}/auth` | Gera URL de autenticação OAuth2 (`provider`: `gdrive` ou `onedrive`) |
+| `DELETE` | `/cloud/accounts/{id}` | Desconecta conta (remove credenciais e jobs associados) |
+| `GET` | `/cloud/accounts/{id}/folders` | Lista pastas raiz da conta |
+| `GET` | `/cloud/accounts/{id}/folders/{folder_id}` | Lista subpastas de uma pasta |
+| `GET` | `/cloud/jobs` | Lista todos os jobs de cloud backup |
+| `POST` | `/cloud/jobs` | Cria job de backup (conta, pasta, label destino, cron) |
+| `GET` | `/cloud/jobs/{id}` | Detalhes de um job |
+| `PATCH` | `/cloud/jobs/{id}` | Atualiza job (pasta, label, cron, enabled) |
+| `DELETE` | `/cloud/jobs/{id}` | Remove job |
+| `POST` | `/cloud/jobs/{id}/run` | Inicia execução manual do job (async, retorna 202 imediatamente) |
+| `GET` | `/cloud/jobs/{id}/status` | Status da última execução (last_run_at, status, message) |
+
+> O callback OAuth (`GET /cloud/callback/{provider}`) é chamado pelo provedor — não é chamado diretamente pelo usuário.
+>
+> `POST /cloud/jobs/{id}/run` retorna `{ "status": "started", "job_id": N }` — a execução ocorre em background. Use `GET /cloud/jobs/{id}/status` para acompanhar.
 
 > `/maintenance/cleanup-orphans` — retorna `{ "files_removed": N, "bytes_freed": N }`. Útil após deleções em massa. Operação **síncrona**.
 >
 > `/maintenance/rereplicate` — retorna `{ "replicated": N, "skipped": N, "target_copies": N }`. `replicated` = arquivos que receberam ao menos uma nova cópia. `skipped` = arquivos cuja única cópia está em volume `degraded`. Operação **síncrona** — pode demorar em acervos grandes.
+>
+> `/maintenance/reconcile-replication` — retorna `{ "replicated": N, "skipped": N, "cleaned": N, "target_copies": N }`. Remove cópias excedentes e preenche arquivos sub-replicados em uma única chamada. Útil ao reduzir ou aumentar `REPLICATION_FACTOR`. Operação **síncrona** — pode demorar em acervos grandes.
 >
 > `/maintenance/encrypt-existing` — retorna `{ "files_encrypted": N, "bytes_processed": N, "skipped": N }`. `skipped` inclui arquivos sem cópia acessível (volume degraded) e erros de I/O. Operação **síncrona** — use timeout longo em acervos grandes (cliente usa 600 s). Retorna `400` se `ENCRYPTION_ENABLED=false`.
 

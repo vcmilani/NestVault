@@ -12,8 +12,11 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
-from datetime import datetime
-import os
+from datetime import datetime, timezone
+import os, hashlib, base64
+
+def _utcnow():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 DB_PATH = os.getenv("DB_PATH", "./backup.db")
 
@@ -32,6 +35,7 @@ def _set_sqlite_pragma(dbapi_connection, _):
     cursor.execute("PRAGMA cache_size=-64000")           # 64MB de cache
     cursor.execute("PRAGMA temp_store=MEMORY")           # tabelas temp na RAM
     cursor.execute("PRAGMA mmap_size=268435456")         # 256MB mmap
+    cursor.execute("PRAGMA foreign_keys=ON")             # enforça FKs declaradas nos modelos
     cursor.close()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -45,7 +49,7 @@ class BackupID(Base):
     label       = Column(String, nullable=False, unique=True, index=True)
     client_name = Column(String, nullable=True, index=True)
     prefix      = Column(String, nullable=True)
-    created_at  = Column(DateTime, default=datetime.utcnow)
+    created_at  = Column(DateTime, default=_utcnow)
     status      = Column(String, default="active")
 
     versions = relationship("BackupVersion", back_populates="backup",
@@ -62,7 +66,7 @@ class BackupVersion(Base):
     id           = Column(Integer, primary_key=True)
     backup_label = Column(String, ForeignKey("backup_ids.label"), nullable=False, index=True)
     version_key  = Column(String, nullable=False, index=True)
-    created_at   = Column(DateTime, default=datetime.utcnow)
+    created_at   = Column(DateTime, default=_utcnow)
     finished_at  = Column(DateTime, nullable=True)
     status       = Column(String, default="running", index=True)
 
@@ -78,7 +82,7 @@ class FileContent(Base):
     stored_at  = Column(String, nullable=False)
     size       = Column(Integer, nullable=False)
     encrypted  = Column(Boolean, nullable=False, default=False, server_default="0")
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
 
     refs = relationship("VersionFile", back_populates="content", lazy="dynamic")
 
@@ -109,10 +113,96 @@ class VersionFile(Base):
     original_path = Column(String, nullable=False, index=True)
     sha256        = Column(String(64), ForeignKey("file_contents.sha256"), nullable=False)
     mtime         = Column(Float, nullable=False)
-    created_at    = Column(DateTime, default=datetime.utcnow)
+    created_at    = Column(DateTime, default=_utcnow)
 
     version = relationship("BackupVersion", back_populates="files")
     content = relationship("FileContent", back_populates="refs")
+
+
+class CloudCredential(Base):
+    __tablename__ = "cloud_credentials"
+
+    id           = Column(Integer, primary_key=True)
+    provider     = Column(String, nullable=False, index=True)  # "gdrive" | "onedrive"
+    email        = Column(String, nullable=False)
+    display_name = Column(String, nullable=True)
+    access_token = Column(String, nullable=True)
+    refresh_token = Column(String, nullable=False)  # armazenado criptografado
+    token_expiry = Column(DateTime, nullable=True)
+    created_at   = Column(DateTime, default=_utcnow)
+
+    jobs = relationship("CloudBackupJob", back_populates="credential", cascade="all, delete-orphan")
+
+
+class CloudBackupJob(Base):
+    __tablename__ = "cloud_backup_jobs"
+
+    id              = Column(Integer, primary_key=True)
+    credential_id   = Column(Integer, ForeignKey("cloud_credentials.id"), nullable=False, index=True)
+    folder_id       = Column(String, nullable=False)
+    folder_name     = Column(String, nullable=False)
+    target_label    = Column(String, nullable=False)
+    cron_expr       = Column(String, nullable=True)
+    enabled         = Column(Boolean, default=True, nullable=False)
+    last_run_at     = Column(DateTime, nullable=True)
+    last_run_status = Column(String, nullable=True)   # "running" | "success" | "error"
+    last_run_message = Column(String, nullable=True)
+    created_at      = Column(DateTime, default=_utcnow)
+
+    credential = relationship("CloudCredential", back_populates="jobs")
+
+
+# -- Token encryption ---------------------------------------------------------
+import logging as _logging
+_log = _logging.getLogger("backup-server")
+
+_cipher_cache: dict[str, object] = {}
+
+
+def _token_cipher():
+    api_key = os.getenv("BACKUP_API_KEY", "")
+    if not api_key:
+        return None
+    if api_key not in _cipher_cache:
+        from cryptography.fernet import Fernet
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+        from cryptography.hazmat.primitives import hashes
+        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32,
+                         salt=b"nestvault-token-v1", iterations=260_000)
+        _cipher_cache[api_key] = Fernet(base64.urlsafe_b64encode(kdf.derive(api_key.encode())))
+    return _cipher_cache[api_key]
+
+
+def _token_cipher_legacy():
+    """Chave SHA-256 usada antes da migração para PBKDF2 — apenas para decrypt de fallback."""
+    api_key = os.getenv("BACKUP_API_KEY", "")
+    if not api_key:
+        return None
+    from cryptography.fernet import Fernet
+    return Fernet(base64.urlsafe_b64encode(hashlib.sha256(api_key.encode()).digest()))
+
+
+def encrypt_token(token: str) -> str:
+    cipher = _token_cipher()
+    return cipher.encrypt(token.encode()).decode() if cipher else token
+
+
+def decrypt_token(encrypted: str) -> str:
+    cipher = _token_cipher()
+    if not cipher:
+        return encrypted
+    try:
+        return cipher.decrypt(encrypted.encode()).decode()
+    except Exception:
+        # Fallback: token cifrado com chave legada (SHA-256) antes da migração para PBKDF2
+        try:
+            legacy = _token_cipher_legacy()
+            plaintext = legacy.decrypt(encrypted.encode()).decode()
+            _log.info("[token] Token legado detectado — será re-cifrado com PBKDF2 na próxima gravação")
+            return plaintext
+        except Exception:
+            _log.warning("[token] Falha ao decifrar token — pode estar em texto plano (migração sem API_KEY)")
+            return encrypted
 
 
 def init_db():
@@ -124,8 +214,9 @@ def init_db():
                 "ALTER TABLE file_contents ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0"
             ))
             conn.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            if "duplicate column" not in str(e).lower():
+                raise
 
 
 def get_db():

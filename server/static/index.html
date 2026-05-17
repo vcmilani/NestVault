@@ -11,17 +11,9 @@
 <link rel="manifest" href="/static/manifest.json">
 <title>NestVault</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/theme.css">
+<script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
 <style>
-  :root {
-    --bg:#0d0f0f; --bg2:#131616; --bg3:#1a1e1e;
-    --border:#232929; --border2:#2e3636;
-    --text:#c8d0ce; --text-dim:#5a6666; --text-mute:#3a4444;
-    --amber:#e8a940; --amber-dim:#7a5520;
-    --green:#4ecb8d; --green-dim:#1d5a3d;
-    --red:#e05c5c; --red-dim:#5a2020;
-    --blue:#5ba4cf; --purple:#a78bfa;
-    --mono:'IBM Plex Mono',monospace;
-  }
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
   body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;min-height:100vh}
   body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.04) 2px,rgba(0,0,0,.04) 4px);pointer-events:none;z-index:999}
@@ -37,6 +29,15 @@
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
   .hbtn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 12px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s}
   .hbtn:hover{border-color:var(--amber);color:var(--amber)}
+  .hbtn:disabled{opacity:.4;cursor:not-allowed;pointer-events:none}
+  .small-btn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:2px 8px;font-family:var(--mono);font-size:10px;cursor:pointer;letter-spacing:.04em;transition:all .15s;display:inline-flex;align-items:center;gap:3px;white-space:nowrap}
+  .small-btn:hover{border-color:var(--amber);color:var(--amber)}
+  .small-btn:disabled{opacity:.35;cursor:not-allowed;pointer-events:none}
+  .small-btn.btn-run:hover{border-color:var(--green);color:var(--green)}
+  .small-btn.btn-run.is-running{border-color:var(--amber-dim);color:var(--amber);pointer-events:none}
+  .small-btn.btn-danger:hover{border-color:var(--red);color:var(--red)}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .spin{display:inline-block;animation:spin .8s linear infinite}
   .last-updated{font-size:11px;color:var(--text-mute)}
 
   /* Layout */
@@ -116,7 +117,7 @@
   @keyframes dots{0%,20%{content:'.'}40%{content:'..'}60%,100%{content:'...'}}
 
   /* Login */
-  .login-overlay{position:fixed;inset:0;background:rgba(13,15,15,.93);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
+  .login-overlay{position:fixed;inset:0;background:var(--overlay-bg);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
   .login-box{border:1px solid var(--border2);border-top:2px solid var(--amber);background:var(--bg2);padding:40px 48px;width:min(400px,calc(100vw - 32px));animation:fadeUp .3s ease}
   .login-title{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--amber);margin-bottom:6px}
   .login-sub{font-size:11px;color:var(--text-dim);margin-bottom:28px}
@@ -155,6 +156,11 @@
   .diff-mod td:first-child{color:var(--amber)}
   .delta-pos{color:var(--green)}.delta-neg{color:var(--red)}
 
+  /* Disk tags in backup row */
+  .disk-tag{display:inline-block;padding:1px 6px;font-size:9px;letter-spacing:.05em;background:var(--bg3);border:1px solid var(--green-dim);color:var(--green);margin:1px 2px;white-space:nowrap;cursor:default}
+  .disk-tag-loading{color:var(--text-mute);font-size:10px}
+  .disk-empty{color:var(--text-mute)}
+
   ::-webkit-scrollbar{width:6px;height:6px}
   ::-webkit-scrollbar-track{background:var(--bg)}
   ::-webkit-scrollbar-thumb{background:var(--border2)}
@@ -173,6 +179,7 @@
     header{padding:0 16px}
     .header-right{gap:12px}
     .hbtn{min-height:40px;padding:8px 12px}
+    .small-btn{min-height:32px;padding:4px 10px}
     tbody tr td{padding:12px 10px}
     tbody tr td:first-child{padding-left:14px}
     .row-version td{padding:11px 14px 11px 28px}
@@ -201,11 +208,12 @@
 <header>
   <div class="logo">
     <div class="logo-icon">◈</div>
-    <div><div class="logo-text">NestVault</div><div class="logo-sub">v3.1</div></div>
+    <div><div class="logo-text">NestVault</div><div class="logo-sub">v4.0</div></div>
   </div>
   <div class="header-right">
     <div class="status-dot" id="statusDot"></div>
     <span class="last-updated" id="lastUpdated">—</span>
+    <button class="hbtn" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
     <button class="hbtn" onclick="loadAll()">↻ Refresh</button>
     <a class="hbtn" href="/disks" style="text-decoration:none">⊞ Discos</a>
     <button class="hbtn" id="logoutBtn">⌀ API Key</button>
@@ -239,6 +247,70 @@
   </div>
   <div class="table-wrap">
     <div id="backupsTable"><div class="loading">Carregando</div></div>
+  </div>
+
+  <!-- Cloud Backup -->
+  <div class="section-head" style="margin-top:28px">
+    <div class="section-title">Cloud Backup</div>
+    <div style="display:flex;gap:8px">
+      <button class="hbtn" onclick="connectCloud('gdrive')">+ Google Drive</button>
+      <button class="hbtn" onclick="connectCloud('onedrive')">+ OneDrive</button>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <div id="cloudAccountsWrap"></div>
+  </div>
+  <div class="table-wrap" style="margin-top:12px">
+    <div id="cloudJobsWrap"><div class="loading">Carregando jobs</div></div>
+  </div>
+
+  <!-- Modal: autenticação OAuth manual (para IPs privados) -->
+  <div id="cloudAuthModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:center;justify-content:center">
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:28px;min-width:360px;max-width:520px;width:90%">
+      <div style="font-size:13px;font-weight:600;margin-bottom:18px" id="authModalTitle">Conectar conta</div>
+
+      <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px"><strong>1.</strong> Adicione este URI de redirecionamento nas configurações OAuth do provedor:</div>
+      <div id="authRedirectUri" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:8px 10px;font-size:11px;font-family:monospace;margin-bottom:16px;word-break:break-all;user-select:all"></div>
+
+      <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px"><strong>2.</strong> Clique para autorizar — o browser tentará abrir o endereço <code>localhost</code>:</div>
+      <a id="authLink" href="#" target="_blank" rel="noopener" style="display:inline-block;font-size:12px;background:var(--amber);color:var(--bg);padding:6px 14px;border-radius:4px;text-decoration:none;margin-bottom:16px">Abrir página de autorização ↗</a>
+
+      <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px"><strong>3.</strong> Se a página não carregar (IP privado), copie a URL completa da barra do browser e cole aqui:</div>
+      <textarea id="authPastedUrl" rows="3" placeholder="http://localhost:8000/cloud/callback/gdrive?code=4%2F0A...&state=..." style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:11px;box-sizing:border-box;resize:vertical;font-family:monospace"></textarea>
+      <div id="authError" style="color:#f87171;font-size:11px;margin-top:6px;display:none"></div>
+
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+        <button class="hbtn" onclick="closeAuthModal()">Cancelar</button>
+        <button id="authConnectBtn" class="hbtn" onclick="submitAuthCode()" style="background:var(--amber);color:var(--bg)">Conectar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: criar job -->
+  <div id="cloudModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:center;justify-content:center">
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:28px;min-width:360px;max-width:480px;width:90%">
+      <div id="cloudModalTitle" style="font-size:13px;font-weight:600;margin-bottom:18px">Novo job de backup</div>
+      <label style="font-size:11px;color:var(--text-dim)">Conta</label>
+      <select id="jCredential" style="width:100%;margin:4px 0 12px;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px"></select>
+      <label style="font-size:11px;color:var(--text-dim)">Pasta no cloud</label>
+      <select id="jFolderSelect" style="width:100%;margin:4px 0 4px;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px;box-sizing:border-box">
+        <option value="">— selecione a conta primeiro —</option>
+      </select>
+      <div id="jFolderManualWrap" style="display:none;margin-top:6px">
+        <input id="jFolderId" placeholder="ID da pasta" style="width:100%;margin:0 0 6px;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px;box-sizing:border-box">
+        <input id="jFolderName" placeholder="Nome da pasta" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px;box-sizing:border-box">
+      </div>
+      <a id="jFolderManualLink" href="#" onclick="toggleFolderManual(event)" style="font-size:10px;color:var(--text-dim);display:block;margin:3px 0 12px">inserir ID manualmente</a>
+      <label style="font-size:11px;color:var(--text-dim)">Label de destino no NestVault</label>
+      <input id="jLabel" placeholder="Ex: gdrive-documentos" style="width:100%;margin:4px 0 12px;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px;box-sizing:border-box">
+      <label style="font-size:11px;color:var(--text-dim)">Agendamento (cron, opcional)</label>
+      <input id="jCron" placeholder="Ex: 0 3 * * * (3h da manhã diário)" style="width:100%;margin:4px 0 18px;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px;box-sizing:border-box">
+      <div id="jError" style="color:#e05;font-size:11px;margin-bottom:10px;display:none"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="hbtn" onclick="closeJobModal()">Cancelar</button>
+        <button id="jSaveBtn" class="hbtn" style="background:var(--amber);color:#000" onclick="saveJob()">Criar job</button>
+      </div>
+    </div>
   </div>
 </main>
 
@@ -361,9 +433,10 @@
           <td class="num-cell">${b.file_count.toLocaleString('pt-BR')}</td>
           <td class="size-cell">${fmtSize(b.total_size_bytes)}</td>
           <td class="date-cell">${b.last_version ? fmtDate(b.last_version) : '—'}</td>
+          <td id="disks-${esc(b.label)}" onclick="event.stopPropagation()" style="white-space:nowrap"><span class="disk-tag-loading">·</span></td>
         </tr>
         <tr class="versions-row" id="vrow-${esc(b.label)}" style="display:${isExp?'':'none'}">
-          <td colspan="7">
+          <td colspan="8">
             <div class="versions-container">
               <div class="versions-head">
                 <span>Versões — ${esc(b.label)}</span>
@@ -384,9 +457,38 @@
           <th style="text-align:right">Arquivos</th>
           <th style="text-align:right">Tamanho</th>
           <th>Última versão</th>
+          <th>Discos</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
+    loadAllDiskInfo(backups);
+  }
+
+  async function loadAllDiskInfo(backups) {
+    const results = await Promise.allSettled(
+      backups.map(b =>
+        fetch(`/backups/${encodeURIComponent(b.label)}/disks`, {headers: H()})
+          .then(r => r.ok ? r.json() : [])
+          .then(disks => ({label: b.label, disks}))
+      )
+    );
+    for (const r of results) {
+      if (r.status !== 'fulfilled') continue;
+      const {label, disks} = r.value;
+      const cell = document.getElementById(`disks-${label}`);
+      if (!cell) continue;
+      if (!disks.length) {
+        cell.innerHTML = '<span class="disk-empty">—</span>';
+        continue;
+      }
+      const diskParts = disks.map(d => d.volume_path.replace(/\\/g,'/').split('/').filter(Boolean));
+      const lastIdentical = diskParts.length > 1 && diskParts.every(p => (p[p.length-1]||'') === (diskParts[0][diskParts[0].length-1]||''));
+      cell.innerHTML = disks.map((d, i) => {
+        const parts = diskParts[i];
+        const name = (lastIdentical && parts.length >= 2) ? parts[parts.length - 2] : (parts[parts.length - 1] || d.volume_path);
+        return `<span class="disk-tag" title="${esc(d.volume_path)} — ${d.file_count} arq. · ${fmtSize(d.total_bytes)}">${esc(name)}</span>`;
+      }).join('');
+    }
   }
 
   async function toggleVersions(label, row) {
@@ -648,8 +750,304 @@
     const test = await fetch('/backups', {headers: H()});
     if (test.status === 401) { showLogin(); }
     else { loadAll(); }
+    if (new URLSearchParams(location.search).get('cloud_connected')) {
+      history.replaceState(null,'','/');
+      loadCloud();
+    }
   }
   init();
+
+  // -- Cloud Backup -----------------------------------------------------------
+  async function loadCloud() {
+    await Promise.all([loadCloudAccounts(), loadCloudJobs()]);
+  }
+
+  const providerLabel = {gdrive: '⬡ Google Drive', onedrive: '⬡ OneDrive'};
+  const statusColor   = {success:'#4c4', partial:'#fa0', error:'#e05', running:'var(--amber)'};
+
+  async function loadCloudAccounts() {
+    const r = await fetch('/cloud/accounts', {headers: H()});
+    const accounts = r.ok ? await r.json() : [];
+    const el = document.getElementById('cloudAccountsWrap');
+    if (!accounts.length) { el.innerHTML = '<div class="empty">Nenhuma conta conectada</div>'; return; }
+    el.innerHTML = `<table class="backup-table"><thead><tr>
+      <th>Provider</th><th>Conta</th><th>Nome</th><th></th>
+    </tr></thead><tbody>${accounts.map(a => `<tr>
+      <td>${providerLabel[a.provider]||a.provider}</td>
+      <td>${esc(a.email)}</td>
+      <td>${esc(a.display_name||'')}</td>
+      <td style="white-space:nowrap"><button class="small-btn btn-danger" onclick="disconnectAccount(${a.id},'${esc(a.email)}')">Desconectar</button>
+          <button class="small-btn" onclick="openJobModal(${a.id})">+ Job</button></td>
+    </tr>`).join('')}</tbody></table>`;
+  }
+
+  async function loadCloudJobs() {
+    const r = await fetch('/cloud/jobs', {headers: H()});
+    const jobs = r.ok ? await r.json() : [];
+    _jobsCache = Object.fromEntries(jobs.map(j => [j.id, j]));
+    const el = document.getElementById('cloudJobsWrap');
+    if (!jobs.length) { stopCloudPoll(); el.innerHTML = '<div class="empty">Nenhum job configurado — conecte uma conta e clique em "+ Job"</div>'; return; }
+    el.innerHTML = `<table class="backup-table"><thead><tr>
+      <th>Provider</th><th>Pasta</th><th>Label destino</th><th>Cron</th><th>Último run</th><th>Status</th><th></th>
+    </tr></thead><tbody>${jobs.map(j => {
+      const color = statusColor[j.last_run_status] || 'var(--text-dim)';
+      const status = j.last_run_status
+        ? `<span style="color:${color}">${j.last_run_status}</span>`
+        : '<span style="color:var(--text-mute)">—</span>';
+      return `<tr>
+        <td>${providerLabel[j.provider]||j.provider}</td>
+        <td>${esc(j.folder_name)}</td>
+        <td>${esc(j.target_label)}</td>
+        <td><code>${esc(j.cron_expr||'manual')}</code></td>
+        <td>${j.last_run_at ? j.last_run_at.slice(0,19).replace('T',' ') : '—'}</td>
+        <td title="${esc(j.last_run_message||'')}">  ${status}</td>
+        <td style="white-space:nowrap">${
+          j.last_run_status === 'running'
+            ? `<button class="small-btn btn-run is-running" disabled><span class="spin">⟳</span> Running</button>`
+            : `<button class="small-btn btn-run" onclick="runJobNow(${j.id})" title="${esc(j.last_run_message||'')}">▶ Run</button>`
+        }
+          <button class="small-btn" onclick="editJob(${j.id})">✎</button>
+          <button class="small-btn btn-danger" onclick="deleteJob(${j.id})">✕</button>
+        </td>
+      </tr>`;
+    }).join('')}</tbody></table>`;
+    if (jobs.some(j => j.last_run_status === 'running')) startCloudPoll(); else stopCloudPoll();
+  }
+
+  let _authState = null, _authProvider = null;
+  let _editingJobId = null, _jobsCache = {};
+  let _cloudPollTimer = null;
+
+  function startCloudPoll() {
+    if (_cloudPollTimer) return;
+    _cloudPollTimer = setInterval(() => loadCloudJobs(), 2500);
+  }
+
+  function stopCloudPoll() {
+    clearInterval(_cloudPollTimer);
+    _cloudPollTimer = null;
+  }
+
+  async function connectCloud(provider) {
+    const r = await fetch(`/cloud/accounts/${provider}/auth?manual=true`, {headers: H()});
+    if (!r.ok) { showError('Erro ao gerar URL de autenticação'); return; }
+    const {url, state, redirect_uri} = await r.json();
+
+    _authState = state;
+    _authProvider = provider;
+
+    const names = {gdrive: 'Google Drive', onedrive: 'OneDrive'};
+    document.getElementById('authModalTitle').textContent = `Conectar ${names[provider] || provider}`;
+    document.getElementById('authRedirectUri').textContent = redirect_uri;
+    document.getElementById('authLink').href = url;
+    document.getElementById('authPastedUrl').value = '';
+    document.getElementById('authError').style.display = 'none';
+    document.getElementById('cloudAuthModal').style.display = 'flex';
+  }
+
+  function closeAuthModal() {
+    document.getElementById('cloudAuthModal').style.display = 'none';
+    _authState = null; _authProvider = null;
+  }
+
+  async function submitAuthCode() {
+    const errEl = document.getElementById('authError');
+    errEl.style.display = 'none';
+    const pasted = document.getElementById('authPastedUrl').value.trim();
+    if (!pasted) { errEl.textContent = 'Cole a URL redirecionada'; errEl.style.display = 'block'; return; }
+
+    let code;
+    try { code = new URL(pasted).searchParams.get('code'); } catch { code = pasted; }
+    if (!code) { errEl.textContent = 'Código não encontrado — cole a URL completa da barra do browser'; errEl.style.display = 'block'; return; }
+
+    const btn = document.getElementById('authConnectBtn');
+    btn.disabled = true; btn.textContent = 'Conectando...';
+    const r = await fetch(`/cloud/accounts/${_authProvider}/exchange`, {
+      method: 'POST',
+      headers: {...H(), 'Content-Type': 'application/json'},
+      body: JSON.stringify({code, state: _authState}),
+    });
+    btn.disabled = false; btn.textContent = 'Conectar';
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      errEl.textContent = d.detail || 'Erro ao conectar conta';
+      errEl.style.display = 'block'; return;
+    }
+    closeAuthModal();
+    loadCloud();
+  }
+
+  async function disconnectAccount(id, email) {
+    if (!confirm(`Desconectar conta ${email}?\nTodos os jobs desta conta serão removidos.`)) return;
+    await fetch(`/cloud/accounts/${id}`, {method:'DELETE', headers: H()});
+    loadCloud();
+  }
+
+  function _resetFolderSelect(msg = '— carregando pastas... —') {
+    const sel = document.getElementById('jFolderSelect');
+    sel.innerHTML = `<option value="">${msg}</option>`;
+    document.getElementById('jFolderManualWrap').style.display = 'none';
+    document.getElementById('jFolderManualLink').textContent = 'inserir ID manualmente';
+  }
+
+  function toggleFolderManual(e) {
+    e.preventDefault();
+    const wrap = document.getElementById('jFolderManualWrap');
+    const link = document.getElementById('jFolderManualLink');
+    const hidden = wrap.style.display === 'none';
+    wrap.style.display = hidden ? 'block' : 'none';
+    link.textContent = hidden ? 'ocultar entrada manual' : 'inserir ID manualmente';
+  }
+
+  async function loadFolderOptions(credentialId, selectValue) {
+    const sel = document.getElementById('jFolderSelect');
+    sel.innerHTML = '<option value="">— carregando... —</option>';
+    try {
+      const r = await fetch(`/cloud/accounts/${credentialId}/folders`, {headers: H()});
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const folders = await r.json();
+      sel.innerHTML =
+        '<option value="__root__">⬡ Todo o Google Drive</option>' +
+        folders.filter(f => f.is_folder).map(f =>
+          `<option value="${esc(f.id)}:${esc(f.name)}">📁 ${esc(f.name)}</option>`
+        ).join('');
+      if (selectValue) {
+        sel.value = selectValue;
+        if (!sel.value) sel.value = '';
+      }
+    } catch {
+      sel.innerHTML = '<option value="">— erro ao carregar pastas —</option>';
+    }
+  }
+
+  function openJobModal(credentialId) {
+    _editingJobId = null;
+    document.getElementById('cloudModalTitle').textContent = 'Novo job de backup';
+    document.getElementById('jSaveBtn').textContent = 'Criar job';
+    const sel = document.getElementById('jCredential');
+    sel.disabled = false;
+    sel.innerHTML = `<option value="${credentialId}">${credentialId}</option>`;
+    fetch('/cloud/accounts', {headers: H()}).then(r => r.json()).then(accounts => {
+      sel.innerHTML = accounts.map(a =>
+        `<option value="${a.id}" ${a.id===credentialId?'selected':''}>${providerLabel[a.provider]||a.provider} — ${esc(a.email)}</option>`
+      ).join('');
+    });
+    _resetFolderSelect();
+    loadFolderOptions(credentialId);
+    ['jFolderId','jFolderName','jLabel','jCron'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('jError').style.display = 'none';
+    document.getElementById('cloudModal').style.display = 'flex';
+  }
+
+  document.getElementById('jCredential').addEventListener('change', e => {
+    const credId = parseInt(e.target.value);
+    if (credId) loadFolderOptions(credId);
+  });
+
+  function editJob(jobId) {
+    const j = _jobsCache[jobId];
+    if (!j) return;
+    _editingJobId = jobId;
+    document.getElementById('cloudModalTitle').textContent = 'Editar job de backup';
+    document.getElementById('jSaveBtn').textContent = 'Salvar';
+    const sel = document.getElementById('jCredential');
+    sel.disabled = true;
+    sel.innerHTML = `<option value="${j.credential_id}">${providerLabel[j.provider]||j.provider} — ${esc(j.email)}</option>`;
+    _resetFolderSelect();
+    const targetVal = j.folder_id === 'root' ? '__root__' : `${j.folder_id}:${j.folder_name}`;
+    loadFolderOptions(j.credential_id, targetVal).then(() => {
+      const fsel = document.getElementById('jFolderSelect');
+      if (!fsel.value) {
+        document.getElementById('jFolderId').value = j.folder_id;
+        document.getElementById('jFolderName').value = j.folder_name;
+        const wrap = document.getElementById('jFolderManualWrap');
+        wrap.style.display = 'block';
+        document.getElementById('jFolderManualLink').textContent = 'ocultar entrada manual';
+      }
+    });
+    document.getElementById('jLabel').value = j.target_label;
+    document.getElementById('jCron').value = j.cron_expr || '';
+    document.getElementById('jError').style.display = 'none';
+    document.getElementById('cloudModal').style.display = 'flex';
+  }
+
+  function closeJobModal() {
+    document.getElementById('cloudModal').style.display = 'none';
+    _editingJobId = null;
+  }
+
+  async function saveJob() {
+    const errEl = document.getElementById('jError');
+    errEl.style.display = 'none';
+    let folder_id, folder_name;
+    const selVal = document.getElementById('jFolderSelect').value;
+    if (selVal === '__root__') {
+      folder_id = 'root'; folder_name = 'Google Drive (inteiro)';
+    } else if (selVal && selVal.includes(':')) {
+      const colon = selVal.indexOf(':');
+      folder_id   = selVal.slice(0, colon);
+      folder_name = selVal.slice(colon + 1);
+    } else {
+      folder_id   = document.getElementById('jFolderId').value.trim();
+      folder_name = document.getElementById('jFolderName').value.trim();
+    }
+    const target_label = document.getElementById('jLabel').value.trim();
+    const cron_expr   = document.getElementById('jCron').value.trim() || null;
+    if (!folder_id || !folder_name || !target_label) {
+      errEl.textContent = 'Selecione uma pasta (ou insira o ID manualmente) e preencha o label destino';
+      errEl.style.display = 'block'; return;
+    }
+    const btn = document.getElementById('jSaveBtn');
+    const origText = btn.textContent;
+    btn.disabled = true; btn.textContent = 'Salvando...';
+    let r;
+    if (_editingJobId) {
+      r = await fetch(`/cloud/jobs/${_editingJobId}`, {
+        method: 'PATCH',
+        headers: {...H(), 'Content-Type': 'application/json'},
+        body: JSON.stringify({folder_id, folder_name, target_label, cron_expr}),
+      });
+    } else {
+      const body = {
+        credential_id: parseInt(document.getElementById('jCredential').value),
+        folder_id, folder_name, target_label, cron_expr,
+      };
+      r = await fetch('/cloud/jobs', {method:'POST', headers:{...H(),'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    }
+    btn.disabled = false; btn.textContent = origText;
+    if (!r.ok) { const d = await r.json(); errEl.textContent = d.detail||'Erro ao salvar job'; errEl.style.display='block'; return; }
+    closeJobModal();
+    loadCloudJobs();
+  }
+
+  async function runJobNow(jobId) {
+    const r = await fetch(`/cloud/jobs/${jobId}/run`, {method:'POST', headers: H()});
+    if (!r.ok) { const d = await r.json(); showError(d.detail||'Erro ao iniciar job'); return; }
+    await loadCloudJobs();
+    startCloudPoll();
+  }
+
+  async function deleteJob(jobId) {
+    if (!confirm('Remover este job de backup? (não apaga versões já salvas)')) return;
+    await fetch(`/cloud/jobs/${jobId}`, {method:'DELETE', headers: H()});
+    loadCloudJobs();
+  }
+
+  // Carrega cloud junto com o restante
+  const _origLoadAll = loadAll;
+  loadAll = async function() { await _origLoadAll(); loadCloud(); };
+
+  function toggleTheme() {
+    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+    if (isLight) { document.documentElement.removeAttribute('data-theme'); localStorage.setItem('nv-theme','dark'); }
+    else { document.documentElement.setAttribute('data-theme','light'); localStorage.setItem('nv-theme','light'); }
+    updateThemeBtn();
+  }
+  function updateThemeBtn() {
+    const btn = document.getElementById('themeBtn');
+    if (btn) btn.textContent = document.documentElement.getAttribute('data-theme') === 'light' ? '☾ Escuro' : '☀ Claro';
+  }
+  updateThemeBtn();
 </script>
 </body>
 </html>

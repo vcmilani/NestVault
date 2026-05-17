@@ -21,9 +21,14 @@ from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile
 import crypto
+import storage
+from auth import require_api_key, API_KEY, AUTH_ENABLED
+from cloud.router import router as cloud_router
+import scheduler as sched
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,194 +37,63 @@ logging.basicConfig(
 )
 log = logging.getLogger("backup-server")
 
-# -- Config -------------------------------------------------------------------
-_raw_dirs    = os.getenv("STORAGE_DIRS") or os.getenv("STORAGE_DIR", "./storage")
-STORAGE_VOLUMES: list[Path] = [Path(p.strip()) for p in _raw_dirs.split(",") if p.strip()]
-STORAGE_DIR  = STORAGE_VOLUMES[0]   # alias para retrocompatibilidade
-for _v in STORAGE_VOLUMES:
-    _v.mkdir(parents=True, exist_ok=True)
+# -- Config (aliases de storage para retrocompatibilidade) --------------------
+STORAGE_VOLUMES      = storage.STORAGE_VOLUMES
+STORAGE_DIR          = storage.STORAGE_DIR
+ENCRYPTION_ENABLED   = storage.ENCRYPTION_ENABLED
+CHUNK_SIZE           = storage.CHUNK_SIZE
+REPLICATION_FACTOR   = storage.REPLICATION_FACTOR
+CLEANUP_MIN_FREE_PCT = storage.CLEANUP_MIN_FREE_PCT
+STORAGE_FALLBACK_THRESHOLD_PCT = storage.STORAGE_FALLBACK_THRESHOLD_PCT
 
-API_KEY      = os.getenv("BACKUP_API_KEY", "")
 STATIC_DIR   = Path(__file__).parent / "static"
-AUTH_ENABLED = bool(API_KEY)
 
-ENCRYPTION_ENABLED = os.getenv("ENCRYPTION_ENABLED", "false").lower() == "true"
-_encryption_key: bytes | None = None
-
-# Buffer de leitura/escrita - 1 MB e bem mais rapido que 64KB no I/O
-CHUNK_SIZE = 1024 * 1024
-
-REPLICATION_FACTOR = int(os.getenv("REPLICATION_FACTOR", "1"))
-# 1 = sem replicação (padrão — comportamento original, compatível com RAID físico/ZFS)
-# 2+ = replicar para N volumes
-# 0 = espelhar para todos os volumes saudáveis
-
-CLEANUP_MIN_FREE_PCT = float(os.getenv("STORAGE_MIN_FREE_PCT", "5.0"))
-
-# -- Volume health ------------------------------------------------------------
-_degraded_volumes: set[Path] = set()
+# Atalhos locais para os helpers de storage
+_degraded_volumes        = storage._degraded_volumes
+_safe_disk_usage         = storage.safe_disk_usage
+_healthy_volumes         = storage.healthy_volumes
+_target_replicas         = storage.target_replicas
+_content_path            = storage.content_path
+_ensure_replicas         = storage.ensure_replicas
+_rereplicate_to_volume   = storage.rereplicate_to_volume
+_rereplicate_all         = storage.rereplicate_all
+_cleanup_excess_copies   = storage.cleanup_excess_copies
+_backfill_content_copies = storage.backfill_content_copies
+_volume_health_monitor   = storage.volume_health_monitor
+_volumes_with_free_space = storage.volumes_with_free_space
 
 
-def _safe_disk_usage(v: Path) -> tuple | None:
-    """Retorna disk_usage ou None se o volume estiver inacessível (marca como degraded)."""
+def _pick_volume() -> Path:
     try:
-        result = shutil.disk_usage(v)
-        _degraded_volumes.discard(v)
-        return result
-    except OSError:
-        if v not in _degraded_volumes:
-            log.error(f"[volume] {v} inacessível — marcado como degraded")
-            _degraded_volumes.add(v)
-        return None
-
-
-def _healthy_volumes() -> list[Path]:
-    return [v for v in STORAGE_VOLUMES if v not in _degraded_volumes]
-
-
-def _target_replicas() -> int:
-    healthy = len(_healthy_volumes())
-    factor  = REPLICATION_FACTOR if REPLICATION_FACTOR > 0 else len(STORAGE_VOLUMES)
-    if healthy < factor:
-        log.warning(f"[replication] fator={factor} > volumes saudáveis={healthy}")
-    return min(factor, max(1, healthy))
-
-
-def _ensure_replicas(sha256: str, source_path: Path, db: Session) -> None:
-    """Copia para volumes adicionais até atingir _target_replicas()."""
-    target  = _target_replicas()
-    copies  = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).all()
-    vol_set = {c.volume_path for c in copies}
-    added   = []
-    for vol in _healthy_volumes():
-        if len(copies) >= target:
-            break
-        if str(vol) in vol_set:
-            continue
-        try:
-            dest = _content_path(sha256, vol)
-            log.info(f"[replication] {sha256[:8]}… → {vol}")
-            shutil.copy2(str(source_path), str(dest))
-            copy = FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(vol))
-            db.add(copy)
-            copies.append(copy)
-            vol_set.add(str(vol))
-            added.append(str(vol))
-            log.info(f"[replication] {sha256[:8]}… copiado para {vol} com sucesso")
-        except OSError as e:
-            log.warning(f"[replication] Falha ao replicar {sha256} para {vol}: {e}")
-    if added:
-        log.info(f"[replication] {sha256[:8]}… replicação concluída — {len(added)} nova(s) cópia(s): {added}")
-
-
-def _rereplicate_to_volume(v: Path) -> None:
-    db = SessionLocal()
-    try:
-        log.info(f"[rereplicate] Iniciando re-replicação para {v}")
-        shas_on_v = {r.sha256 for r in db.query(FileContentCopy.sha256)
-                                          .filter(FileContentCopy.volume_path == str(v)).all()}
-        target = _target_replicas()
-        underfilled = (
-            db.query(FileContent.sha256, func.count(FileContentCopy.id).label("cnt"))
-            .outerjoin(FileContentCopy, FileContentCopy.sha256 == FileContent.sha256)
-            .group_by(FileContent.sha256)
-            .having(func.count(FileContentCopy.id) < target)
-            .all()
-        )
-        total_under = len(underfilled)
-        count = 0
-        for (sha256, _) in underfilled:
-            if sha256 in shas_on_v:
-                continue
-            source = (db.query(FileContentCopy)
-                        .filter(FileContentCopy.sha256 == sha256,
-                                ~FileContentCopy.volume_path.in_([str(d) for d in _degraded_volumes]))
-                        .first())
-            if not source:
-                continue
-            try:
-                dest = _content_path(sha256, v)
-                log.info(f"[rereplicate] [{count + 1}/{total_under}] {sha256[:8]}… → {v}")
-                shutil.copy2(source.stored_at, str(dest))
-                db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(v)))
-                count += 1
-                log.info(f"[rereplicate] [{count}/{total_under}] {sha256[:8]}… copiado com sucesso")
-            except OSError as e:
-                log.warning(f"[rereplicate] Erro em {v}: {e} — abortando")
-                break
-        if count:
-            db.commit()
-            log.info(f"[rereplicate] {count} arquivo(s) re-replicados para {v}")
-        else:
-            log.info(f"[rereplicate] Nenhum arquivo sub-replicado encontrado para {v}")
-    finally:
-        db.close()
-
-
-def _backfill_content_copies() -> None:
-    """Cria FileContentCopy para FileContent sem cópia (instâncias existentes)."""
-    db = SessionLocal()
-    try:
-        existing_shas = {r.sha256 for r in db.query(FileContentCopy.sha256).distinct().all()}
-        to_fill = (db.query(FileContent).filter(~FileContent.sha256.in_(existing_shas)).all()
-                   if existing_shas else db.query(FileContent).all())
-        count = 0
-        for fc in to_fill:
-            p = Path(fc.stored_at)
-            vol = str(p.parents[2])  # {volume}/_content/{xx}/{sha256} → parents[2] = volume
-            db.add(FileContentCopy(sha256=fc.sha256, stored_at=fc.stored_at, volume_path=vol))
-            count += 1
-        if count:
-            db.commit()
-            log.info(f"[backfill] {count} entrada(s) migradas para file_content_copies")
-        else:
-            log.info("[backfill] Nenhuma entrada para migrar — file_content_copies já atualizado")
-    except Exception as e:
-        log.error(f"[backfill] Erro: {e}")
-    finally:
-        db.close()
-
-
-async def _volume_health_monitor() -> None:
-    """Tenta recuperar volumes degraded a cada 60 s."""
-    while True:
-        await asyncio.sleep(60)
-        for v in list(_degraded_volumes):
-            usage = _safe_disk_usage(v)
-            if usage:
-                log.info(f"[volume] {v} recuperado — iniciando re-replicação")
-                asyncio.get_event_loop().run_in_executor(None, _rereplicate_to_volume, v)
+        return storage.pick_volume()
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global _encryption_key
     init_db()
     if ENCRYPTION_ENABLED:
-        _encryption_key = crypto.load_key()  # lança ValueError se inválida — falha rápido
+        storage.encryption_key = crypto.load_key()  # lança ValueError se inválida — falha rápido
         log.info("Criptografia: habilitada (AES-256-GCM)")
     else:
         log.info("Criptografia: desabilitada")
-    asyncio.get_event_loop().run_in_executor(None, _backfill_content_copies)
+    asyncio.get_running_loop().run_in_executor(None, _backfill_content_copies)
     monitor = asyncio.create_task(_volume_health_monitor())
+    sched.scheduler.start()
+    sched.reload_jobs_from_db()
     log.info(f"Servidor iniciado — {len(STORAGE_VOLUMES)} volume(s): {[str(v) for v in STORAGE_VOLUMES]}")
     log.info(f"Auth: {'habilitada' if AUTH_ENABLED else 'desabilitada'}")
     yield
     monitor.cancel()
+    sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="3.1.6", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="4.2.0", lifespan=lifespan)
+app.include_router(cloud_router)
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-
-# -- Auth ---------------------------------------------------------------------
-def require_api_key(x_api_key: Optional[str] = Header(None)):
-    if not AUTH_ENABLED:
-        return
-    if not x_api_key or not secrets.compare_digest(x_api_key, API_KEY):
-        raise HTTPException(401, "API key invalida")
 
 
 # -- Schemas: Requests --------------------------------------------------------
@@ -361,6 +235,12 @@ class RereplicateResponse(BaseModel):
     skipped: int
     target_copies: int
 
+class ReconcileResponse(BaseModel):
+    replicated: int
+    skipped: int
+    cleaned: int
+    target_copies: int
+
 class EncryptExistingResponse(BaseModel):
     files_encrypted: int
     bytes_processed: int
@@ -380,6 +260,11 @@ class DiskVolumeInfo(BaseModel):
     content_files: int
     content_bytes: int
     status: Literal["ok", "degraded"]
+
+class BackupDiskEntry(BaseModel):
+    volume_path: str
+    file_count: int
+    total_bytes: int
 
 class CompareFileEntry(BaseModel):
     original_path: str
@@ -406,18 +291,44 @@ class CompareResponse(BaseModel):
 
 
 # -- Helpers ------------------------------------------------------------------
-def _pick_volume() -> Path:
-    """Escolhe o volume saudável com mais espaço livre para o próximo upload."""
-    healthy = _healthy_volumes()
-    if not healthy:
-        raise HTTPException(503, "Nenhum volume de storage disponível")
-    return max(healthy, key=lambda v: _safe_disk_usage(v).free)
-
-
 def _content_path(sha256: str, volume: Path) -> Path:
     dest = volume / "_content" / sha256[:2] / sha256
     dest.parent.mkdir(parents=True, exist_ok=True)
     return dest
+
+
+def _verify_stored_file(sha256: str, dest: Path, encrypted: bool) -> None:
+    h = hashlib.sha256()
+    try:
+        if encrypted:
+            for chunk in crypto.decrypt_chunks(dest, storage.encryption_key):
+                h.update(chunk)
+        else:
+            with open(dest, "rb") as f:
+                while True:
+                    chunk = f.read(1 << 20)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+    except Exception as exc:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(500, f"Falha ao verificar arquivo no disco: {exc}") from exc
+
+    if h.hexdigest() != sha256:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(500, "Corrupção detectada: sha256 do disco não confere com o esperado")
+
+
+def _purge_corrupted_content(sha256: str, db: Session) -> None:
+    copies = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).all()
+    for copy in copies:
+        Path(copy.stored_at).unlink(missing_ok=True)
+        db.delete(copy)
+    fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+    if fc:
+        db.delete(fc)
+    db.flush()
+    log.warning(f"[integrity] {sha256[:8]}… corrompido — {len(copies)} cópia(s) purgadas do disco e banco")
 
 
 async def _stream_request_to_disk(request: Request, volume: Path) -> tuple[str, int, Path]:
@@ -535,18 +446,6 @@ def _backup_info(b: BackupID, db: Session) -> BackupInfo:
     )
 
 
-def _volumes_with_free_space() -> int:
-    """Conta volumes saudáveis com percentual livre >= CLEANUP_MIN_FREE_PCT."""
-    count = 0
-    for v in STORAGE_VOLUMES:
-        if v in _degraded_volumes:
-            continue
-        u = _safe_disk_usage(v)
-        if u and u.free / u.total * 100 >= CLEANUP_MIN_FREE_PCT:
-            count += 1
-    return count
-
-
 def _auto_cleanup_if_needed(db: Session) -> None:
     factor = _target_replicas()
     ok = _volumes_with_free_space()
@@ -600,8 +499,8 @@ def _auto_cleanup_if_needed(db: Session) -> None:
     for v in deletable:
         label, key = v.backup_label, v.version_key
         db.delete(v)
+        removed, _ = _cleanup_orphan_contents_no_commit(db)
         db.commit()
-        removed, _ = _cleanup_orphan_contents(db)
         ok = _volumes_with_free_space()
         log.info(f"[auto-cleanup] Removida {label}/{key} — {removed} arquivo(s) — volumes com espaço: {ok}/{len(_healthy_volumes())}")
         if ok >= factor:
@@ -617,6 +516,13 @@ def _cleanup_orphan_contents(db: Session) -> tuple[int, int]:
     Usa subquery em vez de N+1 queries.
     Retorna (arquivos_removidos, bytes_liberados).
     """
+    removed, bytes_freed = _cleanup_orphan_contents_no_commit(db)
+    db.commit()
+    return removed, bytes_freed
+
+
+def _cleanup_orphan_contents_no_commit(db: Session) -> tuple[int, int]:
+    """Variante sem db.commit() — para uso em loops onde o commit é controlado pelo caller."""
     used_shas = db.query(VersionFile.sha256).distinct().subquery()
     orphans = (
         db.query(FileContent)
@@ -654,7 +560,6 @@ def _cleanup_orphan_contents(db: Session) -> tuple[int, int]:
         removed += 1
     if removed:
         log.debug(f"[cleanup-orphans] {removed} arquivo(s) — {bytes_freed / 1024:.1f} KB liberados")
-    db.commit()
     return removed, bytes_freed
 
 
@@ -709,7 +614,7 @@ def explorer_page():
 
 @app.get("/health", response_model=HealthResponse)
 def health():
-    return HealthResponse(status="ok", version="3.1.6", time=datetime.now(timezone.utc).isoformat())
+    return HealthResponse(status="ok", version=app.version, time=datetime.now(timezone.utc).isoformat())
 
 
 @app.get("/storage/info", response_model=StorageInfoResponse, dependencies=[Depends(require_api_key)])
@@ -719,18 +624,25 @@ def storage_info(db: Session = Depends(get_db)):
     usage_used  = sum(u.used  for u in usages)
     usage_free  = sum(u.free  for u in usages)
 
-    # Keeper = versão "done" mais recente de cada label
-    keeper_ids: list[int] = []
-    labels = db.query(BackupID.label).all()
-    for (label,) in labels:
-        latest = (
-            db.query(BackupVersion.id)
-            .filter(BackupVersion.backup_label == label, BackupVersion.status == "done")
-            .order_by(BackupVersion.version_key.desc())
-            .first()
+    # Keeper = versão "done" mais recente de cada label — 1 query via subquery com MAX
+    latest_key_sq = (
+        db.query(
+            BackupVersion.backup_label,
+            func.max(BackupVersion.version_key).label("latest_key"),
         )
-        if latest:
-            keeper_ids.append(latest[0])
+        .filter(BackupVersion.status == "done")
+        .group_by(BackupVersion.backup_label)
+        .subquery()
+    )
+    keeper_ids: list[int] = [
+        row.id for row in (
+            db.query(BackupVersion.id)
+            .join(latest_key_sq,
+                  (BackupVersion.backup_label == latest_key_sq.c.backup_label) &
+                  (BackupVersion.version_key  == latest_key_sq.c.latest_key))
+            .all()
+        )
+    ]
 
     if keeper_ids:
         kept_shas = (
@@ -793,20 +705,99 @@ def create_backup(req: BackupCreate, db: Session = Depends(get_db)):
 
 @app.get("/backups", response_model=list[BackupInfo], dependencies=[Depends(require_api_key)])
 def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db)):
-    """
-    Lista backups com stats — usa uma unica query agregada
-    para o tamanho total de cada label, evitando N+1.
-    """
+    """Lista backups com stats — 3 queries fixas independente de N (sem N+1)."""
     q = db.query(BackupID).order_by(BackupID.created_at.desc())
     if client_name:
         q = q.filter(BackupID.client_name == client_name)
     backups = q.all()
-    return [_backup_info(b, db) for b in backups]
+    if not backups:
+        return []
+
+    # Versão done mais recente + contagem por label — 1 query
+    latest_sq = (
+        db.query(
+            BackupVersion.backup_label,
+            func.max(BackupVersion.version_key).label("latest_key"),
+            func.count(BackupVersion.id).label("version_count"),
+        )
+        .filter(BackupVersion.status == "done")
+        .group_by(BackupVersion.backup_label)
+        .subquery()
+    )
+    latest_rows = (
+        db.query(BackupVersion.backup_label, BackupVersion.id, BackupVersion.version_key,
+                 latest_sq.c.version_count)
+        .join(latest_sq, (BackupVersion.backup_label == latest_sq.c.backup_label) &
+                         (BackupVersion.version_key  == latest_sq.c.latest_key))
+        .all()
+    )
+    latest_by_label: dict[str, tuple[int, str, int]] = {
+        row.backup_label: (row.id, row.version_key, row.version_count) for row in latest_rows
+    }
+
+    # File count + total size para as versões mais recentes — 1 query
+    version_ids = [v[0] for v in latest_by_label.values()]
+    stats_by_vid: dict[int, tuple[int, int]] = {}
+    if version_ids:
+        for row in (
+            db.query(VersionFile.version_id,
+                     func.count(VersionFile.id).label("fc"),
+                     func.coalesce(func.sum(FileContent.size), 0).label("sz"))
+            .outerjoin(FileContent, FileContent.sha256 == VersionFile.sha256)
+            .filter(VersionFile.version_id.in_(version_ids))
+            .group_by(VersionFile.version_id)
+            .all()
+        ):
+            stats_by_vid[row.version_id] = (row.fc, int(row.sz))
+
+    result = []
+    for b in backups:
+        latest = latest_by_label.get(b.label)
+        vid, latest_key, version_count = latest if latest else (None, None, 0)
+        fc_count, total_size = stats_by_vid.get(vid, (0, 0)) if vid else (0, 0)
+        result.append(BackupInfo(
+            id=b.id, label=b.label, client_name=b.client_name, prefix=b.prefix,
+            status=b.status, created_at=str(b.created_at),
+            last_version=latest_key, version_count=version_count,
+            file_count=fc_count, total_size_bytes=total_size,
+        ))
+    return result
 
 
 @app.get("/backups/{label}", response_model=BackupInfo, dependencies=[Depends(require_api_key)])
 def get_backup(label: str, db: Session = Depends(get_db)):
     return _backup_info(_get_backup_or_404(label, db), db)
+
+
+@app.get("/backups/{label}/disks", response_model=list[BackupDiskEntry], dependencies=[Depends(require_api_key)])
+def backup_disks(label: str, db: Session = Depends(get_db)):
+    _get_backup_or_404(label, db)
+    sha_subq = (
+        db.query(VersionFile.sha256)
+        .join(BackupVersion, BackupVersion.id == VersionFile.version_id)
+        .filter(BackupVersion.backup_label == label)
+        .distinct()
+        .subquery()
+    )
+    rows = (
+        db.query(
+            FileContentCopy.volume_path,
+            func.count(FileContentCopy.sha256).label("file_count"),
+            func.coalesce(func.sum(FileContent.size), 0).label("total_bytes"),
+        )
+        .join(FileContent, FileContent.sha256 == FileContentCopy.sha256)
+        .filter(FileContentCopy.sha256.in_(sha_subq))
+        .group_by(FileContentCopy.volume_path)
+        .all()
+    )
+    return [
+        BackupDiskEntry(
+            volume_path=r.volume_path,
+            file_count=r.file_count,
+            total_bytes=int(r.total_bytes),
+        )
+        for r in rows
+    ]
 
 
 @app.delete("/backups/{label}", response_model=BackupDeletedResponse, dependencies=[Depends(require_api_key)])
@@ -846,13 +837,41 @@ def create_version(label: str, req: VersionCreate, db: Session = Depends(get_db)
 
 @app.get("/backups/{label}/versions", response_model=list[VersionInfo], dependencies=[Depends(require_api_key)])
 def list_versions(label: str, db: Session = Depends(get_db)):
-    """Lista versoes com stats agregados — uma query por versao via _version_stats."""
+    """Lista versoes com stats — 2 queries fixas (sem N+1)."""
     _get_backup_or_404(label, db)
     versions = (db.query(BackupVersion)
                 .filter(BackupVersion.backup_label == label)
                 .order_by(BackupVersion.version_key.desc())
                 .all())
-    return [_version_stats(v, db) for v in versions]
+    if not versions:
+        return []
+
+    vids = [v.id for v in versions]
+    stats_by_vid: dict[int, tuple[int, int]] = {}
+    for row in (
+        db.query(VersionFile.version_id,
+                 func.count(VersionFile.id).label("fc"),
+                 func.coalesce(func.sum(FileContent.size), 0).label("sz"))
+        .outerjoin(FileContent, FileContent.sha256 == VersionFile.sha256)
+        .filter(VersionFile.version_id.in_(vids))
+        .group_by(VersionFile.version_id)
+        .all()
+    ):
+        stats_by_vid[row.version_id] = (row.fc, int(row.sz))
+
+    result = []
+    for v in versions:
+        fc_count, total_size = stats_by_vid.get(v.id, (0, 0))
+        duration = None
+        if v.finished_at and v.created_at:
+            duration = round((v.finished_at - v.created_at).total_seconds(), 1)
+        result.append(VersionInfo(
+            id=v.id, version_key=v.version_key, backup_label=v.backup_label,
+            status=v.status, created_at=str(v.created_at),
+            finished_at=str(v.finished_at) if v.finished_at else None,
+            duration_seconds=duration, file_count=fc_count, total_size_bytes=total_size,
+        ))
+    return result
 
 
 @app.get("/backups/{label}/versions/{version_key}", response_model=VersionInfo, dependencies=[Depends(require_api_key)])
@@ -864,7 +883,7 @@ def get_version(label: str, version_key: str, db: Session = Depends(get_db)):
 def finish_version(label: str, version_key: str, req: VersionFinish, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     v = _get_version_or_404(label, version_key, db)
     v.status = req.status
-    v.finished_at = datetime.now(timezone.utc)
+    v.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
     db.commit()
     if req.status == "done":
         log.info(f"[versao] {label}/{version_key} finalizada → disparando auto-cleanup em background")
@@ -880,6 +899,8 @@ def absorb_version(label: str, version_key: str, req: AbsorbRequest, db: Session
     arquivos ausentes do cliente (deletados) sao preservados via absorb da versao anterior.
     """
     dest = _get_version_or_404(label, version_key, db)
+    if dest.status != "running":
+        raise HTTPException(409, f"Versão destino está '{dest.status}' — absorb só permitido em versões running")
     src  = _get_version_or_404(label, req.source_version_key, db)
 
     existing = db.query(VersionFile.original_path).filter(VersionFile.version_id == dest.id).subquery()
@@ -952,28 +973,39 @@ def check_file(req: CheckRequest, db: Session = Depends(get_db)):
 # -- Check batch --------------------------------------------------------------
 @app.post("/check/batch", response_model=list[CheckBatchResultItem], dependencies=[Depends(require_api_key)])
 def check_batch(req: CheckBatchRequest, db: Session = Depends(get_db)):
-    """Verifica N arquivos em uma unica request. Resultados na mesma ordem da entrada."""
+    """Verifica N arquivos em duas queries IN — sem N+1."""
     v = _get_version_or_404(req.backup_label, req.version_key, db)
+    paths   = [i.original_path for i in req.files]
+    sha256s = [i.sha256 for i in req.files]
+
+    # VersionFiles já registrados nesta versão para estas paths (pode conter sha256 diferente)
+    registered: dict[tuple[str, str], int] = {
+        (row.original_path, row.sha256): row.id
+        for row in (
+            db.query(VersionFile.original_path, VersionFile.sha256, VersionFile.id)
+            .filter(VersionFile.version_id == v.id,
+                    VersionFile.original_path.in_(paths))
+            .all()
+        )
+    }
+    # FileContents que já existem no storage
+    existing_contents: set[str] = {
+        row.sha256
+        for row in db.query(FileContent.sha256).filter(FileContent.sha256.in_(sha256s)).all()
+    }
+
     results: list[CheckBatchResultItem] = []
     for item in req.files:
-        vf = (db.query(VersionFile.id)
-              .filter(VersionFile.version_id    == v.id,
-                      VersionFile.original_path == item.original_path,
-                      VersionFile.sha256        == item.sha256)
-              .first())
-        if vf:
+        fid = registered.get((item.original_path, item.sha256))
+        if fid is not None:
             results.append(CheckBatchResultItem(
                 needs_upload=False, content_exists=True,
-                reason="Ja registrado nesta versao", file_id=vf[0]))
-            continue
-        content_exists = db.query(FileContent.sha256).filter(
-            FileContent.sha256 == item.sha256
-        ).first() is not None
-        results.append(CheckBatchResultItem(
-            needs_upload=True,
-            content_exists=content_exists,
-            reason="Conteudo ja no storage — apenas registrar" if content_exists else "Upload necessario",
-        ))
+                reason="Ja registrado nesta versao", file_id=fid))
+        else:
+            ce = item.sha256 in existing_contents
+            results.append(CheckBatchResultItem(
+                needs_upload=True, content_exists=ce,
+                reason="Conteudo ja no storage — apenas registrar" if ce else "Upload necessario"))
     return results
 
 
@@ -1018,29 +1050,55 @@ async def upload_file(
         try:
             fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
             if fc:
-                tmp_path.unlink(missing_ok=True)
                 first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).first()
                 if first_copy:
-                    _ensure_replicas(sha256, Path(first_copy.stored_at), db)
-            else:
+                    stored = Path(first_copy.stored_at)
+                    if not stored.exists():
+                        log.warning(f"[integrity] {sha256[:8]}… ausente no disco — purgando e re-enviando")
+                        _purge_corrupted_content(sha256, db)
+                        fc = None
+                    else:
+                        try:
+                            _verify_stored_file(sha256, stored, encrypted=fc.encrypted)
+                            log.info(f"[integrity] {original_path!r} verificado OK — sha256={sha256[:8]}… (dedup)")
+                            _ensure_replicas(sha256, stored, db)
+                            tmp_path.unlink(missing_ok=True)
+                        except HTTPException:
+                            _purge_corrupted_content(sha256, db)
+                            fc = None
+                else:
+                    tmp_path.unlink(missing_ok=True)
+
+            if not fc:
                 dest = _content_path(sha256, volume)
                 shutil.move(str(tmp_path), str(dest))
                 if ENCRYPTION_ENABLED:
                     log.info(f"[upload] cifrando {original_path!r} ({size / 1024 / 1024:.2f} MB) — sha256={sha256[:8]}…")
                     tmp_enc = dest.parent / f"_enc_{os.urandom(4).hex()}"
                     try:
-                        crypto.encrypt_stream(dest, tmp_enc, _encryption_key)
+                        crypto.encrypt_stream(dest, tmp_enc, storage.encryption_key)
                         shutil.move(str(tmp_enc), str(dest))
-                        log.info(f"[upload] {sha256[:8]}… cifrado com sucesso")
+                        _verify_stored_file(sha256, dest, encrypted=True)
+                        log.info(f"[integrity] {original_path!r} cifrado e verificado OK — sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
                     except Exception:
                         tmp_enc.unlink(missing_ok=True)
                         raise
+                else:
+                    _verify_stored_file(sha256, dest, encrypted=False)
+                    log.info(f"[integrity] {original_path!r} verificado OK — sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
                 fc = FileContent(sha256=sha256, stored_at=str(dest), size=size,
                                  encrypted=ENCRYPTION_ENABLED)
-                db.add(fc)
-                db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(volume)))
-                db.flush()
-                _ensure_replicas(sha256, dest, db)
+                try:
+                    db.add(fc)
+                    db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(volume)))
+                    db.flush()
+                except IntegrityError:
+                    # Upload concorrente do mesmo sha256 venceu — usar o registro já criado
+                    db.rollback()
+                    dest.unlink(missing_ok=True)
+                    fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+                else:
+                    _ensure_replicas(sha256, dest, db)
         except Exception:
             tmp_path.unlink(missing_ok=True)
             raise
@@ -1135,7 +1193,7 @@ def download_file(file_id: int, db: Session = Depends(get_db)):
             if p.exists():
                 if is_encrypted:
                     return StreamingResponse(
-                        crypto.decrypt_chunks(p, _encryption_key),
+                        crypto.decrypt_chunks(p, storage.encryption_key),
                         media_type="application/octet-stream",
                         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
                     )
@@ -1215,37 +1273,21 @@ def force_cleanup_orphans(db: Session = Depends(get_db)):
 @app.post("/maintenance/rereplicate", response_model=RereplicateResponse, dependencies=[Depends(require_api_key)])
 def force_rereplicate(db: Session = Depends(get_db)):
     """Re-replica conteúdos com menos cópias que REPLICATION_FACTOR. Útil após adicionar um disco novo."""
-    target = _target_replicas()
-    degraded_strs = [str(d) for d in _degraded_volumes]
+    replicated, skipped = _rereplicate_all(db)
+    return RereplicateResponse(replicated=replicated, skipped=skipped, target_copies=_target_replicas())
 
-    underfilled = (
-        db.query(FileContent.sha256, func.count(FileContentCopy.id).label("cnt"))
-        .outerjoin(FileContentCopy, FileContentCopy.sha256 == FileContent.sha256)
-        .group_by(FileContent.sha256)
-        .having(func.count(FileContentCopy.id) < target)
-        .all()
+
+@app.post("/maintenance/reconcile-replication", response_model=ReconcileResponse, dependencies=[Depends(require_api_key)])
+def reconcile_replication(db: Session = Depends(get_db)):
+    """Remove cópias excedentes e preenche arquivos sub-replicados conforme REPLICATION_FACTOR."""
+    cleaned = _cleanup_excess_copies(db)
+    replicated, skipped = _rereplicate_all(db)
+    return ReconcileResponse(
+        replicated=replicated,
+        skipped=skipped,
+        cleaned=cleaned,
+        target_copies=_target_replicas(),
     )
-
-    replicated = 0
-    skipped = 0
-    total_under = len(underfilled)
-    log.info(f"[maintenance/rereplicate] {total_under} arquivo(s) com replicação abaixo do fator {target}")
-    for idx, (sha256, _) in enumerate(underfilled, 1):
-        q = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256)
-        if degraded_strs:
-            q = q.filter(~FileContentCopy.volume_path.in_(degraded_strs))
-        source = q.first()
-        if not source:
-            log.warning(f"[maintenance/rereplicate] [{idx}/{total_under}] {sha256[:8]}… sem fonte acessível — pulando")
-            skipped += 1
-            continue
-        log.info(f"[maintenance/rereplicate] [{idx}/{total_under}] {sha256[:8]}… replicando a partir de {source.volume_path}")
-        _ensure_replicas(sha256, Path(source.stored_at), db)
-        replicated += 1
-
-    db.commit()
-    log.info(f"[maintenance/rereplicate] concluído — {replicated} replicado(s), {skipped} pulado(s) (sem fonte acessível)")
-    return RereplicateResponse(replicated=replicated, skipped=skipped, target_copies=target)
 
 
 @app.post("/maintenance/encrypt-existing", response_model=EncryptExistingResponse, dependencies=[Depends(require_api_key)])
@@ -1286,7 +1328,7 @@ def encrypt_existing_files(db: Session = Depends(get_db)):
             log.info(f"[encrypt-existing] [{i}/{total}] cifrando cópia em {copy.volume_path}")
             tmp_enc = p.parent / f"_enc_{os.urandom(4).hex()}"
             try:
-                crypto.encrypt_stream(p, tmp_enc, _encryption_key)
+                crypto.encrypt_stream(p, tmp_enc, storage.encryption_key)
                 shutil.move(str(tmp_enc), str(p))
                 log.info(f"[encrypt-existing] [{i}/{total}] cópia em {copy.volume_path} cifrada com sucesso")
             except Exception as e:
