@@ -323,6 +323,18 @@ export BASE_URL="http://192.168.1.100:8000"
 
 # Threshold mínimo de espaço livre (%) antes de usar o próximo disco da lista (padrão: 5%)
 export STORAGE_FALLBACK_THRESHOLD_PCT=5
+
+# Daily digest via Telegram (opcional — omitir desabilita o envio)
+export TELEGRAM_BOT_TOKEN="123456789:ABCdef..."   # token gerado pelo @BotFather
+export TELEGRAM_CHAT_ID="987654321"               # seu chat_id (veja abaixo como obter)
+
+# Geração do resumo por IA (opcional — sem nenhuma das duas usa texto estruturado)
+export ANTHROPIC_API_KEY="sk-ant-..."             # Claude Haiku (console.anthropic.com)
+export OLLAMA_URL="http://localhost:11434"         # fallback local se não houver API key
+export OLLAMA_MODEL="llama3"                       # modelo Ollama a usar
+
+# Horário de envio do digest em UTC (padrão: 21 = 18h BRT)
+export DIGEST_HOUR_UTC=21
 ```
 
 #### Configuração Cloud
@@ -335,6 +347,21 @@ export STORAGE_FALLBACK_THRESHOLD_PCT=5
 | `BASE_URL` | | URL pública do servidor para callback OAuth (padrão: `http://localhost:8000`) |
 
 Sem essas variáveis o servidor funciona normalmente — apenas o cloud backup ficará indisponível.
+
+#### Configuração Daily Digest
+
+| Variável | Obrigatório | Padrão | Descrição |
+|---|:-:|---|---|
+| `TELEGRAM_BOT_TOKEN` | ✓ | — | Token do bot gerado pelo @BotFather no Telegram |
+| `TELEGRAM_CHAT_ID` | ✓ | — | ID do chat que receberá o digest (veja como obter abaixo) |
+| `ANTHROPIC_API_KEY` | | — | Usa Claude Haiku para gerar o resumo ([console.anthropic.com](https://console.anthropic.com)) |
+| `OLLAMA_URL` | | `http://localhost:11434` | Fallback local quando não há `ANTHROPIC_API_KEY` |
+| `OLLAMA_MODEL` | | `llama3` | Modelo Ollama a usar |
+| `DIGEST_HOUR_UTC` | | `21` | Hora de envio em UTC (21 = 18h BRT) |
+
+**Como obter o `TELEGRAM_CHAT_ID`:** crie o bot com @BotFather, mande qualquer mensagem para ele e acesse `https://api.telegram.org/bot<TOKEN>/getUpdates` no browser — o campo `chat.id` no JSON é o valor a usar.
+
+Sem `TELEGRAM_BOT_TOKEN` e `TELEGRAM_CHAT_ID` o digest é gerado internamente mas não enviado. Sem variável de IA o servidor envia um resumo estruturado com os dados brutos do banco.
 
 `STORAGE_DIRS` e `STORAGE_DIR` são mutuamente compatíveis: se apenas `STORAGE_DIR` estiver definido, o servidor opera normalmente com um único volume. Se `STORAGE_DIRS` estiver definido, ele tem precedência e pode listar quantos pontos de montagem forem necessários.
 
