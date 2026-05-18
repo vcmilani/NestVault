@@ -1,5 +1,5 @@
 """
-NestVault  v4.5
+NestVault  v4.5.1
 Cada execucao de backup cria uma nova versao dentro do label.
 Conteudo identico e armazenado uma unica vez no servidor (deduplicacao por sha256).
 
@@ -10,6 +10,8 @@ Uso:
     nestvault cleanup --label "docs" --keep 5
     nestvault backups --server http://192.168.1.100:8000
 """
+
+VERSION = "v4.5.1"
 
 import os, sys, hashlib, argparse, base64, socket, threading
 from pathlib import Path
@@ -39,7 +41,7 @@ TEXT  = "#c8d0ce"
 
 
 def _header():
-    console.print(f"\n  [bold {AMBER}]◈[/bold {AMBER}]  [bold {TEXT}]NESTVAULT[/bold {TEXT}]  [{DIM}]v3.1.6[/{DIM}]\n")
+    console.print(f"\n  [bold {AMBER}]◈[/bold {AMBER}]  [bold {TEXT}]NESTVAULT[/bold {TEXT}]  [{DIM}]{VERSION}[/{DIM}]\n")
 
 
 def _kv(key: str, val: str, val_style: str = TEXT):
@@ -598,12 +600,12 @@ def backup_directory(
             _err(f"Sync: {e}")
 
         status = "failed" if stats["errors"] else "done"
-        finish_version(server, label, version_key, status)
         if accumulate and status == "done" and prev_done_key:
             try:
                 absorb_result = absorb_version(server, label, version_key, prev_done_key)
             except requests.RequestException as e:
                 _err(f"Absorb: {e}")
+        finish_version(server, label, version_key, status)
 
     status_color = GREEN if not stats["errors"] else RED
     status_text  = "concluido" if not stats["errors"] else "com erros"
@@ -1018,7 +1020,7 @@ def encrypt_existing(server=DEFAULT_SERVER):
 # -- CLI ----------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
-        description="NestVault v3.1 — backup com deduplicacao e criptografia",
+        description=f"NestVault {VERSION} — backup com deduplicacao e criptografia",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="command", required=True)
