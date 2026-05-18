@@ -1,5 +1,5 @@
 """
-NestVault  v2.5
+NestVault  v4.5
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -82,6 +82,7 @@ async def lifespan(_: FastAPI):
     monitor = asyncio.create_task(_volume_health_monitor())
     sched.scheduler.start()
     sched.reload_jobs_from_db()
+    sched.schedule_daily_digest()
     log.info(f"Servidor iniciado — {len(STORAGE_VOLUMES)} volume(s): {[str(v) for v in STORAGE_VOLUMES]}")
     log.info(f"Auth: {'habilitada' if AUTH_ENABLED else 'desabilitada'}")
     yield
@@ -89,7 +90,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="4.2.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="4.5.0", lifespan=lifespan)
 app.include_router(cloud_router)
 
 if STATIC_DIR.exists():

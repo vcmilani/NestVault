@@ -94,12 +94,42 @@ async def run_cloud_backup_job(job_id: int) -> None:
         log.info(f"[cloud-runner] {total} arquivo(s) encontrado(s)")
 
         enc_key = storage.encryption_key if storage.ENCRYPTION_ENABLED else None
+
+        # Carrega arquivos da última versão concluída para skip por mtime
+        prev_version = (
+            db.query(BackupVersion)
+            .filter(BackupVersion.backup_label == job.target_label, BackupVersion.status == "done")
+            .order_by(BackupVersion.version_key.desc())
+            .first()
+        )
+        prev_files: dict[str, tuple[float, str]] = {}  # path → (mtime, sha256)
+        if prev_version:
+            for vf in db.query(VersionFile).filter(VersionFile.version_id == prev_version.id).all():
+                prev_files[vf.original_path] = (vf.mtime, vf.sha256)
+            log.info(f"[cloud-runner] {len(prev_files)} arquivo(s) na versão anterior para comparação de mtime")
+
         processed = 0
+        skipped   = 0
         errors: list[str] = []
 
         for entry in all_files:
             tmp_path: Path | None = None
             try:
+                # Se mtime não mudou desde o último backup, reutiliza sha256 sem baixar
+                prev = prev_files.get(entry.path)
+                if prev and prev[0] == entry.mtime:
+                    sha256 = prev[1]
+                    db.add(VersionFile(
+                        version_id=version.id,
+                        original_path=entry.path,
+                        sha256=sha256,
+                        mtime=entry.mtime,
+                    ))
+                    db.commit()
+                    processed += 1
+                    skipped   += 1
+                    continue
+
                 volume   = storage.pick_volume()
                 tmp_path = volume / f"_cloud_tmp_{os.urandom(8).hex()}"
 
@@ -136,21 +166,12 @@ async def run_cloud_backup_job(job_id: int) -> None:
                     db.flush()
                     storage.ensure_replicas(sha256, dest, db)
 
-                # Upsert VersionFile
-                vf = (db.query(VersionFile)
-                      .filter(VersionFile.version_id == version.id,
-                              VersionFile.original_path == entry.path)
-                      .first())
-                if vf:
-                    vf.sha256 = sha256
-                    vf.mtime  = entry.mtime
-                else:
-                    db.add(VersionFile(
-                        version_id=version.id,
-                        original_path=entry.path,
-                        sha256=sha256,
-                        mtime=entry.mtime,
-                    ))
+                db.add(VersionFile(
+                    version_id=version.id,
+                    original_path=entry.path,
+                    sha256=sha256,
+                    mtime=entry.mtime,
+                ))
                 db.commit()
                 processed += 1
 
@@ -166,7 +187,8 @@ async def run_cloud_backup_job(job_id: int) -> None:
         version.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
         db.commit()
 
-        summary = f"{processed}/{total} arquivo(s) processado(s)"
+        downloaded = processed - skipped
+        summary = f"{processed}/{total} arquivo(s) processado(s) ({downloaded} baixado(s), {skipped} sem alteração)"
         if errors:
             summary += f", {len(errors)} erro(s): {'; '.join(errors[:3])}"
             if len(errors) > 3:
