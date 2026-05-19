@@ -92,6 +92,13 @@
   .badge-failed{background:var(--red-dim);color:var(--red)}
   .badge-running{background:var(--amber-dim);color:var(--amber)}
   .badge-incomplete{background:var(--bg3);border:1px solid var(--border2);color:var(--text-dim)}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .badge-running::before{content:'⟳ ';display:inline-block;animation:spin .9s linear infinite}
+  tr.row-running>td:first-child{border-left:2px solid var(--amber)}
+  tr.row-running{background:color-mix(in srgb,var(--amber) 5%,var(--bg2))}
+  .running-pill{display:none;align-items:center;gap:5px;font-size:10px;color:var(--amber);letter-spacing:.06em}
+  .running-pill.visible{display:inline-flex}
+  .running-pill .spin{display:inline-block;animation:spin .9s linear infinite}
 
   /* Versions sub-table */
   .versions-row td{padding:0}
@@ -241,7 +248,10 @@
 
   <div class="section-head">
     <div class="section-title">Backups</div>
-    <span class="count-badge" id="backupCount">0</span>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span class="running-pill" id="runningPill"><span class="spin">⟳</span><span id="runningCount"></span></span>
+      <span class="count-badge" id="backupCount">0</span>
+    </div>
   </div>
   <div class="table-wrap">
     <div id="backupsTable"><div class="loading">Carregando</div></div>
@@ -331,6 +341,7 @@
   let expandedLabel = null;
   let expandedVersion = {};  // label -> version_key
   let checkedVersions = {};  // label -> Set of version_keys (max 2)
+  let _backupPollTimer = null;
 
   const H = () => ({'X-API-Key': API_KEY});
 
@@ -420,10 +431,23 @@
     const el = document.getElementById('backupsTable');
     if (!backups.length) { el.innerHTML='<div class="empty">Nenhum backup encontrado</div>'; return; }
 
+    const runningCount = backups.filter(b => b.has_running).length;
+    const pill = document.getElementById('runningPill');
+    const pillCount = document.getElementById('runningCount');
+    if (runningCount > 0) {
+      pillCount.textContent = runningCount + ' em execução';
+      pill.classList.add('visible');
+      startBackupPoll();
+    } else {
+      pill.classList.remove('visible');
+      stopBackupPoll();
+    }
+
     const rows = backups.map(b => {
       const isExp = b.label === expandedLabel;
+      const runCls = b.has_running ? ' row-running' : '';
       return `
-        <tr class="${isExp?'expanded':''}" onclick="toggleVersions('${esc(b.label)}',this)">
+        <tr class="${isExp?'expanded':''}${runCls}" onclick="toggleVersions('${esc(b.label)}',this)">
           <td><span class="chevron">▶</span>${esc(b.label)}</td>
           <td class="dim-cell">${esc(b.client_name||'—')}</td>
           <td>${badge(b.status)}</td>
@@ -815,6 +839,16 @@
   let _authState = null, _authProvider = null;
   let _editingJobId = null, _jobsCache = {};
   let _cloudPollTimer = null;
+
+  function startBackupPoll() {
+    if (_backupPollTimer) return;
+    _backupPollTimer = setInterval(() => loadAll(), 3000);
+  }
+
+  function stopBackupPoll() {
+    clearInterval(_backupPollTimer);
+    _backupPollTimer = null;
+  }
 
   function startCloudPoll() {
     if (_cloudPollTimer) return;

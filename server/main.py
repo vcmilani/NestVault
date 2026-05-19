@@ -169,6 +169,7 @@ class BackupInfo(BaseModel):
     version_count: int
     file_count: int
     total_size_bytes: int
+    has_running: bool = False
 
 class BackupCreatedResponse(BaseModel):
     created: bool
@@ -433,6 +434,11 @@ def _backup_info(b: BackupID, db: Session) -> BackupInfo:
             .scalar() or 0
         )
 
+    has_running = db.query(BackupVersion.id).filter(
+        BackupVersion.backup_label == b.label,
+        BackupVersion.status == "running"
+    ).first() is not None
+
     return BackupInfo(
         id=b.id,
         label=b.label,
@@ -444,6 +450,7 @@ def _backup_info(b: BackupID, db: Session) -> BackupInfo:
         version_count=version_count,
         file_count=file_count,
         total_size_bytes=int(total_size),
+        has_running=has_running,
     )
 
 
