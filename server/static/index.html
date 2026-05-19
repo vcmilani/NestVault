@@ -411,7 +411,21 @@
       if (!r.ok) return;
       const backups = await r.json();
       renderStats(backups, null);
-      renderBackups(backups);
+      if (expandedLabel) {
+        // Don't re-render the whole table while a backup is expanded — just update the pill
+        const runningCount = backups.filter(b => b.has_running).length;
+        const pill = document.getElementById('runningPill');
+        const pillCount = document.getElementById('runningCount');
+        if (runningCount > 0) {
+          pillCount.textContent = runningCount + ' em execução';
+          pill.classList.add('visible');
+        } else {
+          pill.classList.remove('visible');
+          stopBackupPoll();
+        }
+      } else {
+        renderBackups(backups);
+      }
     } catch(_) {}
   }
 
