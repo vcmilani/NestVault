@@ -6,7 +6,7 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
-> **v4.5** — digest diário via Telegram: resumo automático das atividades do dia (backups realizados, novos arquivos armazenados e jobs cloud) enviado via Telegram Bot API. A geração do texto usa Claude Haiku se `ANTHROPIC_API_KEY` estiver configurada, com fallback para Ollama local e, por último, uma mensagem estruturada sem IA. O agendamento é integrado ao APScheduler já existente — sem dependência do cron do sistema. Configurável via `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ANTHROPIC_API_KEY` (opcional), `OLLAMA_URL` (opcional) e `DIGEST_HOUR_UTC` (padrão `21` = 18h BRT).
+> **v4.5** — digest diário via Telegram: resumo automático das atividades do dia (backups realizados, novos arquivos armazenados e jobs cloud) enviado via Telegram Bot API. A geração do texto usa Claude Haiku se `ANTHROPIC_API_KEY` estiver configurada, com fallback para Ollama local e, por último, uma mensagem estruturada sem IA. O agendamento é integrado ao APScheduler já existente — sem dependência do cron do sistema. Configurável via `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ANTHROPIC_API_KEY` (opcional), `OLLAMA_URL` (opcional) e `DIGEST_HOUR_UTC` (padrão `21` — envia às 21h no horário local do servidor).
 >
 > **v4.2** — prioridade de escrita por ordem de declaração dos discos: `STORAGE_DIRS` agora define também a ordem de prioridade de escrita. O servidor usa o primeiro disco da lista que ainda tenha espaço livre acima do limiar configurável `STORAGE_FALLBACK_THRESHOLD_PCT` (padrão 5%). Quando um disco esgota, o próximo da lista assume automaticamente — sem intervenção manual. Apenas quando todos os discos estão esgotados o servidor recorre ao de maior espaço livre. Útil para cenários com um disco de fallback grande compartilhado com o sistema (ex.: disco de 2 TB declarado por último). Corrigida duplicação silenciosa da função `_pick_volume()` em `main.py` que tornava o wrapper correto código morto.
 >
@@ -333,7 +333,7 @@ export ANTHROPIC_API_KEY="sk-ant-..."             # Claude Haiku (console.anthro
 export OLLAMA_URL="http://localhost:11434"         # fallback local se não houver API key
 export OLLAMA_MODEL="llama3"                       # modelo Ollama a usar
 
-# Horário de envio do digest em UTC (padrão: 21 = 18h BRT)
+# Horário de envio do digest no horário local do servidor (padrão: 21h)
 export DIGEST_HOUR_UTC=21
 ```
 
@@ -357,7 +357,7 @@ Sem essas variáveis o servidor funciona normalmente — apenas o cloud backup f
 | `ANTHROPIC_API_KEY` | | — | Usa Claude Haiku para gerar o resumo ([console.anthropic.com](https://console.anthropic.com)) |
 | `OLLAMA_URL` | | `http://localhost:11434` | Fallback local quando não há `ANTHROPIC_API_KEY` |
 | `OLLAMA_MODEL` | | `llama3` | Modelo Ollama a usar |
-| `DIGEST_HOUR_UTC` | | `21` | Hora de envio em UTC (21 = 18h BRT) |
+| `DIGEST_HOUR_UTC` | | `21` | Hora de envio no horário local do servidor |
 
 **Como obter o `TELEGRAM_CHAT_ID`:** crie o bot com @BotFather, mande qualquer mensagem para ele e acesse `https://api.telegram.org/bot<TOKEN>/getUpdates` no browser — o campo `chat.id` no JSON é o valor a usar.
 

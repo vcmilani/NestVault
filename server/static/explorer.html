@@ -6,7 +6,9 @@
 <meta name="theme-color" content="#e8a940">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="NestVault">
 <link rel="icon" type="image/svg+xml" href="/static/icon_web.svg">
+<link rel="manifest" href="/static/manifest.json">
 <title>NestVault — Explorer</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/theme.css">
@@ -21,7 +23,7 @@
   .logo-icon{width:28px;height:28px;border:1.5px solid var(--amber);display:grid;place-items:center;color:var(--amber);font-size:14px}
   .logo-text{font-size:12px;font-weight:500;letter-spacing:.12em;text-transform:uppercase}
   .logo-sub{font-size:10px;color:var(--text-dim);letter-spacing:.08em}
-  .header-right{display:flex;align-items:center;gap:16px}
+  .header-right{display:flex;align-items:center;gap:20px}
   .hbtn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 12px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}
   .hbtn:hover{border-color:var(--amber);color:var(--amber)}
 
@@ -36,7 +38,9 @@
   .bc-version{color:var(--text)}
 
   .stats-bar{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;border:1px solid var(--border);margin-bottom:20px;background:var(--border);animation:fadeUp .3s ease both}
-  .stat-box{background:var(--bg2);padding:14px 18px}
+  .stat-box{background:var(--bg2);padding:14px 18px;position:relative;overflow:hidden}
+  .stat-box::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:var(--amber);transform:scaleX(0);transform-origin:left;transition:transform .3s}
+  .stat-box:hover::before{transform:scaleX(1)}
   .stat-label{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim);margin-bottom:6px}
   .stat-value{font-size:22px;font-weight:300;color:var(--amber);letter-spacing:-.02em;line-height:1}
 
@@ -107,10 +111,10 @@
   .login-box{border:1px solid var(--border2);border-top:2px solid var(--amber);background:var(--bg2);padding:40px 48px;width:min(400px,calc(100vw - 32px));animation:fadeUp .3s ease}
   .login-title{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--amber);margin-bottom:6px}
   .login-sub{font-size:11px;color:var(--text-dim);margin-bottom:28px}
-  .login-lbl{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);display:block;margin-bottom:8px}
+  .login-label{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);display:block;margin-bottom:8px}
   .login-input{width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:13px;padding:10px 14px;outline:none;transition:border-color .15s}
   .login-input:focus{border-color:var(--amber)}
-  .login-btn{margin-top:16px;width:100%;background:var(--amber);border:none;color:var(--bg);font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;padding:11px;cursor:pointer;transition:opacity .15s}
+  .login-btn{margin-top:16px;width:100%;background:var(--amber);border:none;color:var(--bg);font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;padding:11px;cursor:pointer;transition:opacity .15s;min-height:44px}
   .login-btn:hover{opacity:.85}
   .login-error{margin-top:12px;font-size:11px;color:var(--red);min-height:16px}
 
@@ -197,7 +201,7 @@
     <div class="login-title">◈ NestVault</div>
     <div class="login-sub">Informe a API Key para continuar</div>
     <form id="loginForm">
-      <label class="login-lbl" for="apiKeyInput">API Key</label>
+      <label class="login-label" for="apiKeyInput">API Key</label>
       <input class="login-input" id="apiKeyInput" type="password" placeholder="sua-api-key-aqui" autocomplete="off">
       <button class="login-btn" type="submit">Entrar →</button>
       <div class="login-error" id="loginError"></div>
