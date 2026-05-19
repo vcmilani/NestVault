@@ -27,7 +27,7 @@
   .header-right{display:flex;align-items:center;gap:20px}
   .status-dot{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 2s ease-in-out infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-  .hbtn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 12px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s}
+  .hbtn{display:inline-flex;align-items:center;justify-content:center;background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 12px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s}
   .hbtn:hover{border-color:var(--amber);color:var(--amber)}
   .hbtn:disabled{opacity:.4;cursor:not-allowed;pointer-events:none}
   .small-btn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:2px 8px;font-family:var(--mono);font-size:10px;cursor:pointer;letter-spacing:.04em;transition:all .15s;display:inline-flex;align-items:center;gap:3px;white-space:nowrap}
@@ -124,11 +124,12 @@
   .login-label{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);display:block;margin-bottom:8px}
   .login-input{width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:13px;padding:10px 14px;outline:none;transition:border-color .15s}
   .login-input:focus{border-color:var(--amber)}
-  .login-btn{margin-top:16px;width:100%;background:var(--amber);border:none;color:var(--bg);font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;padding:11px;cursor:pointer;transition:opacity .15s}
+  .login-btn{margin-top:16px;width:100%;background:var(--amber);border:none;color:var(--bg);font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;padding:11px;cursor:pointer;transition:opacity .15s;min-height:44px}
   .login-btn:hover{opacity:.85}
   .login-error{margin-top:12px;font-size:11px;color:var(--red);min-height:16px}
 
   /* Compare */
+  .cmp-bar{padding:8px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
   .cmp-btn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:3px 10px;font-family:var(--mono);font-size:10px;cursor:pointer;letter-spacing:.06em;transition:all .15s;opacity:.4;pointer-events:none}
   .cmp-btn.active{opacity:1;border-color:var(--blue);color:var(--blue);pointer-events:auto}
   .cmp-btn.active:hover{border-color:var(--amber);color:var(--amber)}
@@ -168,9 +169,6 @@
   /* ── Scroll interno nas sub-tabelas ── */
   .files-inner{overflow-x:auto;-webkit-overflow-scrolling:touch}
   .diff-section-body{overflow-x:auto;-webkit-overflow-scrolling:touch}
-
-  /* ── Touch targets base ── */
-  .hbtn{display:inline-flex;align-items:center;justify-content:center}
 
   /* ── 768px — tablet/landscape ── */
   @media(max-width:768px){
@@ -266,18 +264,18 @@
 
   <!-- Modal: autenticação OAuth manual (para IPs privados) -->
   <div id="cloudAuthModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:center;justify-content:center">
-    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:28px;min-width:360px;max-width:520px;width:90%">
+    <div style="background:var(--bg2);border:1px solid var(--border);padding:28px;min-width:360px;max-width:520px;width:90%">
       <div style="font-size:13px;font-weight:600;margin-bottom:18px" id="authModalTitle">Conectar conta</div>
 
       <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px"><strong>1.</strong> Adicione este URI de redirecionamento nas configurações OAuth do provedor:</div>
-      <div id="authRedirectUri" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:8px 10px;font-size:11px;font-family:monospace;margin-bottom:16px;word-break:break-all;user-select:all"></div>
+      <div id="authRedirectUri" style="background:var(--bg3);border:1px solid var(--border);padding:8px 10px;font-size:11px;font-family:var(--mono);margin-bottom:16px;word-break:break-all;user-select:all"></div>
 
       <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px"><strong>2.</strong> Clique para autorizar — o browser tentará abrir o endereço <code>localhost</code>:</div>
-      <a id="authLink" href="#" target="_blank" rel="noopener" style="display:inline-block;font-size:12px;background:var(--amber);color:var(--bg);padding:6px 14px;border-radius:4px;text-decoration:none;margin-bottom:16px">Abrir página de autorização ↗</a>
+      <a id="authLink" href="#" target="_blank" rel="noopener" style="display:inline-block;font-size:12px;background:var(--amber);color:var(--bg);padding:6px 14px;text-decoration:none;margin-bottom:16px">Abrir página de autorização ↗</a>
 
       <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px"><strong>3.</strong> Se a página não carregar (IP privado), copie a URL completa da barra do browser e cole aqui:</div>
-      <textarea id="authPastedUrl" rows="3" placeholder="http://localhost:8000/cloud/callback/gdrive?code=4%2F0A...&state=..." style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:11px;box-sizing:border-box;resize:vertical;font-family:monospace"></textarea>
-      <div id="authError" style="color:#f87171;font-size:11px;margin-top:6px;display:none"></div>
+      <textarea id="authPastedUrl" rows="3" placeholder="http://localhost:8000/cloud/callback/gdrive?code=4%2F0A...&state=..." style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:11px;box-sizing:border-box;resize:vertical;font-family:var(--mono)"></textarea>
+      <div id="authError" style="color:var(--red);font-size:11px;margin-top:6px;display:none"></div>
 
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
         <button class="hbtn" onclick="closeAuthModal()">Cancelar</button>
@@ -288,27 +286,27 @@
 
   <!-- Modal: criar job -->
   <div id="cloudModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:center;justify-content:center">
-    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:28px;min-width:360px;max-width:480px;width:90%">
+    <div style="background:var(--bg2);border:1px solid var(--border);padding:28px;min-width:360px;max-width:480px;width:90%">
       <div id="cloudModalTitle" style="font-size:13px;font-weight:600;margin-bottom:18px">Novo job de backup</div>
       <label style="font-size:11px;color:var(--text-dim)">Conta</label>
-      <select id="jCredential" style="width:100%;margin:4px 0 12px;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px"></select>
+      <select id="jCredential" style="width:100%;margin:4px 0 12px;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:var(--mono);padding:6px 8px;font-size:12px"></select>
       <label style="font-size:11px;color:var(--text-dim)">Pasta no cloud</label>
-      <select id="jFolderSelect" style="width:100%;margin:4px 0 4px;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px;box-sizing:border-box">
+      <select id="jFolderSelect" style="width:100%;margin:4px 0 4px;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:var(--mono);padding:6px 8px;font-size:12px;box-sizing:border-box">
         <option value="">— selecione a conta primeiro —</option>
       </select>
       <div id="jFolderManualWrap" style="display:none;margin-top:6px">
-        <input id="jFolderId" placeholder="ID da pasta" style="width:100%;margin:0 0 6px;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px;box-sizing:border-box">
-        <input id="jFolderName" placeholder="Nome da pasta" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px;box-sizing:border-box">
+        <input id="jFolderId" placeholder="ID da pasta" style="width:100%;margin:0 0 6px;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:12px;box-sizing:border-box">
+        <input id="jFolderName" placeholder="Nome da pasta" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:12px;box-sizing:border-box">
       </div>
       <a id="jFolderManualLink" href="#" onclick="toggleFolderManual(event)" style="font-size:10px;color:var(--text-dim);display:block;margin:3px 0 12px">inserir ID manualmente</a>
       <label style="font-size:11px;color:var(--text-dim)">Label de destino no NestVault</label>
-      <input id="jLabel" placeholder="Ex: gdrive-documentos" style="width:100%;margin:4px 0 12px;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px;box-sizing:border-box">
+      <input id="jLabel" placeholder="Ex: gdrive-documentos" style="width:100%;margin:4px 0 12px;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:12px;box-sizing:border-box">
       <label style="font-size:11px;color:var(--text-dim)">Agendamento (cron, opcional)</label>
-      <input id="jCron" placeholder="Ex: 0 3 * * * (3h da manhã diário)" style="width:100%;margin:4px 0 18px;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px;box-sizing:border-box">
-      <div id="jError" style="color:#e05;font-size:11px;margin-bottom:10px;display:none"></div>
+      <input id="jCron" placeholder="Ex: 0 3 * * * (3h da manhã diário)" style="width:100%;margin:4px 0 18px;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:12px;box-sizing:border-box">
+      <div id="jError" style="color:var(--red);font-size:11px;margin-bottom:10px;display:none"></div>
       <div style="display:flex;gap:8px;justify-content:flex-end">
         <button class="hbtn" onclick="closeJobModal()">Cancelar</button>
-        <button id="jSaveBtn" class="hbtn" style="background:var(--amber);color:#000" onclick="saveJob()">Criar job</button>
+        <button id="jSaveBtn" class="hbtn" style="background:var(--amber);color:var(--bg)" onclick="saveJob()">Criar job</button>
       </div>
     </div>
   </div>
@@ -566,7 +564,7 @@
 
     const hasTwoChecked = curChecked.size === 2;
     el.innerHTML = `
-      <div class="cmp-bar" style="padding:8px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+      <div class="cmp-bar">
         <span style="font-size:10px;color:var(--text-mute);letter-spacing:.08em">Selecione 2 versões para comparar</span>
         <button class="cmp-btn ${hasTwoChecked?'active':''}" id="cmpbtn-${esc(label)}"
           onclick="compareVersions('${esc(label)}')">⇄ Comparar selecionadas</button>
@@ -770,7 +768,7 @@
     const accounts = r.ok ? await r.json() : [];
     const el = document.getElementById('cloudAccountsWrap');
     if (!accounts.length) { el.innerHTML = '<div class="empty">Nenhuma conta conectada</div>'; return; }
-    el.innerHTML = `<table class="backup-table"><thead><tr>
+    el.innerHTML = `<table><thead><tr>
       <th>Provider</th><th>Conta</th><th>Nome</th><th></th>
     </tr></thead><tbody>${accounts.map(a => `<tr>
       <td>${providerLabel[a.provider]||a.provider}</td>
@@ -787,7 +785,7 @@
     _jobsCache = Object.fromEntries(jobs.map(j => [j.id, j]));
     const el = document.getElementById('cloudJobsWrap');
     if (!jobs.length) { stopCloudPoll(); el.innerHTML = '<div class="empty">Nenhum job configurado — conecte uma conta e clique em "+ Job"</div>'; return; }
-    el.innerHTML = `<table class="backup-table"><thead><tr>
+    el.innerHTML = `<table><thead><tr>
       <th>Provider</th><th>Pasta</th><th>Label destino</th><th>Cron</th><th>Último run</th><th>Status</th><th></th>
     </tr></thead><tbody>${jobs.map(j => {
       const color = statusColor[j.last_run_status] || 'var(--text-dim)';

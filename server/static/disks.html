@@ -6,7 +6,9 @@
 <meta name="theme-color" content="#e8a940">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<link rel="icon" type="image/png" href="/static/icon-192.png">
+<meta name="apple-mobile-web-app-title" content="NestVault">
+<link rel="icon" type="image/svg+xml" href="/static/icon_web.svg">
+<link rel="manifest" href="/static/manifest.json">
 <title>Discos — NestVault</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/theme.css">
@@ -71,10 +73,10 @@
   .disk-ci-label{font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim)}
   .disk-ci-value{font-size:13px;color:var(--text)}
 
-  .loading{padding:60px;text-align:center;color:var(--text-mute);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+  .loading{padding:40px;text-align:center;color:var(--text-mute);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
   .loading::after{content:'...';animation:dots 1.2s steps(4,end) infinite}
   @keyframes dots{0%,20%{content:'.'}40%{content:'..'}60%,100%{content:'...'}}
-  .empty{padding:60px;text-align:center;color:var(--text-mute);font-size:11px}
+  .empty{padding:40px;text-align:center;color:var(--text-mute);font-size:11px}
 
   /* Login overlay */
   .login-overlay{position:fixed;inset:0;background:var(--overlay-bg);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
@@ -115,7 +117,7 @@
 <header>
   <div class="logo">
     <div class="logo-icon">◈</div>
-    <div><div class="logo-text">NestVault</div><div class="logo-sub">v3.1</div></div>
+    <div><div class="logo-text">NestVault</div><div class="logo-sub">v4.0</div></div>
   </div>
   <div class="header-right">
     <button class="hbtn" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
