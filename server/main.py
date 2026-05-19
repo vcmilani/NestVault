@@ -407,17 +407,26 @@ def _version_stats(v: BackupVersion, db: Session) -> VersionInfo:
 
 def _backup_info(b: BackupID, db: Session) -> BackupInfo:
     """Stats agregados — sem carregar todas as versoes."""
-    # Total de versoes done + ultima versao em uma query
-    done_versions = (
-        db.query(BackupVersion.id, BackupVersion.version_key)
+    # Contagem e chave da versão done mais recente — 1 query com COUNT + MAX
+    agg = (
+        db.query(func.count(BackupVersion.id).label("cnt"),
+                 func.max(BackupVersion.version_key).label("latest_key"))
         .filter(BackupVersion.backup_label == b.label,
                 BackupVersion.status       == "done")
-        .order_by(BackupVersion.version_key.desc())
-        .all()
+        .one()
     )
-    version_count = len(done_versions)
-    latest_id  = done_versions[0][0] if done_versions else None
-    latest_key = done_versions[0][1] if done_versions else None
+    version_count = agg.cnt or 0
+    latest_key    = agg.latest_key
+
+    # ID da versão mais recente (necessário para buscar stats de arquivos)
+    latest_id = None
+    if latest_key:
+        latest_id = (
+            db.query(BackupVersion.id)
+            .filter(BackupVersion.backup_label == b.label,
+                    BackupVersion.version_key  == latest_key)
+            .scalar()
+        )
 
     file_count = 0
     total_size = 0
@@ -653,15 +662,17 @@ def storage_info(db: Session = Depends(get_db)):
     ]
 
     if keeper_ids:
-        kept_shas = (
-            db.query(VersionFile.sha256)
+        # LEFT JOIN anti-join: mais eficiente que NOT IN para conjuntos grandes
+        kept_sq = (
+            db.query(VersionFile.sha256.label("sha256"))
             .filter(VersionFile.version_id.in_(keeper_ids))
             .distinct()
             .subquery()
         )
         reclaimable = (
             db.query(func.coalesce(func.sum(FileContent.size), 0))
-            .filter(~FileContent.sha256.in_(select(kept_shas)))
+            .outerjoin(kept_sq, FileContent.sha256 == kept_sq.c.sha256)
+            .filter(kept_sq.c.sha256.is_(None))
             .scalar()
         ) or 0
     else:
@@ -713,7 +724,7 @@ def create_backup(req: BackupCreate, db: Session = Depends(get_db)):
 
 @app.get("/backups", response_model=list[BackupInfo], dependencies=[Depends(require_api_key)])
 def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db)):
-    """Lista backups com stats — 3 queries fixas independente de N (sem N+1)."""
+    """Lista backups com stats — 4 queries fixas independente de N (sem N+1)."""
     q = db.query(BackupID).order_by(BackupID.created_at.desc())
     if client_name:
         q = q.filter(BackupID.client_name == client_name)
@@ -758,6 +769,17 @@ def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db
         ):
             stats_by_vid[row.version_id] = (row.fc, int(row.sz))
 
+    # Labels com versão running — 1 query para todos os backups
+    labels = [b.label for b in backups]
+    running_labels: set[str] = {
+        row.backup_label
+        for row in db.query(BackupVersion.backup_label)
+        .filter(BackupVersion.backup_label.in_(labels),
+                BackupVersion.status == "running")
+        .distinct()
+        .all()
+    }
+
     result = []
     for b in backups:
         latest = latest_by_label.get(b.label)
@@ -768,6 +790,7 @@ def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db
             status=b.status, created_at=str(b.created_at),
             last_version=latest_key, version_count=version_count,
             file_count=fc_count, total_size_bytes=total_size,
+            has_running=b.label in running_labels,
         ))
     return result
 
@@ -780,10 +803,20 @@ def get_backup(label: str, db: Session = Depends(get_db)):
 @app.get("/backups/{label}/disks", response_model=list[BackupDiskEntry], dependencies=[Depends(require_api_key)])
 def backup_disks(label: str, db: Session = Depends(get_db)):
     _get_backup_or_404(label, db)
+    # Escopo: apenas a versão done mais recente — evita escanear todas as versões históricas
+    latest_vid = (
+        db.query(BackupVersion.id)
+        .filter(BackupVersion.backup_label == label,
+                BackupVersion.status == "done")
+        .order_by(BackupVersion.version_key.desc())
+        .limit(1)
+        .scalar()
+    )
+    if not latest_vid:
+        return []
     sha_subq = (
         db.query(VersionFile.sha256)
-        .join(BackupVersion, BackupVersion.id == VersionFile.version_id)
-        .filter(BackupVersion.backup_label == label)
+        .filter(VersionFile.version_id == latest_vid)
         .distinct()
         .subquery()
     )

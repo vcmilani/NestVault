@@ -398,10 +398,21 @@
 
       renderStats(backups, disk);
       renderBackups(backups);
+      loadAllDiskInfo(backups);
       document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString('pt-BR');
     } catch(e) {
       showError('Não foi possível conectar: '+e.message);
     }
+  }
+
+  async function pollBackups() {
+    try {
+      const r = await fetch('/backups', {headers: H()});
+      if (!r.ok) return;
+      const backups = await r.json();
+      renderStats(backups, null);
+      renderBackups(backups);
+    } catch(_) {}
   }
 
   function renderStats(backups, disk) {
@@ -483,7 +494,6 @@
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
-    loadAllDiskInfo(backups);
   }
 
   async function loadAllDiskInfo(backups) {
@@ -842,7 +852,7 @@
 
   function startBackupPoll() {
     if (_backupPollTimer) return;
-    _backupPollTimer = setInterval(() => loadAll(), 3000);
+    _backupPollTimer = setInterval(() => pollBackups(), 3000);
   }
 
   function stopBackupPoll() {
