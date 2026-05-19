@@ -23,7 +23,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
-from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile
+from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, CloudBackupJob
 import crypto
 import storage
 from auth import require_api_key, API_KEY, AUTH_ENABLED
@@ -71,8 +71,39 @@ def _pick_volume() -> Path:
 
 
 @asynccontextmanager
+def _cleanup_stale_running_states():
+    """Reseta estados 'running' órfãos deixados por um reinício do servidor."""
+    db = SessionLocal()
+    try:
+        stale_jobs = (
+            db.query(CloudBackupJob)
+            .filter(CloudBackupJob.last_run_status == "running")
+            .all()
+        )
+        for job in stale_jobs:
+            job.last_run_status  = "error"
+            job.last_run_message = "Interrompido pelo reinício do servidor"
+            log.warning(f"[startup] Job cloud {job.id} ({job.folder_name}) estava running — marcado como error")
+
+        stale_versions = (
+            db.query(BackupVersion)
+            .filter(BackupVersion.status == "running")
+            .all()
+        )
+        for v in stale_versions:
+            v.status      = "incomplete"
+            v.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            log.warning(f"[startup] Versão {v.backup_label}/{v.version_key} estava running — marcada como incomplete")
+
+        if stale_jobs or stale_versions:
+            db.commit()
+    finally:
+        db.close()
+
+
 async def lifespan(_: FastAPI):
     init_db()
+    _cleanup_stale_running_states()
     if ENCRYPTION_ENABLED:
         storage.encryption_key = crypto.load_key()  # lança ValueError se inválida — falha rápido
         log.info("Criptografia: habilitada (AES-256-GCM)")
