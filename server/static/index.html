@@ -220,6 +220,7 @@
     <span class="last-updated" id="lastUpdated">—</span>
     <button class="hbtn" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
     <button class="hbtn" onclick="loadAll()">↻ Refresh</button>
+    <button class="hbtn" id="pauseRefreshBtn" onclick="togglePollPause()" style="display:none">⏸ Auto</button>
     <a class="hbtn" href="/disks" style="text-decoration:none">⊞ Discos</a>
     <button class="hbtn" id="logoutBtn">⌀ API Key</button>
   </div>
@@ -863,8 +864,16 @@
   let _authState = null, _authProvider = null;
   let _editingJobId = null, _jobsCache = {};
   let _cloudPollTimer = null;
+  let _pollPaused = false;
+
+  function _setPauseBtn(visible) {
+    const btn = document.getElementById('pauseRefreshBtn');
+    if (btn) btn.style.display = visible ? '' : 'none';
+  }
 
   function startBackupPoll() {
+    if (_pollPaused) return;
+    _setPauseBtn(true);
     if (_backupPollTimer) return;
     _backupPollTimer = setInterval(() => pollBackups(), 3000);
   }
@@ -872,9 +881,12 @@
   function stopBackupPoll() {
     clearInterval(_backupPollTimer);
     _backupPollTimer = null;
+    if (!_cloudPollTimer) _setPauseBtn(false);
   }
 
   function startCloudPoll() {
+    if (_pollPaused) return;
+    _setPauseBtn(true);
     if (_cloudPollTimer) return;
     _cloudPollTimer = setInterval(() => loadCloudJobs(), 2500);
   }
@@ -882,6 +894,21 @@
   function stopCloudPoll() {
     clearInterval(_cloudPollTimer);
     _cloudPollTimer = null;
+    if (!_backupPollTimer) _setPauseBtn(false);
+  }
+
+  function togglePollPause() {
+    _pollPaused = !_pollPaused;
+    const btn = document.getElementById('pauseRefreshBtn');
+    if (_pollPaused) {
+      clearInterval(_backupPollTimer); _backupPollTimer = null;
+      clearInterval(_cloudPollTimer);  _cloudPollTimer  = null;
+      if (btn) btn.textContent = '▶ Auto';
+    } else {
+      if (btn) btn.textContent = '⏸ Auto';
+      pollBackups();
+      loadCloudJobs();
+    }
   }
 
   async function connectCloud(provider) {
