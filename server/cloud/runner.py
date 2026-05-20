@@ -53,6 +53,12 @@ async def _fresh_access_token(credential: CloudCredential, db) -> str:
     return credential.access_token
 
 
+async def _force_refresh_token(credential: CloudCredential, db) -> str:
+    """Invalida o token local e força renovação imediata."""
+    credential.token_expiry = None
+    return await _fresh_access_token(credential, db)
+
+
 async def _producer(
     queue: asyncio.Queue,
     all_files: list,
@@ -78,7 +84,7 @@ async def _producer(
             volume   = storage.pick_volume()
             tmp_path = volume / f"_cloud_tmp_{os.urandom(8).hex()}"
 
-            if downloads > 0 and downloads % 100 == 0:
+            if downloads > 0 and downloads % 10 == 0:
                 access_token = await _fresh_access_token(credential, db)
 
             try:
@@ -88,6 +94,19 @@ async def _producer(
                 await queue.put(("file", entry, tmp_path, sha256, size, volume))
                 downloads += 1
             except Exception as e:
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                if status in (401, 403):
+                    try:
+                        log.warning(f"[cloud-runner] {status} em {entry.path}, renovando token e tentando novamente")
+                        access_token = await _force_refresh_token(credential, db)
+                        sha256, size = await provider.download_file_to(
+                            access_token, entry.file_id, tmp_path, storage.CHUNK_SIZE
+                        )
+                        await queue.put(("file", entry, tmp_path, sha256, size, volume))
+                        downloads += 1
+                        continue
+                    except Exception as e2:
+                        e = e2
                 tmp_path.unlink(missing_ok=True)
                 errors.append(f"{entry.path}: {e}")
                 log.error(f"[cloud-runner] Erro no download de {entry.path}: {e}")
