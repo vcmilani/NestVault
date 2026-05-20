@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v4.5`
+# 🗄️ NestVault  `v4.5.1`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -6,6 +6,8 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v4.5.1** — pipeline producer-consumer no cloud backup: download e processamento de arquivos agora ocorrem em paralelo via `asyncio.Queue`. O producer baixa arquivos do cloud enquanto o consumer simultaneamente realiza deduplicação, armazenamento, criptografia e replicação. `crypto.encrypt_stream` (CPU-bound) movida para `run_in_executor`, liberando o event loop durante a criptografia. Fila limitada a 4 itens para controle de backpressure — evita acúmulo excessivo de arquivos temporários em disco.
+>
 > **v4.5** — digest diário via Telegram: resumo automático das atividades do dia (backups realizados, novos arquivos armazenados e jobs cloud) enviado via Telegram Bot API. A geração do texto usa Claude Haiku se `ANTHROPIC_API_KEY` estiver configurada, com fallback para Ollama local e, por último, uma mensagem estruturada sem IA. O agendamento é integrado ao APScheduler já existente — sem dependência do cron do sistema. Configurável via `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ANTHROPIC_API_KEY` (opcional), `OLLAMA_URL` (opcional) e `DIGEST_HOUR_UTC` (padrão `21` — envia às 21h no horário local do servidor).
 >
 > **v4.2** — prioridade de escrita por ordem de declaração dos discos: `STORAGE_DIRS` agora define também a ordem de prioridade de escrita. O servidor usa o primeiro disco da lista que ainda tenha espaço livre acima do limiar configurável `STORAGE_FALLBACK_THRESHOLD_PCT` (padrão 5%). Quando um disco esgota, o próximo da lista assume automaticamente — sem intervenção manual. Apenas quando todos os discos estão esgotados o servidor recorre ao de maior espaço livre. Útil para cenários com um disco de fallback grande compartilhado com o sistema (ex.: disco de 2 TB declarado por último). Corrigida duplicação silenciosa da função `_pick_volume()` em `main.py` que tornava o wrapper correto código morto.
@@ -1053,6 +1055,13 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 ---
 
 ## ⚡ Otimizações
+
+### v4.5.1
+
+| Componente | Mudança |
+|---|---|
+| **`cloud/runner.py` (server)** | Pipeline producer-consumer via `asyncio.Queue(maxsize=4)`: producer faz download em streaming enquanto consumer processa (dedup, store, encrypt, replicate, DB) simultaneamente. `asyncio.gather(producer, consumer)` substitui o loop sequencial anterior |
+| **`crypto.encrypt_stream` (server)** | Movida para `loop.run_in_executor` no consumer — operação CPU-bound não bloqueia mais o event loop durante a criptografia de arquivos |
 
 ### v4.0
 

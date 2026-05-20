@@ -5,10 +5,11 @@ Fluxo por job:
   2. Garante que o BackupID (label) existe
   3. Cria nova BackupVersion
   4. Lista arquivos recursivamente no folder configurado
-  5. Para cada arquivo: download → SHA-256 → dedup check → store → VersionFile
-  6. Finaliza versão
+  5. Producer: para cada arquivo faz download → SHA-256 e enfileira
+  6. Consumer (simultâneo): dedup check → store → encrypt (executor) → VersionFile
+  7. Finaliza versão
 """
-import os, shutil, logging
+import os, shutil, logging, asyncio
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -20,6 +21,8 @@ from database import (
 )
 
 log = logging.getLogger("backup-server")
+
+_QUEUE_SIZE = 4  # máximo de tmp files aguardando processamento
 
 
 def _get_provider(provider_name: str):
@@ -50,6 +53,128 @@ async def _fresh_access_token(credential: CloudCredential, db) -> str:
     return credential.access_token
 
 
+async def _producer(
+    queue: asyncio.Queue,
+    all_files: list,
+    prev_files: dict,
+    credential: CloudCredential,
+    provider,
+    db,
+    errors: list,
+    abort: asyncio.Event,
+) -> None:
+    """Baixa arquivos e enfileira para processamento. Envia sentinel None ao terminar."""
+    downloads = 0
+    try:
+        access_token = await _fresh_access_token(credential, db)
+        for entry in all_files:
+            if abort.is_set():
+                break
+            prev = prev_files.get(entry.path)
+            if prev and prev[0] == entry.mtime:
+                await queue.put(("skip", entry, prev[1]))
+                continue
+
+            volume   = storage.pick_volume()
+            tmp_path = volume / f"_cloud_tmp_{os.urandom(8).hex()}"
+
+            if downloads > 0 and downloads % 100 == 0:
+                access_token = await _fresh_access_token(credential, db)
+
+            try:
+                sha256, size = await provider.download_file_to(
+                    access_token, entry.file_id, tmp_path, storage.CHUNK_SIZE
+                )
+                await queue.put(("file", entry, tmp_path, sha256, size, volume))
+                downloads += 1
+            except Exception as e:
+                tmp_path.unlink(missing_ok=True)
+                errors.append(f"{entry.path}: {e}")
+                log.error(f"[cloud-runner] Erro no download de {entry.path}: {e}")
+    finally:
+        await queue.put(None)
+
+
+async def _consumer(
+    queue: asyncio.Queue,
+    version_id: int,
+    db,
+    enc_key: bytes | None,
+    errors: list,
+    abort: asyncio.Event,
+) -> tuple[int, int]:
+    """Processa itens da fila: dedup, store, encrypt, replicate, DB. Retorna (processed, skipped)."""
+    loop = asyncio.get_running_loop()
+    processed = 0
+    skipped   = 0
+
+    while True:
+        item = await queue.get()
+        if item is None:
+            break
+
+        kind = item[0]
+
+        if kind == "skip":
+            _, entry, sha256 = item
+            db.add(VersionFile(
+                version_id=version_id,
+                original_path=entry.path,
+                sha256=sha256,
+                mtime=entry.mtime,
+            ))
+            db.commit()
+            processed += 1
+            skipped   += 1
+            continue
+
+        _, entry, tmp_path, sha256, size, volume = item
+        tmp_path = Path(tmp_path)
+        try:
+            fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+            if fc:
+                tmp_path.unlink(missing_ok=True)
+                first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).first()
+                if first_copy:
+                    storage.ensure_replicas(sha256, Path(first_copy.stored_at), db)
+            else:
+                dest = storage.content_path(sha256, volume)
+                shutil.move(str(tmp_path), str(dest))
+                tmp_path = None
+                if enc_key:
+                    tmp_enc = dest.parent / f"_enc_{os.urandom(4).hex()}"
+                    try:
+                        await loop.run_in_executor(None, crypto.encrypt_stream, dest, tmp_enc, enc_key)
+                        shutil.move(str(tmp_enc), str(dest))
+                    except Exception:
+                        tmp_enc.unlink(missing_ok=True)
+                        raise
+                fc = FileContent(sha256=sha256, stored_at=str(dest), size=size, encrypted=bool(enc_key))
+                db.add(fc)
+                db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(volume)))
+                db.flush()
+                storage.ensure_replicas(sha256, dest, db)
+
+            db.add(VersionFile(
+                version_id=version_id,
+                original_path=entry.path,
+                sha256=sha256,
+                mtime=entry.mtime,
+            ))
+            db.commit()
+            processed += 1
+
+        except Exception as e:
+            if tmp_path:
+                Path(tmp_path).unlink(missing_ok=True)
+            msg = f"{entry.path}: {e}"
+            errors.append(msg)
+            log.error(f"[cloud-runner] Erro ao processar {msg}")
+            db.rollback()
+
+    return processed, skipped
+
+
 async def run_cloud_backup_job(job_id: int) -> None:
     db = SessionLocal()
     job: CloudBackupJob | None = None
@@ -61,8 +186,8 @@ async def run_cloud_backup_job(job_id: int) -> None:
             return
 
         log.info(f"[cloud-runner] Iniciando job {job_id}: {job.credential.provider}/{job.folder_name} → {job.target_label}")
-        job.last_run_at     = datetime.now(timezone.utc).replace(tzinfo=None)
-        job.last_run_status = "running"
+        job.last_run_at      = datetime.now(timezone.utc).replace(tzinfo=None)
+        job.last_run_status  = "running"
         job.last_run_message = None
         db.commit()
 
@@ -102,86 +227,20 @@ async def run_cloud_backup_job(job_id: int) -> None:
             .order_by(BackupVersion.version_key.desc())
             .first()
         )
-        prev_files: dict[str, tuple[float, str]] = {}  # path → (mtime, sha256)
+        prev_files: dict[str, tuple[float, str]] = {}
         if prev_version:
             for vf in db.query(VersionFile).filter(VersionFile.version_id == prev_version.id).all():
                 prev_files[vf.original_path] = (vf.mtime, vf.sha256)
             log.info(f"[cloud-runner] {len(prev_files)} arquivo(s) na versão anterior para comparação de mtime")
 
-        processed = 0
-        skipped   = 0
         errors: list[str] = []
+        abort = asyncio.Event()
+        queue: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_SIZE)
 
-        for entry in all_files:
-            tmp_path: Path | None = None
-            try:
-                # Se mtime não mudou desde o último backup, reutiliza sha256 sem baixar
-                prev = prev_files.get(entry.path)
-                if prev and prev[0] == entry.mtime:
-                    sha256 = prev[1]
-                    db.add(VersionFile(
-                        version_id=version.id,
-                        original_path=entry.path,
-                        sha256=sha256,
-                        mtime=entry.mtime,
-                    ))
-                    db.commit()
-                    processed += 1
-                    skipped   += 1
-                    continue
-
-                volume   = storage.pick_volume()
-                tmp_path = volume / f"_cloud_tmp_{os.urandom(8).hex()}"
-
-                # Renova token periodicamente (a cada 100 arquivos)
-                if processed % 100 == 0 and processed > 0:
-                    access_token = await _fresh_access_token(job.credential, db)
-
-                sha256, size = await provider.download_file_to(
-                    access_token, entry.file_id, tmp_path, storage.CHUNK_SIZE
-                )
-
-                fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
-                if fc:
-                    # Conteúdo já existe — apenas garante replicação
-                    tmp_path.unlink(missing_ok=True)
-                    first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).first()
-                    if first_copy:
-                        storage.ensure_replicas(sha256, Path(first_copy.stored_at), db)
-                else:
-                    dest = storage.content_path(sha256, volume)
-                    shutil.move(str(tmp_path), str(dest))
-                    tmp_path = None
-                    if enc_key:
-                        tmp_enc = dest.parent / f"_enc_{os.urandom(4).hex()}"
-                        try:
-                            crypto.encrypt_stream(dest, tmp_enc, enc_key)
-                            shutil.move(str(tmp_enc), str(dest))
-                        except Exception:
-                            tmp_enc.unlink(missing_ok=True)
-                            raise
-                    fc = FileContent(sha256=sha256, stored_at=str(dest), size=size, encrypted=bool(enc_key))
-                    db.add(fc)
-                    db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(volume)))
-                    db.flush()
-                    storage.ensure_replicas(sha256, dest, db)
-
-                db.add(VersionFile(
-                    version_id=version.id,
-                    original_path=entry.path,
-                    sha256=sha256,
-                    mtime=entry.mtime,
-                ))
-                db.commit()
-                processed += 1
-
-            except Exception as e:
-                if tmp_path:
-                    tmp_path.unlink(missing_ok=True)
-                msg = f"{entry.path}: {e}"
-                errors.append(msg)
-                log.error(f"[cloud-runner] Erro ao processar {msg}")
-                db.rollback()
+        _, (processed, skipped) = await asyncio.gather(
+            _producer(queue, all_files, prev_files, job.credential, provider, db, errors, abort),
+            _consumer(queue, version.id, db, enc_key, errors, abort),
+        )
 
         version.status      = "failed" if (processed == 0 and errors) else "done"
         version.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
