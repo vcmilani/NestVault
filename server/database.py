@@ -12,6 +12,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
+from sqlalchemy.pool import NullPool
 from datetime import datetime, timezone
 import os, hashlib, base64
 
@@ -23,7 +24,7 @@ DB_PATH = os.getenv("DB_PATH", "./backup.db")
 engine = create_engine(
     f"sqlite:///{DB_PATH}",
     connect_args={"check_same_thread": False, "timeout": 30},
-    pool_pre_ping=True,
+    poolclass=NullPool,
 )
 
 # Ativa WAL mode + outras pragmas de performance no SQLite
