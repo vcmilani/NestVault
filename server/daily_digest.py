@@ -21,6 +21,7 @@ from database import (
     CloudCredential,
     FileContent,
     BackupVersion,
+    VersionFile,
     SessionLocal,
 )
 
@@ -47,6 +48,48 @@ def _fmt_bytes(n: int) -> str:
     return f"{n:.1f} PB"
 
 
+def _version_diff(db, version: BackupVersion) -> dict:
+    """Compara a versão com a anterior do mesmo label para obter arquivos adicionados/modificados/removidos."""
+    prev = (
+        db.query(BackupVersion)
+        .filter(
+            BackupVersion.backup_label == version.backup_label,
+            BackupVersion.version_key < version.version_key,
+            BackupVersion.status == "done",
+        )
+        .order_by(BackupVersion.version_key.desc())
+        .first()
+    )
+
+    current_files = {
+        r.original_path: r.sha256
+        for r in db.query(VersionFile.original_path, VersionFile.sha256)
+        .filter(VersionFile.version_id == version.id)
+        .all()
+    }
+
+    if prev is None:
+        return {"added": len(current_files), "modified": 0, "removed": 0, "total": len(current_files)}
+
+    prev_files = {
+        r.original_path: r.sha256
+        for r in db.query(VersionFile.original_path, VersionFile.sha256)
+        .filter(VersionFile.version_id == prev.id)
+        .all()
+    }
+
+    added    = sum(1 for p in current_files if p not in prev_files)
+    modified = sum(1 for p, h in current_files.items() if p in prev_files and prev_files[p] != h)
+    removed  = sum(1 for p in prev_files if p not in current_files)
+
+    return {
+        "added": added,
+        "modified": modified,
+        "removed": removed,
+        "total": len(current_files),
+    }
+
+
 def _collect_stats() -> dict:
     db = SessionLocal()
     try:
@@ -60,6 +103,16 @@ def _collect_stats() -> dict:
         by_status: dict[str, int] = {}
         for v in versions:
             by_status[v.status] = by_status.get(v.status, 0) + 1
+
+        done_versions = [v for v in versions if v.status == "done"]
+        changes_by_label: dict[str, dict] = {}
+        for v in done_versions:
+            diff = _version_diff(db, v)
+            label = v.backup_label
+            if label not in changes_by_label:
+                changes_by_label[label] = {"added": 0, "modified": 0, "removed": 0, "total": 0}
+            for k in ("added", "modified", "removed", "total"):
+                changes_by_label[label][k] += diff[k]
 
         files_row = db.query(
             func.count(FileContent.sha256),
@@ -79,12 +132,22 @@ def _collect_stats() -> dict:
             .all()
         )
 
+        total_changes = {
+            "added": sum(c["added"] for c in changes_by_label.values()),
+            "modified": sum(c["modified"] for c in changes_by_label.values()),
+            "removed": sum(c["removed"] for c in changes_by_label.values()),
+        }
+
         return {
             "date": start.strftime("%d/%m/%Y"),
             "backups": {
                 "total": len(versions),
                 "by_status": by_status,
                 "labels": list({v.backup_label for v in versions}),
+            },
+            "changes": {
+                "total": total_changes,
+                "by_label": changes_by_label,
             },
             "storage": {
                 "new_files": int(files_row[0] or 0),
@@ -120,8 +183,22 @@ def _fallback_message(stats: dict) -> str:
         lines.append(f"*Backups:* {b['total']} ({status_str})")
         lines.append(f"*Labels:* {', '.join(b['labels']) or '—'}")
 
+    ch = stats.get("changes", {})
+    total_ch = ch.get("total", {})
+    added    = total_ch.get("added", 0)
+    modified = total_ch.get("modified", 0)
+    removed  = total_ch.get("removed", 0)
+    if added + modified + removed > 0:
+        lines.append(f"*Alterações:* +{added} adicionados, ~{modified} modificados, -{removed} removidos")
+        by_label = ch.get("by_label", {})
+        for lbl, d in by_label.items():
+            if d["added"] + d["modified"] + d["removed"] > 0:
+                lines.append(f"  • {lbl}: +{d['added']} ~{d['modified']} -{d['removed']} (total: {d['total']})")
+    elif b["total"] > 0:
+        lines.append("*Alterações:* nenhuma — todos os arquivos inalterados")
+
     if s["new_files"] > 0:
-        lines.append(f"*Novos arquivos:* {s['new_files']} ({s['new_bytes_human']})")
+        lines.append(f"*Novos no store:* {s['new_files']} arquivos ({s['new_bytes_human']})")
 
     if c:
         lines.append("\n*Jobs Cloud:*")
