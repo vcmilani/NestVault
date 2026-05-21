@@ -138,7 +138,7 @@ async def _call_claude(stats: dict) -> str:
     prompt = (
         "Com base nos dados de atividade do NestVault abaixo, escreva um resumo amigável "
         "em português. Destaque o que funcionou bem e sinalize erros se houver. "
-        "Seja conciso (máximo 10 linhas). Não use markdown pesado — apenas texto simples.\n\n"
+        "Seja conciso (máximo 10 linhas).\n\n"
         f"Dados:\n{json.dumps(stats, ensure_ascii=False, indent=2)}"
     )
     async with httpx.AsyncClient(timeout=30) as client:
