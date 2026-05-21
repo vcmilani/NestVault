@@ -14,7 +14,7 @@
 <link rel="stylesheet" href="/static/theme.css">
 <script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
 <style>
-  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
   body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;min-height:100vh}
   body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.04) 2px,rgba(0,0,0,.04) 4px);pointer-events:none;z-index:999}
 
@@ -24,8 +24,8 @@
   .logo-text{font-size:12px;font-weight:500;letter-spacing:.12em;text-transform:uppercase}
   .logo-sub{font-size:10px;color:var(--text-dim);letter-spacing:.08em}
   .header-right{display:flex;align-items:center;gap:20px}
-  .hbtn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 12px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}
-  .hbtn:hover{border-color:var(--amber);color:var(--amber)}
+  .hbtn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 12px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;user-select:none}
+  .hbtn:hover,.hbtn:active{border-color:var(--amber);color:var(--amber)}
 
   main{padding:28px 32px;max-width:1500px}
   @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
@@ -51,8 +51,8 @@
   .filter-input{flex:1;background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:12px;padding:6px 12px;outline:none;transition:border-color .15s;min-width:0}
   .filter-input:focus{border-color:var(--amber)}
   .filter-input::placeholder{color:var(--text-mute)}
-  .cbtn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 10px;font-family:var(--mono);font-size:10px;cursor:pointer;letter-spacing:.06em;transition:all .15s;white-space:nowrap;flex-shrink:0}
-  .cbtn:hover{border-color:var(--amber);color:var(--amber)}
+  .cbtn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 10px;font-family:var(--mono);font-size:10px;cursor:pointer;letter-spacing:.06em;transition:all .15s;white-space:nowrap;flex-shrink:0;user-select:none;min-height:36px;display:inline-flex;align-items:center;justify-content:center}
+  .cbtn:hover,.cbtn:active{border-color:var(--amber);color:var(--amber)}
 
   /* Two-panel layout */
   .explorer-layout{display:flex;border:1px solid var(--border);animation:fadeUp .35s .05s ease both;height:calc(100vh - 295px);min-height:400px}
@@ -68,11 +68,11 @@
   .tree-row{display:flex;align-items:center;border-bottom:1px solid var(--border);min-height:33px;transition:background .1s}
   .tree-row:last-child{border-bottom:none}
   .dir-row{cursor:pointer}
-  .dir-row:hover{background:var(--bg3)}
+  .dir-row:hover,.dir-row:active{background:var(--bg3)}
   .dir-row.selected{background:rgba(232,169,64,.06);box-shadow:inset 2px 0 0 var(--amber)}
   .dir-row.selected .t-name{color:var(--amber)}
   .file-row{background:var(--bg)}
-  .file-row:hover{background:rgba(91,164,207,.025)}
+  .file-row:hover,.file-row:active{background:rgba(91,164,207,.025)}
   .t-chevron{width:16px;flex-shrink:0;text-align:center;font-size:9px;color:var(--text-mute);transition:transform .15s;margin-right:2px}
   .dir-row.open .t-chevron{transform:rotate(90deg);color:var(--amber)}
   .t-icon{font-size:11px;margin-right:6px;flex-shrink:0}
@@ -85,15 +85,15 @@
   .t-count{font-size:10px;color:var(--text-mute);min-width:56px;text-align:right}
   .t-size{font-size:11px;color:var(--blue);font-variant-numeric:tabular-nums;min-width:72px;text-align:right}
   .t-hash{font-size:10px;color:var(--text-mute)}
-  .t-dl{background:none;border:1px solid transparent;color:var(--text-mute);font-family:var(--mono);font-size:10px;cursor:pointer;padding:2px 7px;transition:all .15s;letter-spacing:.04em}
-  .t-dl:hover{border-color:var(--amber);color:var(--amber)}
+  .t-dl{background:none;border:1px solid transparent;color:var(--text-mute);font-family:var(--mono);font-size:10px;cursor:pointer;padding:2px 7px;transition:all .15s;letter-spacing:.04em;min-height:36px;display:inline-flex;align-items:center;justify-content:center;user-select:none}
+  .t-dl:hover,.t-dl:active{border-color:var(--amber);color:var(--amber)}
   .dir-children{display:block}
   .dir-children.collapsed{display:none}
 
   /* Flat filter list */
   .flat-head{padding:8px 14px;background:var(--bg3);border-bottom:1px solid var(--border);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim)}
   .flat-row{display:flex;align-items:center;border-bottom:1px solid var(--border);min-height:33px;padding:5px 14px;gap:8px;background:var(--bg);transition:background .1s}
-  .flat-row:hover{background:rgba(91,164,207,.025)}
+  .flat-row:hover,.flat-row:active{background:rgba(91,164,207,.025)}
   .flat-row:last-child{border-bottom:none}
   .flat-path{flex:1;font-size:11px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
   .flat-path em{color:var(--amber);font-style:normal}
@@ -129,15 +129,20 @@
     .stats-bar{grid-template-columns:repeat(2,1fr)}
     .t-hash{display:none}
     .hbtn{min-height:40px;padding:8px 12px}
+    .cbtn{min-height:40px}
     .explorer-layout{flex-direction:column;height:auto;min-height:300px}
     .tree-panel{width:100%;max-height:40vh;border-right:none;border-bottom:1px solid var(--border)}
     .tree-panel .t-count{display:none}
     .files-panel{min-height:200px;max-height:60vh}
+    .login-input{font-size:16px}
+    .filter-input{font-size:16px}
   }
   @media(max-width:480px){
     .t-count{display:none}
     .logo-sub{display:none}
     main{padding:10px 12px}
+    .cbtn{min-height:44px}
+    .hbtn{min-height:44px}
   }
 </style>
 </head>

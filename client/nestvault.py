@@ -125,7 +125,10 @@ def sha256_file(path: Path) -> str:
 
 def _hash_item(item: tuple) -> tuple:
     fp, op, mtime, size = item
-    return op, sha256_file(fp), size, mtime
+    try:
+        return op, sha256_file(fp), size, mtime
+    except OSError:
+        return op, None, size, mtime
 
 
 def build_headers(extra: Optional[dict] = None) -> dict:
@@ -444,7 +447,13 @@ def backup_directory(
             pending_hash = []
 
             for fp, op in pending:
-                stat   = fp.stat()
+                try:
+                    stat = fp.stat()
+                except OSError:
+                    _warn(f"Arquivo desapareceu antes do backup — ignorado: {op}")
+                    stats["skipped"] += 1
+                    _update_bar()
+                    continue
                 size   = stat.st_size
                 mtime  = stat.st_mtime
                 cached = prev_cache.get(op)
@@ -461,7 +470,12 @@ def backup_directory(
                         _hash_item, pending_hash,
                         chunksize=max(1, len(pending_hash) // (effective_hash * 4)),
                     ):
-                        hashed[op] = (sha256, size, mtime)
+                        if sha256 is None:
+                            _warn(f"Arquivo desapareceu durante hashing — ignorado: {op}")
+                            stats["skipped"] += 1
+                            _update_bar()
+                        else:
+                            hashed[op] = (sha256, size, mtime)
                 _dim("Hashing concluido")
 
             action_map: dict[str, tuple] = {}
@@ -544,10 +558,10 @@ def backup_directory(
         else:
             # ----- Fallback: check individual por worker -----
             def process(fp: Path, op: str):
-                stat  = fp.stat()
-                size  = stat.st_size
-                mtime = stat.st_mtime
                 try:
+                    stat  = fp.stat()
+                    size  = stat.st_size
+                    mtime = stat.st_mtime
                     cached = prev_cache.get(op)
                     if cached and cached["mtime"] == mtime and cached["size"] == size:
                         _dim(f"FAST  {op}  ({fmt_size(size)})")
@@ -577,6 +591,10 @@ def backup_directory(
                         with lock:
                             stats["uploaded"] += 1
 
+                except OSError as e:
+                    _warn(f"{op}: arquivo inacessível — ignorado ({e.strerror})")
+                    with lock:
+                        stats["skipped"] += 1
                 except requests.RequestException as e:
                     _err(f"{op}: {e}")
                     with lock:
