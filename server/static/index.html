@@ -14,7 +14,7 @@
 <link rel="stylesheet" href="/static/theme.css">
 <script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
 <style>
-  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
   body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;min-height:100vh}
   body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.04) 2px,rgba(0,0,0,.04) 4px);pointer-events:none;z-index:999}
 
@@ -27,11 +27,11 @@
   .header-right{display:flex;align-items:center;gap:20px}
   .status-dot{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 2s ease-in-out infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-  .hbtn{display:inline-flex;align-items:center;justify-content:center;background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 12px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s}
-  .hbtn:hover{border-color:var(--amber);color:var(--amber)}
+  .hbtn{display:inline-flex;align-items:center;justify-content:center;background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 12px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s;user-select:none}
+  .hbtn:hover,.hbtn:active{border-color:var(--amber);color:var(--amber)}
   .hbtn:disabled{opacity:.4;cursor:not-allowed;pointer-events:none}
-  .small-btn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:2px 8px;font-family:var(--mono);font-size:10px;cursor:pointer;letter-spacing:.04em;transition:all .15s;display:inline-flex;align-items:center;gap:3px;white-space:nowrap}
-  .small-btn:hover{border-color:var(--amber);color:var(--amber)}
+  .small-btn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:2px 8px;font-family:var(--mono);font-size:10px;cursor:pointer;letter-spacing:.04em;transition:all .15s;display:inline-flex;align-items:center;gap:3px;white-space:nowrap;user-select:none}
+  .small-btn:hover,.small-btn:active{border-color:var(--amber);color:var(--amber)}
   .small-btn:disabled{opacity:.35;cursor:not-allowed;pointer-events:none}
   .small-btn.btn-run:hover{border-color:var(--green);color:var(--green)}
   .small-btn.btn-run.is-running{border-color:var(--amber-dim);color:var(--amber);pointer-events:none}
@@ -76,9 +76,9 @@
   table{width:100%;border-collapse:collapse}
   thead th{background:var(--bg3);padding:9px 14px;text-align:left;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);border-bottom:1px solid var(--border);white-space:nowrap}
   thead th:first-child{padding-left:18px}
-  tbody tr{border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s}
+  tbody tr{border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s;user-select:none}
   tbody tr:last-child{border-bottom:none}
-  tbody tr:hover{background:var(--bg3)}
+  tbody tr:hover,tbody tr:active{background:var(--bg3)}
   td{padding:11px 14px;vertical-align:middle;font-size:12px}
   td:first-child{padding-left:18px}
   .chevron{color:var(--text-mute);font-size:10px;transition:transform .2s;display:inline-block;margin-right:6px}
@@ -105,8 +105,8 @@
   .versions-container{border-top:1px solid var(--border);background:var(--bg2)}
   .versions-head{padding:10px 18px;border-bottom:1px solid var(--border);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--amber);display:flex;align-items:center;justify-content:space-between}
   .versions-inner{overflow-x:auto;overflow-y:visible;-webkit-overflow-scrolling:touch}
-  .row-version{cursor:pointer;transition:background .1s}
-  .row-version:hover{background:var(--bg3)}
+  .row-version{cursor:pointer;transition:background .1s;user-select:none}
+  .row-version:hover,.row-version:active{background:var(--bg3)}
   .row-version.expanded{background:rgba(232,169,64,.04)}
   .row-version td{padding:9px 18px 9px 36px;font-size:11px;border-bottom:1px solid var(--border)}
   .row-version:last-child td{border-bottom:none}
@@ -137,10 +137,11 @@
 
   /* Compare */
   .cmp-bar{padding:8px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
-  .cmp-btn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:3px 10px;font-family:var(--mono);font-size:10px;cursor:pointer;letter-spacing:.06em;transition:all .15s;opacity:.4;pointer-events:none}
+  .cmp-btn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:3px 10px;font-family:var(--mono);font-size:10px;cursor:pointer;letter-spacing:.06em;transition:all .15s;opacity:.4;pointer-events:none;min-height:36px;user-select:none}
   .cmp-btn.active{opacity:1;border-color:var(--blue);color:var(--blue);pointer-events:auto}
   .cmp-btn.active:hover{border-color:var(--amber);color:var(--amber)}
   .version-cb{accent-color:var(--amber);cursor:pointer;width:12px;height:12px}
+  .version-cb-wrap{display:inline-flex;align-items:center;justify-content:center;min-width:44px;min-height:44px;cursor:pointer}
   .diff-row td{padding:0}
   .diff-container{border-top:2px solid var(--blue);background:var(--bg)}
   .diff-head{padding:10px 18px;background:var(--bg2);border-bottom:1px solid var(--border);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--blue);display:flex;align-items:center;justify-content:space-between;gap:16px}
@@ -150,7 +151,7 @@
   .diff-tag-del{background:var(--red-dim);color:var(--red)}
   .diff-tag-mod{background:var(--amber-dim);color:var(--amber)}
   .diff-tag-unch{background:var(--bg3);color:var(--text-dim);border:1px solid var(--border)}
-  .diff-close{background:none;border:none;color:var(--text-dim);font-size:14px;cursor:pointer;padding:0 4px;line-height:1}
+  .diff-close{background:none;border:none;color:var(--text-dim);font-size:14px;cursor:pointer;padding:0;min-width:36px;min-height:36px;display:inline-flex;align-items:center;justify-content:center}
   .diff-close:hover{color:var(--text)}
   .diff-section{border-bottom:1px solid var(--border)}
   .diff-section:last-child{border-bottom:none}
@@ -184,10 +185,13 @@
     header{padding:0 16px}
     .header-right{gap:12px}
     .hbtn{min-height:40px;padding:8px 12px}
-    .small-btn{min-height:32px;padding:4px 10px}
+    .small-btn{min-height:40px;padding:4px 10px}
     tbody tr td{padding:12px 10px}
     tbody tr td:first-child{padding-left:14px}
     .row-version td{padding:11px 14px 11px 28px}
+    .login-input{font-size:16px}
+    #jCredential,#jFolderSelect,#jFolderId,#jFolderName,#jLabel,#jCron{font-size:16px}
+    #authPastedUrl{font-size:16px}
   }
 
   /* ── 480px — mobile ── */
@@ -205,6 +209,8 @@
     .login-btn{min-height:48px}
     .diff-head{flex-wrap:wrap;gap:8px}
     .cmp-bar{flex-wrap:wrap;gap:8px}
+    .small-btn{min-height:44px}
+    .cmp-btn{min-height:44px}
   }
 </style>
 </head>
@@ -299,9 +305,9 @@
   <div id="cloudModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:center;justify-content:center">
     <div style="background:var(--bg2);border:1px solid var(--border);padding:28px;min-width:360px;max-width:480px;width:90%">
       <div id="cloudModalTitle" style="font-size:13px;font-weight:600;margin-bottom:18px">Novo job de backup</div>
-      <label style="font-size:11px;color:var(--text-dim)">Conta</label>
+      <label for="jCredential" style="font-size:11px;color:var(--text-dim)">Conta</label>
       <select id="jCredential" style="width:100%;margin:4px 0 12px;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:var(--mono);padding:6px 8px;font-size:12px"></select>
-      <label style="font-size:11px;color:var(--text-dim)">Pasta no cloud</label>
+      <label for="jFolderSelect" style="font-size:11px;color:var(--text-dim)">Pasta no cloud</label>
       <select id="jFolderSelect" style="width:100%;margin:4px 0 4px;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:var(--mono);padding:6px 8px;font-size:12px;box-sizing:border-box">
         <option value="">— selecione a conta primeiro —</option>
       </select>
@@ -310,9 +316,9 @@
         <input id="jFolderName" placeholder="Nome da pasta" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:12px;box-sizing:border-box">
       </div>
       <a id="jFolderManualLink" href="#" onclick="toggleFolderManual(event)" style="font-size:10px;color:var(--text-dim);display:block;margin:3px 0 12px">inserir ID manualmente</a>
-      <label style="font-size:11px;color:var(--text-dim)">Label de destino no NestVault</label>
+      <label for="jLabel" style="font-size:11px;color:var(--text-dim)">Label de destino no NestVault</label>
       <input id="jLabel" placeholder="Ex: gdrive-documentos" style="width:100%;margin:4px 0 12px;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:12px;box-sizing:border-box">
-      <label style="font-size:11px;color:var(--text-dim)">Agendamento (cron, opcional)</label>
+      <label for="jCron" style="font-size:11px;color:var(--text-dim)">Agendamento (cron, opcional)</label>
       <input id="jCron" placeholder="Ex: 0 3 * * * (3h da manhã diário)" style="width:100%;margin:4px 0 18px;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-size:12px;box-sizing:border-box">
       <div id="jError" style="color:var(--red);font-size:11px;margin-bottom:10px;display:none"></div>
       <div style="display:flex;gap:8px;justify-content:flex-end">
@@ -584,9 +590,11 @@
       return `
         <tr class="row-version ${isExp?'expanded':''}"
             onclick="toggleFiles('${esc(label)}','${esc(v.version_key)}',this)">
-          <td style="width:28px;padding-left:18px">
-            <input type="checkbox" class="version-cb" ${isChk?'checked':''}
-              onclick="event.stopPropagation();toggleVersionCheck('${esc(label)}','${esc(v.version_key)}',this)">
+          <td style="width:44px;padding:0">
+            <label class="version-cb-wrap" onclick="event.stopPropagation()">
+              <input type="checkbox" class="version-cb" ${isChk?'checked':''}
+                onclick="toggleVersionCheck('${esc(label)}','${esc(v.version_key)}',this)">
+            </label>
           </td>
           <td><span class="chevron">▶</span>${esc(v.version_key)}</td>
           <td>${badge(v.status)}</td>
