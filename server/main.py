@@ -569,14 +569,13 @@ def _cleanup_orphan_contents(db: Session) -> tuple[int, int]:
     return removed, bytes_freed
 
 
-def _cleanup_orphan_contents_no_commit(db: Session) -> tuple[int, int]:
+def _cleanup_orphan_contents_no_commit(db: Session, limit: int | None = None) -> tuple[int, int]:
     """Variante sem db.commit() — para uso em loops onde o commit é controlado pelo caller."""
     used_shas = db.query(VersionFile.sha256).distinct().subquery()
-    orphans = (
-        db.query(FileContent)
-        .filter(~FileContent.sha256.in_(select(used_shas)))
-        .all()
-    )
+    q = db.query(FileContent).filter(~FileContent.sha256.in_(select(used_shas)))
+    if limit is not None:
+        q = q.limit(limit)
+    orphans = q.all()
     bytes_freed = 0
     safe_to_delete: list[FileContent] = []
 
@@ -619,14 +618,23 @@ def _cleanup_orphan_contents_no_commit(db: Session) -> tuple[int, int]:
     return removed, bytes_freed
 
 
+_BG_CLEANUP_BATCH = 500
+
 def _bg_cleanup_orphan_contents() -> None:
-    """Background task: cria sua propria sessao DB e limpa conteudos orfaos."""
+    """Background task: cria sua propria sessao DB e limpa conteudos orfaos em lotes."""
     db = SessionLocal()
     try:
         log.info("[bg-cleanup] iniciando limpeza de conteúdos órfãos")
-        count, _ = _cleanup_orphan_contents(db)
-        if count:
-            log.info(f"[bg-cleanup] {count} arquivo(s) orfao(s) removido(s) do storage")
+        total = 0
+        while True:
+            removed, _ = _cleanup_orphan_contents_no_commit(db, limit=_BG_CLEANUP_BATCH)
+            if not removed:
+                break
+            db.commit()
+            total += removed
+            log.debug(f"[bg-cleanup] lote: {removed} arquivo(s) removido(s) (total={total})")
+        if total:
+            log.info(f"[bg-cleanup] {total} arquivo(s) orfao(s) removido(s) do storage")
         else:
             log.info("[bg-cleanup] nenhuma limpeza necessária, não havia arquivos órfãos")
     finally:
