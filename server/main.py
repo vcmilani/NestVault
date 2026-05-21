@@ -875,7 +875,13 @@ def backup_disks(label: str, db: Session = Depends(get_db)):
 @app.delete("/backups/{label}", response_model=BackupDeletedResponse, dependencies=[Depends(require_api_key)])
 def delete_backup(label: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     b = _get_backup_or_404(label, db)
-    # Cascade da relationship cuida dos VersionFiles automaticamente
+    version_ids = [
+        r.id for r in db.query(BackupVersion.id).filter(BackupVersion.backup_label == label).all()
+    ]
+    if version_ids:
+        db.query(VersionFile).filter(VersionFile.version_id.in_(version_ids)).delete(
+            synchronize_session=False
+        )
     db.query(BackupVersion).filter(BackupVersion.backup_label == label).delete(
         synchronize_session=False
     )
