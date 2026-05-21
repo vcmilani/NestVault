@@ -304,7 +304,8 @@ const OPS = {
   rereplicate:{endpoint: '/maintenance/rereplicate',           confirm: false},
   reconcile:  {endpoint: '/maintenance/reconcile-replication', confirm: false},
   encrypt:    {endpoint: '/maintenance/encrypt-existing',      confirm: true,
-               confirmMsg: 'Esta operação cifrará permanentemente todos os arquivos não cifrados.\n\nEssa ação é IRREVERSÍVEL. Deseja continuar?'},
+               confirmMsg: 'Esta operação cifrará permanentemente todos os arquivos não cifrados.\n\nEssa ação é IRREVERSÍVEL. Deseja continuar?',
+               confirmWord: 'CIFRAR'},
 };
 
 function fmtBytes(b) {
@@ -368,6 +369,10 @@ async function apiCall(method, url, body) {
 async function runOp(key) {
   const op = OPS[key];
   if (op.confirm && !confirm(op.confirmMsg)) return;
+  if (op.confirmWord) {
+    const typed = prompt(`Digite "${op.confirmWord}" para confirmar:`);
+    if (typed !== op.confirmWord) { if (typed !== null) showError(key, `Confirmação incorreta — digite exatamente "${op.confirmWord}".`); return; }
+  }
 
   setRunning(key, true);
   try {
