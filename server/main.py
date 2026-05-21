@@ -577,8 +577,9 @@ def _cleanup_orphan_contents_no_commit(db: Session) -> tuple[int, int]:
         .filter(~FileContent.sha256.in_(select(used_shas)))
         .all()
     )
-    removed = 0
     bytes_freed = 0
+    safe_to_delete: list[FileContent] = []
+
     for fc in orphans:
         copies = db.query(FileContentCopy).filter(FileContentCopy.sha256 == fc.sha256).all()
         failed = False
@@ -604,8 +605,15 @@ def _cleanup_orphan_contents_no_commit(db: Session) -> tuple[int, int]:
                     log.warning(f"[cleanup-orphans] Não foi possível remover {p}: {e} — pulando")
                     continue
         bytes_freed += fc.size
-        db.delete(fc)
-        removed += 1
+        safe_to_delete.append(fc)
+
+    # flush das cópias antes de deletar file_contents (respeita FK)
+    if safe_to_delete:
+        db.flush()
+        for fc in safe_to_delete:
+            db.delete(fc)
+
+    removed = len(safe_to_delete)
     if removed:
         log.debug(f"[cleanup-orphans] {removed} arquivo(s) — {bytes_freed / 1024:.1f} KB liberados")
     return removed, bytes_freed
