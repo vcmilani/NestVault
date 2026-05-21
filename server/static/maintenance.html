@@ -57,8 +57,21 @@
 
   .op-desc{font-size:11px;color:var(--text-dim);line-height:1.6;margin-bottom:18px;min-height:34px}
 
+  /* form inside card */
+  .op-form{display:flex;flex-direction:column;gap:8px;margin-bottom:18px;padding:14px;background:var(--bg3);border:1px solid var(--border)}
+  .form-row{display:flex;align-items:center;gap:10px}
+  .form-label{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);width:68px;flex-shrink:0}
+  .op-select{flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:11px;padding:6px 10px;outline:none;cursor:pointer;appearance:none;-webkit-appearance:none}
+  .op-select:focus{border-color:var(--amber)}
+  .op-select:disabled{opacity:.5;cursor:not-allowed}
+  .op-input{background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:11px;padding:6px 10px;outline:none;width:72px}
+  .op-input:focus{border-color:var(--amber)}
+  .op-input-wide{flex:1;width:auto}
+  .form-hint{font-size:10px;color:var(--text-mute)}
+  .form-warn{font-size:9px;color:var(--amber);letter-spacing:.05em;line-height:1.5;margin-top:2px}
+
   .op-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid var(--border);padding-top:16px}
-  .run-btn{display:inline-flex;align-items:center;gap:7px;background:none;border:1px solid var(--border2);color:var(--text-dim);padding:6px 14px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s}
+  .run-btn{display:inline-flex;align-items:center;gap:7px;background:none;border:1px solid var(--border2);color:var(--text-dim);padding:6px 14px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s;white-space:nowrap}
   .run-btn:hover:not(:disabled){border-color:var(--amber);color:var(--amber)}
   .run-btn:disabled{opacity:.4;cursor:not-allowed}
   .run-btn.running{border-color:var(--amber);color:var(--amber)}
@@ -96,6 +109,9 @@
     .op-result{text-align:left}
     .header-right{gap:8px}
     .hbtn{min-height:44px}
+    .form-row{flex-wrap:wrap}
+    .form-label{width:100%}
+    .op-input-wide{width:100%}
   }
 </style>
 </head>
@@ -211,6 +227,70 @@
       </div>
     </div>
 
+    <!-- Limpar Versões Antigas -->
+    <div class="op-card risk-medium" style="animation-delay:.25s">
+      <div class="op-header">
+        <div class="op-title-wrap">
+          <span class="op-icon">⊟</span>
+          <div>
+            <div class="op-name">Limpar Versões Antigas</div>
+            <div class="op-endpoint">POST /backups/{label}/cleanup</div>
+          </div>
+        </div>
+        <span class="risk-badge medium">Médio risco</span>
+      </div>
+      <div class="op-desc">Mantém apenas as N versões mais recentes de um label, removendo as anteriores e limpando arquivos de storage órfãos resultantes.</div>
+      <div class="op-form">
+        <div class="form-row">
+          <span class="form-label">Label</span>
+          <select class="op-select" id="cleanup-label">
+            <option value="">— selecione —</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Manter</span>
+          <input type="number" class="op-input" id="cleanup-keep" value="5" min="0" max="9999">
+          <span class="form-hint">versões mais recentes</span>
+        </div>
+      </div>
+      <div class="op-footer">
+        <button class="run-btn" id="btn-cleanup" onclick="runCleanup()">▶ Executar</button>
+        <div class="op-result" id="result-cleanup"></div>
+      </div>
+    </div>
+
+    <!-- Excluir Label Completo -->
+    <div class="op-card risk-high" style="animation-delay:.3s">
+      <div class="op-header">
+        <div class="op-title-wrap">
+          <span class="op-icon">⊗</span>
+          <div>
+            <div class="op-name">Excluir Label Completo</div>
+            <div class="op-endpoint">DELETE /backups/{label}</div>
+          </div>
+        </div>
+        <span class="risk-badge high">Irreversível</span>
+      </div>
+      <div class="op-desc">Exclui permanentemente um label e todas as suas versões e arquivos. A limpeza de storage é realizada em background após a exclusão.</div>
+      <div class="op-form">
+        <div class="form-row">
+          <span class="form-label">Label</span>
+          <select class="op-select" id="delete-label-select">
+            <option value="">— selecione —</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Confirmar</span>
+          <input type="text" class="op-input op-input-wide" id="delete-label-confirm" placeholder="digite o nome do label para confirmar" autocomplete="off">
+        </div>
+        <div class="form-warn">⚠ Esta ação é permanente e não pode ser desfeita.</div>
+      </div>
+      <div class="op-footer">
+        <button class="run-btn danger" id="btn-delete-label" onclick="runDeleteLabel()">✕ Excluir</button>
+        <div class="op-result" id="result-delete-label"></div>
+      </div>
+    </div>
+
   </div>
 </main>
 
@@ -247,7 +327,7 @@ function fmtResult(key, data) {
   return lines.join(' · ');
 }
 
-function setRunning(key, on) {
+function setRunning(key, on, idleLabel = '▶ Executar') {
   const btn = document.getElementById('btn-'+key);
   const res = document.getElementById('result-'+key);
   if (on) {
@@ -259,15 +339,15 @@ function setRunning(key, on) {
   } else {
     btn.disabled = false;
     btn.classList.remove('running');
-    btn.innerHTML = '▶ Executar';
+    btn.innerHTML = idleLabel;
   }
 }
 
-function showSuccess(key, data) {
+function showSuccess(key, html) {
   const res = document.getElementById('result-'+key);
   const ts = new Date().toLocaleTimeString('pt-BR');
   res.className = 'op-result success';
-  res.innerHTML = fmtResult(key, data) + `<span class="result-ts">${ts}</span>`;
+  res.innerHTML = html + `<span class="result-ts">${ts}</span>`;
 }
 
 function showError(key, msg) {
@@ -276,27 +356,118 @@ function showError(key, msg) {
   res.textContent = msg;
 }
 
+async function apiCall(method, url, body) {
+  const opts = {method, headers: H()};
+  if (body !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  return fetch(url, opts);
+}
+
 async function runOp(key) {
   const op = OPS[key];
   if (op.confirm && !confirm(op.confirmMsg)) return;
 
   setRunning(key, true);
   try {
-    const r = await fetch(op.endpoint, {method: 'POST', headers: H()});
+    const r = await apiCall('POST', op.endpoint);
     if (r.status === 401) { showLogin('API Key inválida.'); setRunning(key, false); return; }
     if (!r.ok) {
       let detail = `HTTP ${r.status}`;
       try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}
       showError(key, detail);
-      setRunning(key, false);
-      return;
+    } else {
+      showSuccess(key, fmtResult(key, await r.json()));
     }
-    const data = await r.json();
-    showSuccess(key, data);
   } catch(e) {
     showError(key, 'Erro de conexão: ' + e.message);
   }
   setRunning(key, false);
+}
+
+// -- Limpar Versões Antigas ---------------------------------------------------
+async function runCleanup() {
+  const label = document.getElementById('cleanup-label').value;
+  const keep  = parseInt(document.getElementById('cleanup-keep').value, 10);
+  if (!label)            { showError('cleanup', 'Selecione um label.'); return; }
+  if (isNaN(keep) || keep < 0) { showError('cleanup', 'Número de versões inválido.'); return; }
+
+  setRunning('cleanup', true);
+  try {
+    const r = await apiCall('POST', `/backups/${encodeURIComponent(label)}/cleanup`, {backup_label: label, keep});
+    if (r.status === 401) { showLogin('API Key inválida.'); setRunning('cleanup', false); return; }
+    if (!r.ok) {
+      let detail = `HTTP ${r.status}`;
+      try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}
+      showError('cleanup', detail);
+    } else {
+      const d = await r.json();
+      const removed = d.versions_removed.length;
+      showSuccess('cleanup', `${removed} versão(ões) removida(s) · ${d.storage_files_removed} arquivo(s) de storage · ${d.kept} mantida(s)`);
+      loadLabels();
+    }
+  } catch(e) {
+    showError('cleanup', 'Erro de conexão: ' + e.message);
+  }
+  setRunning('cleanup', false);
+}
+
+// -- Excluir Label Completo ---------------------------------------------------
+async function runDeleteLabel() {
+  const label   = document.getElementById('delete-label-select').value;
+  const typed   = document.getElementById('delete-label-confirm').value.trim();
+
+  if (!label)        { showError('delete-label', 'Selecione um label.'); return; }
+  if (typed !== label) { showError('delete-label', 'Nome digitado não confere com o label selecionado.'); return; }
+  if (!confirm(`Excluir permanentemente o label "${label}" e TODAS as suas versões?\n\nEssa ação é IRREVERSÍVEL.`)) return;
+
+  setRunning('delete-label', true, '✕ Excluir');
+  try {
+    const r = await apiCall('DELETE', `/backups/${encodeURIComponent(label)}`);
+    if (r.status === 401) { showLogin('API Key inválida.'); setRunning('delete-label', false, '✕ Excluir'); return; }
+    if (!r.ok) {
+      let detail = `HTTP ${r.status}`;
+      try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}
+      showError('delete-label', detail);
+    } else {
+      document.getElementById('delete-label-confirm').value = '';
+      showSuccess('delete-label', `Label "${label}" excluído`);
+      loadLabels();
+    }
+  } catch(e) {
+    showError('delete-label', 'Erro de conexão: ' + e.message);
+  }
+  setRunning('delete-label', false, '✕ Excluir');
+}
+
+// -- Carregar lista de labels -------------------------------------------------
+async function loadLabels() {
+  const ids = ['cleanup-label', 'delete-label-select'];
+  ids.forEach(id => {
+    const s = document.getElementById(id);
+    s.innerHTML = '<option value="">Carregando…</option>';
+    s.disabled = true;
+  });
+
+  try {
+    const r = await fetch('/backups', {headers: H()});
+    if (r.status === 401) {
+      ids.forEach(id => { const s = document.getElementById(id); s.disabled = false; s.innerHTML = '<option value="">— selecione —</option>'; });
+      showLogin('API Key inválida.');
+      return;
+    }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const backups = await r.json();
+    const opts = '<option value="">— selecione —</option>' +
+      backups.map(b => {
+        const ver = b.version_count === 1 ? '1 versão' : `${b.version_count} versões`;
+        return `<option value="${b.label}">${b.label} (${ver})</option>`;
+      }).join('');
+    ids.forEach(id => { const s = document.getElementById(id); s.disabled = false; s.innerHTML = opts; });
+  } catch(e) {
+    ids.forEach(id => { const s = document.getElementById(id); s.disabled = false; s.innerHTML = '<option value="">Erro ao carregar</option>'; });
+  }
 }
 
 // -- Auth / theme -------------------------------------------------------------
@@ -314,6 +485,7 @@ function submitLogin() {
   localStorage.setItem('backupApiKey', key);
   document.getElementById('loginOverlay').classList.remove('visible');
   document.getElementById('loginInput').value = '';
+  loadLabels();
 }
 
 document.getElementById('loginInput').addEventListener('keydown', e => { if (e.key === 'Enter') submitLogin(); });
@@ -338,7 +510,8 @@ function updateThemeBtn() {
 
 // init
 updateThemeBtn();
-if (!API_KEY) showLogin('');
+if (!API_KEY) { showLogin(''); }
+else          { loadLabels(); }
 </script>
 </body>
 </html>
