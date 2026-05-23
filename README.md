@@ -1016,6 +1016,7 @@ O módulo de cloud backup é opcional. Para ativá-lo, registre um aplicativo OA
 - Criptografia e replicação funcionam normalmente — o backup cloud é tratado igual ao backup via cliente CLI
 - Tokens de acesso são renovados automaticamente com o refresh_token; refresh_tokens são armazenados criptografados no banco via Fernet
 - Erros por arquivo são tolerados — o job continua e registra o erro na última mensagem
+- Arquivos com data de modificação (`mtime`) inalterada em relação à versão anterior são ignorados sem re-download — runs recorrentes em pastas estáticas são significativamente mais rápidos
 
 ### Cron
 
@@ -1051,6 +1052,16 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 - **Versões** — clique em uma versão para ver os arquivos
 - **Comparação de versões** — selecione duas versões com as checkboxes e clique em ⇄ Comparar: veja arquivos adicionados, removidos, modificados e o delta de tamanho de cada um
 - **Cloud Backup** *(v4.0)* — conecte contas Google Drive e OneDrive, gerencie jobs de backup agendados e execute manualmente
+- **Manutenção** — página dedicada a operações administrativas de storage:
+  - **Limpeza de Órfãos** — remove arquivos físicos sem referência em nenhuma versão ativa
+  - **Re-replicar** — cria cópias faltantes para conteúdos com menos réplicas que `REPLICATION_FACTOR`
+  - **Reconciliar Replicação** — remove cópias excedentes e preenche faltantes em uma só operação
+  - **Cifrar Existentes** — cifra arquivos não criptografados (requer confirmar digitando `CIFRAR` — irreversível)
+  - **Limpar Versões Antigas** — mantém apenas N versões mais recentes de um label escolhido
+  - **Excluir Label Completo** — exclui um label e todas as suas versões (requer digitar o nome do label)
+- **Discos** — página `/disks` com painel de volumes: espaço total/livre/usado, arquivos físicos por volume e status (ok/degraded)
+- **Explorer de arquivos** — navegação e download de arquivos de uma versão específica via `/explorer`
+- **Backups em tempo real** — indicador no cabeçalho com contagem de backups em andamento; polling automático a cada 3 s com botão ⏸ para pausar
 
 ---
 
@@ -1275,6 +1286,8 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 |--------|----------|-----------|
 | `GET` | `/` | Dashboard web |
 | `GET` | `/health` | Status do servidor e versão |
+| `GET` | `/maintenance` | Página de manutenção (HTML) |
+| `GET` | `/explorer` | Explorer de arquivos (HTML) |
 
 ### Backups
 
