@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v4.5.1`
+# 🗄️ NestVault  `v4.6.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -6,6 +6,8 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v4.6.0** — página de atividade em tempo real (`/activity`): nova interface com polling adaptativo (3 s quando algo está em execução, 10 s em idle) que consolida em uma só tela o estado atual do servidor. Exibe cards animados de backups locais e jobs cloud em execução, barra de armazenamento segmentada (usado / liberável / livre) com mini-cards por volume, e tabelas de atividade das últimas 24 h (versões de backup finalizadas e jobs cloud recentes). Endpoint `GET /api/activity` no backend retorna tudo em uma chamada agregada — versões rodando com contagem de arquivos e bytes acumulados, jobs cloud ativos, storage total e por disco, e histórico recente. Link "◎ Atividade" adicionado à navegação de todas as páginas existentes.
+>
 > **v4.5.1** — pipeline producer-consumer no cloud backup: download e processamento de arquivos agora ocorrem em paralelo via `asyncio.Queue`. O producer baixa arquivos do cloud enquanto o consumer simultaneamente realiza deduplicação, armazenamento, criptografia e replicação. `crypto.encrypt_stream` (CPU-bound) movida para `run_in_executor`, liberando o event loop durante a criptografia. Fila limitada a 4 itens para controle de backpressure — evita acúmulo excessivo de arquivos temporários em disco.
 >
 > **v4.5** — digest diário via Telegram: resumo automático das atividades do dia (backups realizados, novos arquivos armazenados e jobs cloud) enviado via Telegram Bot API. A geração do texto usa Claude Haiku se `ANTHROPIC_API_KEY` estiver configurada, com fallback para Ollama local e, por último, uma mensagem estruturada sem IA. O agendamento é integrado ao APScheduler já existente — sem dependência do cron do sistema. Configurável via `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ANTHROPIC_API_KEY` (opcional), `OLLAMA_URL` (opcional) e `DIGEST_HOUR` (padrão `18` — hora local da máquina).
