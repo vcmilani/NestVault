@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#e8a940">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="NestVault">
+<link rel="icon" type="image/svg+xml" href="/static/icon_web.svg">
+<link rel="manifest" href="/static/manifest.json">
+<title>Manutenção — NestVault</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/theme.css">
+<script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+  body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;min-height:100vh}
+  body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.04) 2px,rgba(0,0,0,.04) 4px);pointer-events:none;z-index:999}
+
+  header{border-bottom:1px solid var(--border);padding:0 32px;display:flex;align-items:center;justify-content:space-between;height:56px;position:sticky;top:0;background:var(--bg);z-index:10}
+  .logo{display:flex;align-items:center;gap:12px}
+  .logo-icon{width:28px;height:28px;border:1.5px solid var(--amber);display:grid;place-items:center;color:var(--amber);font-size:14px}
+  .logo-text{font-size:12px;font-weight:500;letter-spacing:.12em;text-transform:uppercase}
+  .logo-sub{font-size:10px;color:var(--text-dim);letter-spacing:.08em}
+  .header-right{display:flex;align-items:center;gap:20px}
+  .hbtn{display:inline-flex;align-items:center;justify-content:center;background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 12px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s;text-decoration:none;user-select:none}
+  .hbtn:hover,.hbtn:active{border-color:var(--amber);color:var(--amber)}
+  .hbtn:disabled{opacity:.4;cursor:not-allowed;pointer-events:none}
+
+  main{padding:28px 32px;max-width:1100px}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+
+  .page-title{display:flex;align-items:center;gap:10px;margin-bottom:8px;animation:fadeUp .3s ease}
+  .page-title-icon{font-size:18px;color:var(--amber)}
+  .page-title-text{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--text)}
+  .page-title-sub{font-size:10px;color:var(--text-mute);letter-spacing:.08em;margin-bottom:24px}
+
+  .ops-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(460px,1fr));gap:16px}
+
+  .op-card{border:1px solid var(--border);background:var(--bg2);padding:24px;position:relative;overflow:hidden;animation:fadeUp .4s ease both}
+  .op-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:var(--amber);transform:scaleX(0);transform-origin:left;transition:transform .3s}
+  .op-card:hover::before{transform:scaleX(1)}
+  .op-card.risk-high::before{background:var(--red);transform:scaleX(1)}
+  .op-card.risk-medium::before{background:var(--amber);transform:scaleX(1)}
+
+  .op-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px}
+  .op-title-wrap{display:flex;align-items:center;gap:10px}
+  .op-icon{font-size:20px;color:var(--amber);line-height:1}
+  .op-name{font-size:12px;font-weight:500;letter-spacing:.1em;text-transform:uppercase;color:var(--text)}
+  .op-endpoint{font-size:9px;color:var(--text-mute);letter-spacing:.06em;margin-top:3px}
+  .risk-badge{font-size:9px;letter-spacing:.08em;text-transform:uppercase;padding:2px 7px;white-space:nowrap;flex-shrink:0}
+  .risk-badge.low{background:var(--green-dim);color:var(--green)}
+  .risk-badge.medium{background:var(--amber-dim);color:var(--amber)}
+  .risk-badge.high{background:var(--red-dim);color:var(--red)}
+
+  .op-desc{font-size:11px;color:var(--text-dim);line-height:1.6;margin-bottom:18px;min-height:34px}
+
+  /* form inside card */
+  .op-form{display:flex;flex-direction:column;gap:8px;margin-bottom:18px;padding:14px;background:var(--bg3);border:1px solid var(--border)}
+  .form-row{display:flex;align-items:center;gap:10px}
+  .form-label{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);width:68px;flex-shrink:0}
+  .op-select{flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:11px;padding:6px 10px;outline:none;cursor:pointer;appearance:none;-webkit-appearance:none}
+  .op-select:focus{border-color:var(--amber)}
+  .op-select:disabled{opacity:.5;cursor:not-allowed}
+  .op-input{background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:11px;padding:6px 10px;outline:none;width:72px}
+  .op-input:focus{border-color:var(--amber)}
+  .op-input-wide{flex:1;width:auto}
+  .form-hint{font-size:10px;color:var(--text-mute)}
+  .form-warn{font-size:9px;color:var(--amber);letter-spacing:.05em;line-height:1.5;margin-top:2px}
+
+  .op-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid var(--border);padding-top:16px}
+  .run-btn{display:inline-flex;align-items:center;gap:7px;background:none;border:1px solid var(--border2);color:var(--text-dim);padding:6px 14px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s;white-space:nowrap}
+  .run-btn:hover:not(:disabled){border-color:var(--amber);color:var(--amber)}
+  .run-btn:disabled{opacity:.4;cursor:not-allowed}
+  .run-btn.running{border-color:var(--amber);color:var(--amber)}
+  .run-btn.danger:hover:not(:disabled){border-color:var(--red);color:var(--red)}
+  .spinner{display:inline-block;animation:spin .7s linear infinite;font-size:13px}
+
+  .op-result{flex:1;font-size:10px;letter-spacing:.05em;line-height:1.7;text-align:right}
+  .op-result.success{color:var(--green)}
+  .op-result.error{color:var(--red)}
+  .op-result.running{color:var(--text-mute)}
+  .result-ts{display:block;font-size:9px;color:var(--text-mute);margin-top:4px}
+
+  /* login overlay */
+  #loginOverlay{position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:500;display:none;place-items:center}
+  #loginOverlay.visible{display:grid}
+  .login-box{background:var(--bg2);border:1px solid var(--border);padding:32px;width:340px}
+  .login-title{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--text);margin-bottom:6px}
+  .login-sub{font-size:10px;color:var(--text-mute);margin-bottom:20px}
+  .login-error{font-size:10px;color:var(--red);margin-bottom:12px;display:none}
+  .login-error.visible{display:block}
+  .login-input{width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:12px;padding:9px 12px;outline:none;margin-bottom:12px}
+  .login-input:focus{border-color:var(--amber)}
+  .login-btn{width:100%;background:var(--amber);border:none;color:var(--bg);font-family:var(--mono);font-size:11px;font-weight:500;letter-spacing:.08em;padding:10px;cursor:pointer;text-transform:uppercase}
+  .login-btn:hover{opacity:.9}
+
+  @media(max-width:768px){
+    header{padding:0 16px}
+    main{padding:16px}
+    .ops-grid{grid-template-columns:1fr}
+    .header-right{gap:12px}
+    .hbtn{min-height:40px;padding:8px 12px}
+  }
+  @media(max-width:480px){
+    .op-footer{flex-direction:column;align-items:flex-start}
+    .op-result{text-align:left}
+    .header-right{gap:8px}
+    .hbtn{min-height:44px}
+    .form-row{flex-wrap:wrap}
+    .form-label{width:100%}
+    .op-input-wide{width:100%}
+  }
+</style>
+</head>
+<body>
+
+<div id="loginOverlay">
+  <div class="login-box">
+    <div class="login-title">NestVault</div>
+    <div class="login-sub">Informe a API Key para continuar</div>
+    <div class="login-error" id="loginError"></div>
+    <input class="login-input" type="password" id="loginInput" placeholder="API Key" autocomplete="current-password">
+    <button class="login-btn" onclick="submitLogin()">Entrar</button>
+  </div>
+</div>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">N</div>
+    <div>
+      <div class="logo-text">NestVault</div>
+      <div class="logo-sub">Manutenção</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <button class="hbtn" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
+    <a class="hbtn" href="/" style="text-decoration:none">← Voltar</a>
+    <button class="hbtn" id="logoutBtn">⌀ API Key</button>
+  </div>
+</header>
+
+<main>
+  <div class="page-title">
+    <span class="page-title-icon">⚙</span>
+    <span class="page-title-text">Manutenção</span>
+  </div>
+  <div class="page-title-sub">Operações administrativas de storage — execute com atenção</div>
+
+  <div class="ops-grid">
+
+    <!-- Limpeza de Órfãos -->
+    <div class="op-card" style="animation-delay:.05s">
+      <div class="op-header">
+        <div class="op-title-wrap">
+          <span class="op-icon">⊘</span>
+          <div>
+            <div class="op-name">Limpeza de Órfãos</div>
+            <div class="op-endpoint">POST /maintenance/cleanup-orphans</div>
+          </div>
+        </div>
+        <span class="risk-badge low">Baixo risco</span>
+      </div>
+      <div class="op-desc">Remove todos os FileContents não referenciados por nenhuma versão ativa. Libera espaço em disco ocupado por conteúdo sem referência.</div>
+      <div class="op-footer">
+        <button class="run-btn" id="btn-orphans" onclick="runOp('orphans')">▶ Executar</button>
+        <div class="op-result" id="result-orphans"></div>
+      </div>
+    </div>
+
+    <!-- Re-replicar -->
+    <div class="op-card" style="animation-delay:.1s">
+      <div class="op-header">
+        <div class="op-title-wrap">
+          <span class="op-icon">⇄</span>
+          <div>
+            <div class="op-name">Re-replicar</div>
+            <div class="op-endpoint">POST /maintenance/rereplicate</div>
+          </div>
+        </div>
+        <span class="risk-badge low">Baixo risco</span>
+      </div>
+      <div class="op-desc">Cria cópias faltantes para conteúdos com menos réplicas que o REPLICATION_FACTOR. Útil após adicionar um novo volume de storage.</div>
+      <div class="op-footer">
+        <button class="run-btn" id="btn-rereplicate" onclick="runOp('rereplicate')">▶ Executar</button>
+        <div class="op-result" id="result-rereplicate"></div>
+      </div>
+    </div>
+
+    <!-- Reconciliar Replicação -->
+    <div class="op-card risk-medium" style="animation-delay:.15s">
+      <div class="op-header">
+        <div class="op-title-wrap">
+          <span class="op-icon">⇌</span>
+          <div>
+            <div class="op-name">Reconciliar Replicação</div>
+            <div class="op-endpoint">POST /maintenance/reconcile-replication</div>
+          </div>
+        </div>
+        <span class="risk-badge medium">Médio risco</span>
+      </div>
+      <div class="op-desc">Operação em duas fases: remove cópias excedentes (acima do fator) e preenche conteúdos sub-replicados. Garante conformidade exata com REPLICATION_FACTOR.</div>
+      <div class="op-footer">
+        <button class="run-btn" id="btn-reconcile" onclick="runOp('reconcile')">▶ Executar</button>
+        <div class="op-result" id="result-reconcile"></div>
+      </div>
+    </div>
+
+    <!-- Cifrar Existentes -->
+    <div class="op-card risk-high" style="animation-delay:.2s">
+      <div class="op-header">
+        <div class="op-title-wrap">
+          <span class="op-icon">⚿</span>
+          <div>
+            <div class="op-name">Cifrar Existentes</div>
+            <div class="op-endpoint">POST /maintenance/encrypt-existing</div>
+          </div>
+        </div>
+        <span class="risk-badge high">Irreversível</span>
+      </div>
+      <div class="op-desc">Cifra em AES-256-GCM todos os FileContents ainda não cifrados. Requer ENCRYPTION_ENABLED=true no servidor. Operação irreversível — não é possível desfazê-la.</div>
+      <div class="op-footer">
+        <button class="run-btn danger" id="btn-encrypt" onclick="runOp('encrypt')">▶ Executar</button>
+        <div class="op-result" id="result-encrypt"></div>
+      </div>
+    </div>
+
+    <!-- Limpar Versões Antigas -->
+    <div class="op-card risk-medium" style="animation-delay:.25s">
+      <div class="op-header">
+        <div class="op-title-wrap">
+          <span class="op-icon">⊟</span>
+          <div>
+            <div class="op-name">Limpar Versões Antigas</div>
+            <div class="op-endpoint">POST /backups/{label}/cleanup</div>
+          </div>
+        </div>
+        <span class="risk-badge medium">Médio risco</span>
+      </div>
+      <div class="op-desc">Mantém apenas as N versões mais recentes de um label, removendo as anteriores e limpando arquivos de storage órfãos resultantes.</div>
+      <div class="op-form">
+        <div class="form-row">
+          <span class="form-label">Label</span>
+          <select class="op-select" id="cleanup-label">
+            <option value="">— selecione —</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Manter</span>
+          <input type="number" class="op-input" id="cleanup-keep" value="5" min="0" max="9999">
+          <span class="form-hint">versões mais recentes</span>
+        </div>
+      </div>
+      <div class="op-footer">
+        <button class="run-btn" id="btn-cleanup" onclick="runCleanup()">▶ Executar</button>
+        <div class="op-result" id="result-cleanup"></div>
+      </div>
+    </div>
+
+    <!-- Excluir Label Completo -->
+    <div class="op-card risk-high" style="animation-delay:.3s">
+      <div class="op-header">
+        <div class="op-title-wrap">
+          <span class="op-icon">⊗</span>
+          <div>
+            <div class="op-name">Excluir Label Completo</div>
+            <div class="op-endpoint">DELETE /backups/{label}</div>
+          </div>
+        </div>
+        <span class="risk-badge high">Irreversível</span>
+      </div>
+      <div class="op-desc">Exclui permanentemente um label e todas as suas versões e arquivos. A limpeza de storage é realizada em background após a exclusão.</div>
+      <div class="op-form">
+        <div class="form-row">
+          <span class="form-label">Label</span>
+          <select class="op-select" id="delete-label-select">
+            <option value="">— selecione —</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Confirmar</span>
+          <input type="text" class="op-input op-input-wide" id="delete-label-confirm" placeholder="digite o nome do label para confirmar" autocomplete="off">
+        </div>
+        <div class="form-warn">⚠ Esta ação é permanente e não pode ser desfeita.</div>
+      </div>
+      <div class="op-footer">
+        <button class="run-btn danger" id="btn-delete-label" onclick="runDeleteLabel()">✕ Excluir</button>
+        <div class="op-result" id="result-delete-label"></div>
+      </div>
+    </div>
+
+  </div>
+</main>
+
+<script>
+let API_KEY = localStorage.getItem('backupApiKey') || '';
+
+const H = () => ({'X-API-Key': API_KEY});
+
+const OPS = {
+  orphans:    {endpoint: '/maintenance/cleanup-orphans',       confirm: false},
+  rereplicate:{endpoint: '/maintenance/rereplicate',           confirm: false},
+  reconcile:  {endpoint: '/maintenance/reconcile-replication', confirm: false},
+  encrypt:    {endpoint: '/maintenance/encrypt-existing',      confirm: true,
+               confirmMsg: 'Esta operação cifrará permanentemente todos os arquivos não cifrados.\n\nEssa ação é IRREVERSÍVEL. Deseja continuar?',
+               confirmWord: 'CIFRAR'},
+};
+
+function fmtBytes(b) {
+  if (b >= 1073741824) return (b/1073741824).toFixed(2)+' GB';
+  if (b >= 1048576)    return (b/1048576).toFixed(2)+' MB';
+  if (b >= 1024)       return (b/1024).toFixed(1)+' KB';
+  return b+' B';
+}
+
+function fmtResult(key, data) {
+  const lines = [];
+  if ('files_removed'   in data) lines.push(`${data.files_removed} arquivo(s) removido(s)`);
+  if ('bytes_freed'     in data) lines.push(`${fmtBytes(data.bytes_freed)} liberado(s)`);
+  if ('files_encrypted' in data) lines.push(`${data.files_encrypted} arquivo(s) cifrado(s)`);
+  if ('bytes_processed' in data) lines.push(`${fmtBytes(data.bytes_processed)} processado(s)`);
+  if ('replicated'      in data) lines.push(`${data.replicated} replicado(s)`);
+  if ('cleaned'         in data) lines.push(`${data.cleaned} cópia(s) removida(s)`);
+  if ('skipped'         in data) lines.push(`${data.skipped} pulado(s)`);
+  if ('target_copies'   in data) lines.push(`fator alvo: ${data.target_copies}`);
+  return lines.join(' · ');
+}
+
+function setRunning(key, on, idleLabel = '▶ Executar') {
+  const btn = document.getElementById('btn-'+key);
+  const res = document.getElementById('result-'+key);
+  if (on) {
+    btn.disabled = true;
+    btn.classList.add('running');
+    btn.innerHTML = '<span class="spinner">↻</span> Executando…';
+    res.className = 'op-result running';
+    res.textContent = 'Aguarde…';
+  } else {
+    btn.disabled = false;
+    btn.classList.remove('running');
+    btn.innerHTML = idleLabel;
+  }
+}
+
+function showSuccess(key, html) {
+  const res = document.getElementById('result-'+key);
+  const ts = new Date().toLocaleTimeString('pt-BR');
+  res.className = 'op-result success';
+  res.innerHTML = html + `<span class="result-ts">${ts}</span>`;
+}
+
+function showError(key, msg) {
+  const res = document.getElementById('result-'+key);
+  res.className = 'op-result error';
+  res.textContent = msg;
+}
+
+async function apiCall(method, url, body) {
+  const opts = {method, headers: H()};
+  if (body !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  return fetch(url, opts);
+}
+
+async function runOp(key) {
+  const op = OPS[key];
+  if (op.confirm && !confirm(op.confirmMsg)) return;
+  if (op.confirmWord) {
+    const typed = prompt(`Digite "${op.confirmWord}" para confirmar:`);
+    if (typed !== op.confirmWord) { if (typed !== null) showError(key, `Confirmação incorreta — digite exatamente "${op.confirmWord}".`); return; }
+  }
+
+  setRunning(key, true);
+  try {
+    const r = await apiCall('POST', op.endpoint);
+    if (r.status === 401) { showLogin('API Key inválida.'); setRunning(key, false); return; }
+    if (!r.ok) {
+      let detail = `HTTP ${r.status}`;
+      try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}
+      showError(key, detail);
+    } else {
+      showSuccess(key, fmtResult(key, await r.json()));
+    }
+  } catch(e) {
+    showError(key, 'Erro de conexão: ' + e.message);
+  }
+  setRunning(key, false);
+}
+
+// -- Limpar Versões Antigas ---------------------------------------------------
+async function runCleanup() {
+  const label = document.getElementById('cleanup-label').value;
+  const keep  = parseInt(document.getElementById('cleanup-keep').value, 10);
+  if (!label)            { showError('cleanup', 'Selecione um label.'); return; }
+  if (isNaN(keep) || keep < 0) { showError('cleanup', 'Número de versões inválido.'); return; }
+
+  setRunning('cleanup', true);
+  try {
+    const r = await apiCall('POST', `/backups/${encodeURIComponent(label)}/cleanup`, {backup_label: label, keep});
+    if (r.status === 401) { showLogin('API Key inválida.'); setRunning('cleanup', false); return; }
+    if (!r.ok) {
+      let detail = `HTTP ${r.status}`;
+      try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}
+      showError('cleanup', detail);
+    } else {
+      const d = await r.json();
+      const removed = d.versions_removed.length;
+      showSuccess('cleanup', `${removed} versão(ões) removida(s) · ${d.storage_files_removed} arquivo(s) de storage · ${d.kept} mantida(s)`);
+      loadLabels();
+    }
+  } catch(e) {
+    showError('cleanup', 'Erro de conexão: ' + e.message);
+  }
+  setRunning('cleanup', false);
+}
+
+// -- Excluir Label Completo ---------------------------------------------------
+async function runDeleteLabel() {
+  const label   = document.getElementById('delete-label-select').value;
+  const typed   = document.getElementById('delete-label-confirm').value.trim();
+
+  if (!label)        { showError('delete-label', 'Selecione um label.'); return; }
+  if (typed !== label) { showError('delete-label', 'Nome digitado não confere com o label selecionado.'); return; }
+  if (!confirm(`Excluir permanentemente o label "${label}" e TODAS as suas versões?\n\nEssa ação é IRREVERSÍVEL.`)) return;
+
+  setRunning('delete-label', true, '✕ Excluir');
+  try {
+    const r = await apiCall('DELETE', `/backups/${encodeURIComponent(label)}`);
+    if (r.status === 401) { showLogin('API Key inválida.'); setRunning('delete-label', false, '✕ Excluir'); return; }
+    if (!r.ok) {
+      let detail = `HTTP ${r.status}`;
+      try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}
+      showError('delete-label', detail);
+    } else {
+      document.getElementById('delete-label-confirm').value = '';
+      showSuccess('delete-label', `Label "${label}" excluído`);
+      loadLabels();
+    }
+  } catch(e) {
+    showError('delete-label', 'Erro de conexão: ' + e.message);
+  }
+  setRunning('delete-label', false, '✕ Excluir');
+}
+
+// -- Carregar lista de labels -------------------------------------------------
+async function loadLabels() {
+  const ids = ['cleanup-label', 'delete-label-select'];
+  ids.forEach(id => {
+    const s = document.getElementById(id);
+    s.innerHTML = '<option value="">Carregando…</option>';
+    s.disabled = true;
+  });
+
+  try {
+    const r = await fetch('/backups', {headers: H()});
+    if (r.status === 401) {
+      ids.forEach(id => { const s = document.getElementById(id); s.disabled = false; s.innerHTML = '<option value="">— selecione —</option>'; });
+      showLogin('API Key inválida.');
+      return;
+    }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const backups = await r.json();
+    const opts = '<option value="">— selecione —</option>' +
+      backups.map(b => {
+        const ver = b.version_count === 1 ? '1 versão' : `${b.version_count} versões`;
+        return `<option value="${b.label}">${b.label} (${ver})</option>`;
+      }).join('');
+    ids.forEach(id => { const s = document.getElementById(id); s.disabled = false; s.innerHTML = opts; });
+  } catch(e) {
+    ids.forEach(id => { const s = document.getElementById(id); s.disabled = false; s.innerHTML = '<option value="">Erro ao carregar</option>'; });
+  }
+}
+
+// -- Auth / theme -------------------------------------------------------------
+function showLogin(msg) {
+  document.getElementById('loginError').textContent = msg || '';
+  document.getElementById('loginError').classList.toggle('visible', !!msg);
+  document.getElementById('loginOverlay').classList.add('visible');
+  setTimeout(() => document.getElementById('loginInput').focus(), 50);
+}
+
+function submitLogin() {
+  const key = document.getElementById('loginInput').value.trim();
+  if (!key) return;
+  API_KEY = key;
+  localStorage.setItem('backupApiKey', key);
+  document.getElementById('loginOverlay').classList.remove('visible');
+  document.getElementById('loginInput').value = '';
+  loadLabels();
+}
+
+document.getElementById('loginInput').addEventListener('keydown', e => { if (e.key === 'Enter') submitLogin(); });
+document.getElementById('logoutBtn').addEventListener('click', () => showLogin(''));
+
+function toggleTheme() {
+  const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+  if (isLight) {
+    document.documentElement.removeAttribute('data-theme');
+    localStorage.setItem('nv-theme', 'dark');
+  } else {
+    document.documentElement.setAttribute('data-theme', 'light');
+    localStorage.setItem('nv-theme', 'light');
+  }
+  updateThemeBtn();
+}
+
+function updateThemeBtn() {
+  const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+  document.getElementById('themeBtn').textContent = isLight ? '☾ Escuro' : '☀ Claro';
+}
+
+// init
+updateThemeBtn();
+if (!API_KEY) { showLogin(''); }
+else          { loadLabels(); }
+</script>
+</body>
+</html>

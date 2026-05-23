@@ -12,6 +12,7 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import func
@@ -34,10 +35,14 @@ OLLAMA_URL         = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL       = os.getenv("OLLAMA_MODEL", "llama3")
 
 
-def _today_utc_range() -> tuple[datetime, datetime]:
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    return start, start + timedelta(days=1)
+def _today_local_range() -> tuple[datetime, datetime, str]:
+    tz = ZoneInfo(os.getenv("DIGEST_TZ", "America/Sao_Paulo"))
+    now_local   = datetime.now(tz)
+    start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_local   = start_local + timedelta(days=1)
+    start_utc   = start_local.astimezone(timezone.utc).replace(tzinfo=None)
+    end_utc     = end_local.astimezone(timezone.utc).replace(tzinfo=None)
+    return start_utc, end_utc, now_local.strftime("%d/%m/%Y")
 
 
 def _fmt_bytes(n: int) -> str:
@@ -93,7 +98,7 @@ def _version_diff(db, version: BackupVersion) -> dict:
 def _collect_stats() -> dict:
     db = SessionLocal()
     try:
-        start, end = _today_utc_range()
+        start, end, date_str = _today_local_range()
 
         versions = (
             db.query(BackupVersion)
@@ -139,7 +144,7 @@ def _collect_stats() -> dict:
         }
 
         return {
-            "date": start.strftime("%d/%m/%Y"),
+            "date": date_str,
             "backups": {
                 "total": len(versions),
                 "by_status": by_status,

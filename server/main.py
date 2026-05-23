@@ -676,6 +676,14 @@ def explorer_page():
     return HTMLResponse(page.read_text(encoding="utf-8"))
 
 
+@app.get("/maintenance", response_class=HTMLResponse, include_in_schema=False)
+def maintenance_page():
+    page = STATIC_DIR / "maintenance.html"
+    if not page.exists():
+        return HTMLResponse("<h1>Página não encontrada</h1>", status_code=404)
+    return HTMLResponse(page.read_text(encoding="utf-8"))
+
+
 @app.get("/health", response_model=HealthResponse)
 def health():
     return HealthResponse(status="ok", version=app.version, time=datetime.now(timezone.utc).isoformat())
