@@ -8,7 +8,7 @@ Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **com
 
 > **v4.5.1** — pipeline producer-consumer no cloud backup: download e processamento de arquivos agora ocorrem em paralelo via `asyncio.Queue`. O producer baixa arquivos do cloud enquanto o consumer simultaneamente realiza deduplicação, armazenamento, criptografia e replicação. `crypto.encrypt_stream` (CPU-bound) movida para `run_in_executor`, liberando o event loop durante a criptografia. Fila limitada a 4 itens para controle de backpressure — evita acúmulo excessivo de arquivos temporários em disco.
 >
-> **v4.5** — digest diário via Telegram: resumo automático das atividades do dia (backups realizados, novos arquivos armazenados e jobs cloud) enviado via Telegram Bot API. A geração do texto usa Claude Haiku se `ANTHROPIC_API_KEY` estiver configurada, com fallback para Ollama local e, por último, uma mensagem estruturada sem IA. O agendamento é integrado ao APScheduler já existente — sem dependência do cron do sistema. Configurável via `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ANTHROPIC_API_KEY` (opcional), `OLLAMA_URL` (opcional), `DIGEST_HOUR` (padrão `18` — hora local) e `DIGEST_TZ` (padrão `America/Sao_Paulo`).
+> **v4.5** — digest diário via Telegram: resumo automático das atividades do dia (backups realizados, novos arquivos armazenados e jobs cloud) enviado via Telegram Bot API. A geração do texto usa Claude Haiku se `ANTHROPIC_API_KEY` estiver configurada, com fallback para Ollama local e, por último, uma mensagem estruturada sem IA. O agendamento é integrado ao APScheduler já existente — sem dependência do cron do sistema. Configurável via `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ANTHROPIC_API_KEY` (opcional), `OLLAMA_URL` (opcional) e `DIGEST_HOUR` (padrão `18` — hora local da máquina).
 >
 > **v4.2** — prioridade de escrita por ordem de declaração dos discos: `STORAGE_DIRS` agora define também a ordem de prioridade de escrita. O servidor usa o primeiro disco da lista que ainda tenha espaço livre acima do limiar configurável `STORAGE_FALLBACK_THRESHOLD_PCT` (padrão 5%). Quando um disco esgota, o próximo da lista assume automaticamente — sem intervenção manual. Apenas quando todos os discos estão esgotados o servidor recorre ao de maior espaço livre. Útil para cenários com um disco de fallback grande compartilhado com o sistema (ex.: disco de 2 TB declarado por último). Corrigida duplicação silenciosa da função `_pick_volume()` em `main.py` que tornava o wrapper correto código morto.
 >
@@ -337,7 +337,6 @@ export OLLAMA_MODEL="llama3"                       # modelo Ollama a usar
 
 # Horário de envio do digest em horário local (padrão: 18h)
 export DIGEST_HOUR=18
-export DIGEST_TZ="America/Sao_Paulo"
 ```
 
 #### Configuração Cloud
@@ -360,8 +359,7 @@ Sem essas variáveis o servidor funciona normalmente — apenas o cloud backup f
 | `ANTHROPIC_API_KEY` | | — | Usa Claude Haiku para gerar o resumo ([console.anthropic.com](https://console.anthropic.com)) |
 | `OLLAMA_URL` | | `http://localhost:11434` | Fallback local quando não há `ANTHROPIC_API_KEY` |
 | `OLLAMA_MODEL` | | `llama3` | Modelo Ollama a usar |
-| `DIGEST_HOUR` | | `18` | Hora de envio no fuso configurado em `DIGEST_TZ` |
-| `DIGEST_TZ` | | `America/Sao_Paulo` | Timezone do digest (formato IANA, ex: `America/New_York`) |
+| `DIGEST_HOUR` | | `18` | Hora de envio (horário local da máquina) |
 
 **Como obter o `TELEGRAM_CHAT_ID`:** crie o bot com @BotFather, mande qualquer mensagem para ele e acesse `https://api.telegram.org/bot<TOKEN>/getUpdates` no browser — o campo `chat.id` no JSON é o valor a usar.
 
@@ -1018,6 +1016,7 @@ O módulo de cloud backup é opcional. Para ativá-lo, registre um aplicativo OA
 - Criptografia e replicação funcionam normalmente — o backup cloud é tratado igual ao backup via cliente CLI
 - Tokens de acesso são renovados automaticamente com o refresh_token; refresh_tokens são armazenados criptografados no banco via Fernet
 - Erros por arquivo são tolerados — o job continua e registra o erro na última mensagem
+- Arquivos com data de modificação (`mtime`) inalterada em relação à versão anterior são ignorados sem re-download — runs recorrentes em pastas estáticas são significativamente mais rápidos
 
 ### Cron
 
@@ -1053,6 +1052,16 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 - **Versões** — clique em uma versão para ver os arquivos
 - **Comparação de versões** — selecione duas versões com as checkboxes e clique em ⇄ Comparar: veja arquivos adicionados, removidos, modificados e o delta de tamanho de cada um
 - **Cloud Backup** *(v4.0)* — conecte contas Google Drive e OneDrive, gerencie jobs de backup agendados e execute manualmente
+- **Manutenção** — página dedicada a operações administrativas de storage:
+  - **Limpeza de Órfãos** — remove arquivos físicos sem referência em nenhuma versão ativa
+  - **Re-replicar** — cria cópias faltantes para conteúdos com menos réplicas que `REPLICATION_FACTOR`
+  - **Reconciliar Replicação** — remove cópias excedentes e preenche faltantes em uma só operação
+  - **Cifrar Existentes** — cifra arquivos não criptografados (requer confirmar digitando `CIFRAR` — irreversível)
+  - **Limpar Versões Antigas** — mantém apenas N versões mais recentes de um label escolhido
+  - **Excluir Label Completo** — exclui um label e todas as suas versões (requer digitar o nome do label)
+- **Discos** — página `/disks` com painel de volumes: espaço total/livre/usado, arquivos físicos por volume e status (ok/degraded)
+- **Explorer de arquivos** — navegação e download de arquivos de uma versão específica via `/explorer`
+- **Backups em tempo real** — indicador no cabeçalho com contagem de backups em andamento; polling automático a cada 3 s com botão ⏸ para pausar
 
 ---
 
@@ -1277,6 +1286,8 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 |--------|----------|-----------|
 | `GET` | `/` | Dashboard web |
 | `GET` | `/health` | Status do servidor e versão |
+| `GET` | `/maintenance` | Página de manutenção (HTML) |
+| `GET` | `/explorer` | Explorer de arquivos (HTML) |
 
 ### Backups
 

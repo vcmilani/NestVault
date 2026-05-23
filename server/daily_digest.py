@@ -12,7 +12,6 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import func
@@ -36,8 +35,7 @@ OLLAMA_MODEL       = os.getenv("OLLAMA_MODEL", "llama3")
 
 
 def _today_local_range() -> tuple[datetime, datetime, str]:
-    tz = ZoneInfo(os.getenv("DIGEST_TZ", "America/Sao_Paulo"))
-    now_local   = datetime.now(tz)
+    now_local   = datetime.now().astimezone()
     start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
     end_local   = start_local + timedelta(days=1)
     start_utc   = start_local.astimezone(timezone.utc).replace(tzinfo=None)
