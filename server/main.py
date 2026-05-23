@@ -23,7 +23,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
-from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, CloudBackupJob
+from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, CloudBackupJob, CloudCredential
 import crypto
 import storage
 from auth import require_api_key, API_KEY, AUTH_ENABLED
@@ -321,6 +321,50 @@ class CompareResponse(BaseModel):
     deleted: list[CompareFileEntry]
     modified: list[CompareModifiedEntry]
     summary_unchanged: int
+
+class RunningVersionInfo(BaseModel):
+    backup_label: str
+    version_key: str
+    created_at: str
+    file_count: int
+    total_size_bytes: int
+
+class RunningJobInfo(BaseModel):
+    id: int
+    provider: str
+    email: str
+    folder_name: str
+    target_label: str
+    last_run_at: str
+
+class RecentVersionInfo(BaseModel):
+    backup_label: str
+    version_key: str
+    status: str
+    created_at: str
+    finished_at: Optional[str]
+    duration_seconds: Optional[float]
+    file_count: int
+    total_size_bytes: int
+
+class RecentJobInfo(BaseModel):
+    id: int
+    provider: str
+    email: str
+    folder_name: str
+    target_label: str
+    last_run_at: str
+    last_run_status: str
+    last_run_message: Optional[str]
+
+class ActivityResponse(BaseModel):
+    running_versions: list[RunningVersionInfo]
+    running_jobs: list[RunningJobInfo]
+    storage: StorageInfoResponse
+    disks: list[DiskVolumeInfo]
+    recent_versions: list[RecentVersionInfo]
+    recent_jobs: list[RecentJobInfo]
+    server_time: str
 
 
 # -- Helpers ------------------------------------------------------------------
@@ -675,6 +719,201 @@ def maintenance_page():
     if not page.exists():
         return HTMLResponse("<h1>Página não encontrada</h1>", status_code=404)
     return HTMLResponse(page.read_text(encoding="utf-8"))
+
+
+@app.get("/activity", response_class=HTMLResponse, include_in_schema=False)
+def activity_page():
+    page = STATIC_DIR / "activity.html"
+    if not page.exists():
+        return HTMLResponse("<h1>Página não encontrada</h1>", status_code=404)
+    return HTMLResponse(page.read_text(encoding="utf-8"))
+
+
+@app.get("/api/activity", response_model=ActivityResponse, dependencies=[Depends(require_api_key)])
+def get_activity(db: Session = Depends(get_db)):
+    from datetime import timedelta
+
+    # 1. Versões de backup em execução
+    running_vs = (
+        db.query(BackupVersion)
+        .filter(BackupVersion.status == "running")
+        .order_by(BackupVersion.created_at.asc())
+        .all()
+    )
+    stats_map: dict[int, tuple[int, int]] = {}
+    if running_vs:
+        vids = [v.id for v in running_vs]
+        for row in (
+            db.query(
+                VersionFile.version_id,
+                func.count(VersionFile.id).label("fc"),
+                func.coalesce(func.sum(FileContent.size), 0).label("sz"),
+            )
+            .outerjoin(FileContent, FileContent.sha256 == VersionFile.sha256)
+            .filter(VersionFile.version_id.in_(vids))
+            .group_by(VersionFile.version_id)
+            .all()
+        ):
+            stats_map[row.version_id] = (row.fc, int(row.sz))
+    running_version_infos = [
+        RunningVersionInfo(
+            backup_label=v.backup_label,
+            version_key=v.version_key,
+            created_at=str(v.created_at),
+            file_count=stats_map.get(v.id, (0, 0))[0],
+            total_size_bytes=stats_map.get(v.id, (0, 0))[1],
+        )
+        for v in running_vs
+    ]
+
+    # 2. Cloud jobs em execução
+    running_job_rows = (
+        db.query(CloudBackupJob, CloudCredential)
+        .join(CloudCredential, CloudCredential.id == CloudBackupJob.credential_id)
+        .filter(CloudBackupJob.last_run_status == "running")
+        .all()
+    )
+    running_job_infos = [
+        RunningJobInfo(
+            id=j.id, provider=c.provider, email=c.email,
+            folder_name=j.folder_name, target_label=j.target_label,
+            last_run_at=str(j.last_run_at),
+        )
+        for j, c in running_job_rows
+    ]
+
+    # 3. Storage (mesma lógica do storage_info())
+    usages = [u for u in (_safe_disk_usage(v) for v in STORAGE_VOLUMES) if u]
+    usage_total = sum(u.total for u in usages)
+    usage_used  = sum(u.used  for u in usages)
+    usage_free  = sum(u.free  for u in usages)
+    latest_ts_sq = (
+        db.query(BackupVersion.backup_label, func.max(BackupVersion.created_at).label("latest_ts"))
+        .filter(BackupVersion.status == "done")
+        .group_by(BackupVersion.backup_label)
+        .subquery()
+    )
+    keeper_ids = [
+        row.id for row in (
+            db.query(BackupVersion.id)
+            .join(latest_ts_sq,
+                  (BackupVersion.backup_label == latest_ts_sq.c.backup_label) &
+                  (BackupVersion.created_at   == latest_ts_sq.c.latest_ts))
+            .all()
+        )
+    ]
+    if keeper_ids:
+        kept_sq = (
+            db.query(VersionFile.sha256.label("sha256"))
+            .filter(VersionFile.version_id.in_(keeper_ids))
+            .distinct()
+            .subquery()
+        )
+        reclaimable = (
+            db.query(func.coalesce(func.sum(FileContent.size), 0))
+            .outerjoin(kept_sq, FileContent.sha256 == kept_sq.c.sha256)
+            .filter(kept_sq.c.sha256.is_(None))
+            .scalar()
+        ) or 0
+    else:
+        reclaimable = db.query(func.coalesce(func.sum(FileContent.size), 0)).scalar() or 0
+    storage_obj = StorageInfoResponse(
+        total_bytes=usage_total, used_bytes=usage_used,
+        free_bytes=usage_free, reclaimable_bytes=int(reclaimable),
+    )
+
+    # 4. Disks (mesma lógica do storage_disks())
+    disks_list = []
+    for vol in STORAGE_VOLUMES:
+        usage = _safe_disk_usage(vol)
+        status = "degraded" if usage is None else "ok"
+        cf = db.query(func.count(FileContentCopy.id)).filter(FileContentCopy.volume_path == str(vol)).scalar() or 0
+        cb = (
+            db.query(func.coalesce(func.sum(FileContent.size), 0))
+            .join(FileContentCopy, FileContentCopy.sha256 == FileContent.sha256)
+            .filter(FileContentCopy.volume_path == str(vol))
+            .scalar()
+        ) or 0
+        disks_list.append(DiskVolumeInfo(
+            path=str(vol),
+            total_bytes=usage.total if usage else 0,
+            used_bytes=usage.used  if usage else 0,
+            free_bytes=usage.free  if usage else 0,
+            content_files=cf, content_bytes=int(cb), status=status,
+        ))
+
+    # 5. Versões recentes (últimas 24h, status finalizado)
+    cutoff = datetime.utcnow() - timedelta(hours=24)
+    recent_vs = (
+        db.query(BackupVersion)
+        .filter(
+            BackupVersion.status.in_(["done", "failed", "incomplete"]),
+            BackupVersion.finished_at >= cutoff,
+        )
+        .order_by(BackupVersion.finished_at.desc())
+        .limit(30)
+        .all()
+    )
+    rstats: dict[int, tuple[int, int]] = {}
+    if recent_vs:
+        rvids = [v.id for v in recent_vs]
+        for row in (
+            db.query(
+                VersionFile.version_id,
+                func.count(VersionFile.id).label("fc"),
+                func.coalesce(func.sum(FileContent.size), 0).label("sz"),
+            )
+            .outerjoin(FileContent, FileContent.sha256 == VersionFile.sha256)
+            .filter(VersionFile.version_id.in_(rvids))
+            .group_by(VersionFile.version_id)
+            .all()
+        ):
+            rstats[row.version_id] = (row.fc, int(row.sz))
+    recent_version_infos = []
+    for v in recent_vs:
+        fc, sz = rstats.get(v.id, (0, 0))
+        duration = None
+        if v.finished_at and v.created_at:
+            duration = round((v.finished_at - v.created_at).total_seconds(), 1)
+        recent_version_infos.append(RecentVersionInfo(
+            backup_label=v.backup_label, version_key=v.version_key,
+            status=v.status, created_at=str(v.created_at),
+            finished_at=str(v.finished_at) if v.finished_at else None,
+            duration_seconds=duration, file_count=fc, total_size_bytes=sz,
+        ))
+
+    # 6. Jobs cloud recentes (não rodando, últimos 10)
+    recent_job_rows = (
+        db.query(CloudBackupJob, CloudCredential)
+        .join(CloudCredential, CloudCredential.id == CloudBackupJob.credential_id)
+        .filter(
+            CloudBackupJob.last_run_at.isnot(None),
+            CloudBackupJob.last_run_status != "running",
+        )
+        .order_by(CloudBackupJob.last_run_at.desc())
+        .limit(10)
+        .all()
+    )
+    recent_job_infos = [
+        RecentJobInfo(
+            id=j.id, provider=c.provider, email=c.email,
+            folder_name=j.folder_name, target_label=j.target_label,
+            last_run_at=str(j.last_run_at),
+            last_run_status=j.last_run_status or "unknown",
+            last_run_message=j.last_run_message,
+        )
+        for j, c in recent_job_rows
+    ]
+
+    return ActivityResponse(
+        running_versions=running_version_infos,
+        running_jobs=running_job_infos,
+        storage=storage_obj,
+        disks=disks_list,
+        recent_versions=recent_version_infos,
+        recent_jobs=recent_job_infos,
+        server_time=datetime.utcnow().isoformat(),
+    )
 
 
 @app.get("/health", response_model=HealthResponse)
