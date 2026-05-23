@@ -438,26 +438,19 @@ def _version_stats(v: BackupVersion, db: Session) -> VersionInfo:
 
 def _backup_info(b: BackupID, db: Session) -> BackupInfo:
     """Stats agregados — sem carregar todas as versoes."""
-    # Contagem e chave da versão done mais recente — 1 query com COUNT + MAX
-    agg = (
-        db.query(func.count(BackupVersion.id).label("cnt"),
-                 func.max(BackupVersion.version_key).label("latest_key"))
-        .filter(BackupVersion.backup_label == b.label,
-                BackupVersion.status       == "done")
-        .one()
+    version_count = (
+        db.query(func.count(BackupVersion.id))
+        .filter(BackupVersion.backup_label == b.label, BackupVersion.status == "done")
+        .scalar() or 0
     )
-    version_count = agg.cnt or 0
-    latest_key    = agg.latest_key
-
-    # ID da versão mais recente (necessário para buscar stats de arquivos)
-    latest_id = None
-    if latest_key:
-        latest_id = (
-            db.query(BackupVersion.id)
-            .filter(BackupVersion.backup_label == b.label,
-                    BackupVersion.version_key  == latest_key)
-            .scalar()
-        )
+    latest = (
+        db.query(BackupVersion.id, BackupVersion.version_key)
+        .filter(BackupVersion.backup_label == b.label, BackupVersion.status == "done")
+        .order_by(BackupVersion.created_at.desc())
+        .first()
+    )
+    latest_key = latest.version_key if latest else None
+    latest_id  = latest.id if latest else None
 
     file_count = 0
     total_size = 0
@@ -537,12 +530,12 @@ def _auto_cleanup_if_needed(db: Session) -> None:
         versions = (
             db.query(BackupVersion)
             .filter(BackupVersion.backup_label == label, BackupVersion.status == "done")
-            .order_by(BackupVersion.version_key.asc())
+            .order_by(BackupVersion.created_at.asc())
             .all()
         )
         deletable.extend(versions[:-1])  # mantém sempre a última
 
-    deletable.sort(key=lambda v: v.version_key)  # mais antigas primeiro
+    deletable.sort(key=lambda v: v.created_at)  # mais antigas primeiro
 
     for v in deletable:
         label, key = v.backup_label, v.version_key
@@ -696,11 +689,11 @@ def storage_info(db: Session = Depends(get_db)):
     usage_used  = sum(u.used  for u in usages)
     usage_free  = sum(u.free  for u in usages)
 
-    # Keeper = versão "done" mais recente de cada label — 1 query via subquery com MAX
-    latest_key_sq = (
+    # Keeper = versão "done" mais recente de cada label — 1 query via subquery com MAX(created_at)
+    latest_ts_sq = (
         db.query(
             BackupVersion.backup_label,
-            func.max(BackupVersion.version_key).label("latest_key"),
+            func.max(BackupVersion.created_at).label("latest_ts"),
         )
         .filter(BackupVersion.status == "done")
         .group_by(BackupVersion.backup_label)
@@ -709,9 +702,9 @@ def storage_info(db: Session = Depends(get_db)):
     keeper_ids: list[int] = [
         row.id for row in (
             db.query(BackupVersion.id)
-            .join(latest_key_sq,
-                  (BackupVersion.backup_label == latest_key_sq.c.backup_label) &
-                  (BackupVersion.version_key  == latest_key_sq.c.latest_key))
+            .join(latest_ts_sq,
+                  (BackupVersion.backup_label == latest_ts_sq.c.backup_label) &
+                  (BackupVersion.created_at   == latest_ts_sq.c.latest_ts))
             .all()
         )
     ]
@@ -791,7 +784,7 @@ def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db
     latest_sq = (
         db.query(
             BackupVersion.backup_label,
-            func.max(BackupVersion.version_key).label("latest_key"),
+            func.max(BackupVersion.created_at).label("latest_ts"),
             func.count(BackupVersion.id).label("version_count"),
         )
         .filter(BackupVersion.status == "done")
@@ -802,7 +795,7 @@ def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db
         db.query(BackupVersion.backup_label, BackupVersion.id, BackupVersion.version_key,
                  latest_sq.c.version_count)
         .join(latest_sq, (BackupVersion.backup_label == latest_sq.c.backup_label) &
-                         (BackupVersion.version_key  == latest_sq.c.latest_key))
+                         (BackupVersion.created_at   == latest_sq.c.latest_ts))
         .all()
     )
     latest_by_label: dict[str, tuple[int, str, int]] = {
@@ -863,7 +856,7 @@ def backup_disks(label: str, db: Session = Depends(get_db)):
         db.query(BackupVersion.id)
         .filter(BackupVersion.backup_label == label,
                 BackupVersion.status == "done")
-        .order_by(BackupVersion.version_key.desc())
+        .order_by(BackupVersion.created_at.desc())
         .limit(1)
         .scalar()
     )
@@ -943,7 +936,7 @@ def list_versions(label: str, db: Session = Depends(get_db)):
     _get_backup_or_404(label, db)
     versions = (db.query(BackupVersion)
                 .filter(BackupVersion.backup_label == label)
-                .order_by(BackupVersion.version_key.desc())
+                .order_by(BackupVersion.created_at.desc())
                 .all())
     if not versions:
         return []
