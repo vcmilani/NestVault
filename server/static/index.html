@@ -226,7 +226,6 @@
     <span class="last-updated" id="lastUpdated">—</span>
     <button class="hbtn" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
     <button class="hbtn" onclick="loadAll()">↻ Refresh</button>
-    <button class="hbtn" id="pauseRefreshBtn" onclick="togglePollPause()" style="display:none">⏸ Auto</button>
     <a class="hbtn" href="/disks" style="text-decoration:none">⊞ Discos</a>
     <a class="hbtn" href="/maintenance" style="text-decoration:none">⚙ Manutenção</a>
     <button class="hbtn" id="logoutBtn">⌀ API Key</button>
@@ -349,7 +348,6 @@
   let expandedLabel = null;
   let expandedVersion = {};  // label -> version_key
   let checkedVersions = {};  // label -> Set of version_keys (max 2)
-  let _backupPollTimer = null;
 
   const H = () => ({'X-API-Key': API_KEY});
 
@@ -413,29 +411,6 @@
     }
   }
 
-  async function pollBackups() {
-    try {
-      const r = await fetch('/backups', {headers: H()});
-      if (!r.ok) return;
-      const backups = await r.json();
-      renderStats(backups, null);
-      if (expandedLabel) {
-        // Don't re-render the whole table while a backup is expanded — just update the pill
-        const runningCount = backups.filter(b => b.has_running).length;
-        const pill = document.getElementById('runningPill');
-        const pillCount = document.getElementById('runningCount');
-        if (runningCount > 0) {
-          pillCount.textContent = runningCount + ' em execução';
-          pill.classList.add('visible');
-        } else {
-          pill.classList.remove('visible');
-          stopBackupPoll();
-        }
-      } else {
-        renderBackups(backups);
-      }
-    } catch(_) {}
-  }
 
   function renderStats(backups, disk) {
     const totalVersions = backups.reduce((s,b) => s+b.version_count, 0);
@@ -470,10 +445,8 @@
     if (runningCount > 0) {
       pillCount.textContent = runningCount + ' em execução';
       pill.classList.add('visible');
-      startBackupPoll();
     } else {
       pill.classList.remove('visible');
-      stopBackupPoll();
     }
 
     const rows = backups.map(b => {
@@ -867,58 +840,10 @@
         </td>
       </tr>`;
     }).join('')}</tbody></table>`;
-    if (jobs.some(j => j.last_run_status === 'running')) startCloudPoll(); else stopCloudPoll();
   }
 
   let _authState = null, _authProvider = null;
   let _editingJobId = null, _jobsCache = {};
-  let _cloudPollTimer = null;
-  let _pollPaused = false;
-
-  function _setPauseBtn(visible) {
-    const btn = document.getElementById('pauseRefreshBtn');
-    if (btn) btn.style.display = visible ? '' : 'none';
-  }
-
-  function startBackupPoll() {
-    if (_pollPaused) return;
-    _setPauseBtn(true);
-    if (_backupPollTimer) return;
-    _backupPollTimer = setInterval(() => pollBackups(), 3000);
-  }
-
-  function stopBackupPoll() {
-    clearInterval(_backupPollTimer);
-    _backupPollTimer = null;
-    if (!_cloudPollTimer) _setPauseBtn(false);
-  }
-
-  function startCloudPoll() {
-    if (_pollPaused) return;
-    _setPauseBtn(true);
-    if (_cloudPollTimer) return;
-    _cloudPollTimer = setInterval(() => loadCloudJobs(), 2500);
-  }
-
-  function stopCloudPoll() {
-    clearInterval(_cloudPollTimer);
-    _cloudPollTimer = null;
-    if (!_backupPollTimer) _setPauseBtn(false);
-  }
-
-  function togglePollPause() {
-    _pollPaused = !_pollPaused;
-    const btn = document.getElementById('pauseRefreshBtn');
-    if (_pollPaused) {
-      clearInterval(_backupPollTimer); _backupPollTimer = null;
-      clearInterval(_cloudPollTimer);  _cloudPollTimer  = null;
-      if (btn) btn.textContent = '▶ Auto';
-    } else {
-      if (btn) btn.textContent = '⏸ Auto';
-      pollBackups();
-      loadCloudJobs();
-    }
-  }
 
   async function connectCloud(provider) {
     const r = await fetch(`/cloud/accounts/${provider}/auth?manual=true`, {headers: H()});
@@ -1124,7 +1049,6 @@
     const r = await fetch(`/cloud/jobs/${jobId}/run`, {method:'POST', headers: H()});
     if (!r.ok) { const d = await r.json(); showError(d.detail||'Erro ao iniciar job'); return; }
     await loadCloudJobs();
-    startCloudPoll();
   }
 
   async function deleteJob(jobId) {
