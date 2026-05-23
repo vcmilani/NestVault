@@ -8,7 +8,7 @@ Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **com
 
 > **v4.5.1** — pipeline producer-consumer no cloud backup: download e processamento de arquivos agora ocorrem em paralelo via `asyncio.Queue`. O producer baixa arquivos do cloud enquanto o consumer simultaneamente realiza deduplicação, armazenamento, criptografia e replicação. `crypto.encrypt_stream` (CPU-bound) movida para `run_in_executor`, liberando o event loop durante a criptografia. Fila limitada a 4 itens para controle de backpressure — evita acúmulo excessivo de arquivos temporários em disco.
 >
-> **v4.5** — digest diário via Telegram: resumo automático das atividades do dia (backups realizados, novos arquivos armazenados e jobs cloud) enviado via Telegram Bot API. A geração do texto usa Claude Haiku se `ANTHROPIC_API_KEY` estiver configurada, com fallback para Ollama local e, por último, uma mensagem estruturada sem IA. O agendamento é integrado ao APScheduler já existente — sem dependência do cron do sistema. Configurável via `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ANTHROPIC_API_KEY` (opcional), `OLLAMA_URL` (opcional), `DIGEST_HOUR` (padrão `18` — hora local) e `DIGEST_TZ` (padrão `America/Sao_Paulo`).
+> **v4.5** — digest diário via Telegram: resumo automático das atividades do dia (backups realizados, novos arquivos armazenados e jobs cloud) enviado via Telegram Bot API. A geração do texto usa Claude Haiku se `ANTHROPIC_API_KEY` estiver configurada, com fallback para Ollama local e, por último, uma mensagem estruturada sem IA. O agendamento é integrado ao APScheduler já existente — sem dependência do cron do sistema. Configurável via `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ANTHROPIC_API_KEY` (opcional), `OLLAMA_URL` (opcional) e `DIGEST_HOUR` (padrão `18` — hora local da máquina).
 >
 > **v4.2** — prioridade de escrita por ordem de declaração dos discos: `STORAGE_DIRS` agora define também a ordem de prioridade de escrita. O servidor usa o primeiro disco da lista que ainda tenha espaço livre acima do limiar configurável `STORAGE_FALLBACK_THRESHOLD_PCT` (padrão 5%). Quando um disco esgota, o próximo da lista assume automaticamente — sem intervenção manual. Apenas quando todos os discos estão esgotados o servidor recorre ao de maior espaço livre. Útil para cenários com um disco de fallback grande compartilhado com o sistema (ex.: disco de 2 TB declarado por último). Corrigida duplicação silenciosa da função `_pick_volume()` em `main.py` que tornava o wrapper correto código morto.
 >
@@ -337,7 +337,6 @@ export OLLAMA_MODEL="llama3"                       # modelo Ollama a usar
 
 # Horário de envio do digest em horário local (padrão: 18h)
 export DIGEST_HOUR=18
-export DIGEST_TZ="America/Sao_Paulo"
 ```
 
 #### Configuração Cloud
@@ -360,8 +359,7 @@ Sem essas variáveis o servidor funciona normalmente — apenas o cloud backup f
 | `ANTHROPIC_API_KEY` | | — | Usa Claude Haiku para gerar o resumo ([console.anthropic.com](https://console.anthropic.com)) |
 | `OLLAMA_URL` | | `http://localhost:11434` | Fallback local quando não há `ANTHROPIC_API_KEY` |
 | `OLLAMA_MODEL` | | `llama3` | Modelo Ollama a usar |
-| `DIGEST_HOUR` | | `18` | Hora de envio no fuso configurado em `DIGEST_TZ` |
-| `DIGEST_TZ` | | `America/Sao_Paulo` | Timezone do digest (formato IANA, ex: `America/New_York`) |
+| `DIGEST_HOUR` | | `18` | Hora de envio (horário local da máquina) |
 
 **Como obter o `TELEGRAM_CHAT_ID`:** crie o bot com @BotFather, mande qualquer mensagem para ele e acesse `https://api.telegram.org/bot<TOKEN>/getUpdates` no browser — o campo `chat.id` no JSON é o valor a usar.
 

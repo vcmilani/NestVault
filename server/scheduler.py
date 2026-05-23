@@ -39,18 +39,19 @@ def remove_job(job_id: int) -> None:
 
 
 def schedule_daily_digest() -> None:
-    """Agenda o digest diário. Hora configurável via DIGEST_HOUR (horário local, default 18) e DIGEST_TZ (default America/Sao_Paulo)."""
+    """Agenda o digest diário. Hora configurável via DIGEST_HOUR (horário local, default 18)."""
     from daily_digest import send_daily_digest
-    hour = int(os.getenv("DIGEST_HOUR", "18"))
-    tz   = os.getenv("DIGEST_TZ", "America/Sao_Paulo")
+    from datetime import datetime as _dt
+    hour     = int(os.getenv("DIGEST_HOUR", "18"))
+    local_tz = _dt.now().astimezone().tzinfo
     scheduler.add_job(
         send_daily_digest,
-        CronTrigger(hour=hour, minute=0, timezone=tz),
+        CronTrigger(hour=hour, minute=0, timezone=local_tz),
         id="daily_digest",
         replace_existing=True,
         misfire_grace_time=3600,
     )
-    log.info(f"[scheduler] Daily digest agendado para {hour:02d}:00 {tz}")
+    log.info(f"[scheduler] Daily digest agendado para {hour:02d}:00 (hora local)")
 
 
 def reload_jobs_from_db() -> None:
