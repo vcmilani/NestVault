@@ -205,7 +205,7 @@ async def run_cloud_backup_job(job_id: int) -> None:
             return
 
         log.info(f"[cloud-runner] Iniciando job {job_id}: {job.credential.provider}/{job.folder_name} → {job.target_label}")
-        job.last_run_at      = datetime.now(timezone.utc).replace(tzinfo=None)
+        job.last_run_at      = datetime.now()
         job.last_run_status  = "running"
         job.last_run_message = None
         db.commit()
