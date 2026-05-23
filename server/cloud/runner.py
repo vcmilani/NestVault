@@ -221,7 +221,7 @@ async def run_cloud_backup_job(job_id: int) -> None:
             db.commit()
 
         # Cria BackupVersion; marca running anteriores como incomplete
-        version_key = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M:%S")
+        version_key = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         db.query(BackupVersion).filter(
             BackupVersion.backup_label == job.target_label,
             BackupVersion.status == "running",
