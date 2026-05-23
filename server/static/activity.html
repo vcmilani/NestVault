@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#e8a940">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="NestVault">
+<link rel="icon" type="image/svg+xml" href="/static/icon_web.svg">
+<link rel="manifest" href="/static/manifest.json">
+<title>Atividade — NestVault</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/theme.css">
+<script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+  body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;min-height:100vh}
+  body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.04) 2px,rgba(0,0,0,.04) 4px);pointer-events:none;z-index:999}
+
+  header{border-bottom:1px solid var(--border);padding:0 32px;display:flex;align-items:center;justify-content:space-between;height:56px;position:sticky;top:0;background:var(--bg);z-index:10}
+  .logo{display:flex;align-items:center;gap:12px}
+  .logo-icon{width:28px;height:28px;border:1.5px solid var(--amber);display:grid;place-items:center;color:var(--amber);font-size:14px}
+  .logo-text{font-size:12px;font-weight:500;letter-spacing:.12em;text-transform:uppercase}
+  .logo-sub{font-size:10px;color:var(--text-dim);letter-spacing:.08em}
+  .header-right{display:flex;align-items:center;gap:16px}
+  .hbtn{display:inline-flex;align-items:center;justify-content:center;background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 12px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s;text-decoration:none;user-select:none}
+  .hbtn:hover,.hbtn:active{border-color:var(--amber);color:var(--amber)}
+  .hbtn.active{border-color:var(--amber);color:var(--amber)}
+
+  .last-updated{font-size:10px;color:var(--text-mute);letter-spacing:.06em;white-space:nowrap}
+
+  main{padding:28px 32px;max-width:1300px}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+
+  .error-bar{background:var(--red-dim);border:1px solid var(--red);padding:10px 16px;margin-bottom:20px;color:var(--red);font-size:11px;display:none}
+  .error-bar.visible{display:block}
+
+  /* Section headers */
+  .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+  .section-title{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-dim);display:flex;align-items:center;gap:8px}
+  .section-title::before{content:'';display:block;width:3px;height:12px;background:var(--amber)}
+  .section-sub{font-size:10px;color:var(--text-mute);letter-spacing:.06em}
+
+  /* Running cards */
+  .running-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}
+  .running-card{border:1px solid var(--border2);border-left:3px solid var(--amber);background:var(--bg2);padding:18px 20px;animation:fadeUp .3s ease}
+  .running-card-type{font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-mute);margin-bottom:6px}
+  .running-card-title{font-size:14px;font-weight:300;color:var(--amber);margin-bottom:10px;display:flex;align-items:center;gap:8px}
+  .running-card-meta{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--text-dim)}
+  .running-card-meta span{color:var(--text)}
+  .running-card-row{display:flex;gap:4px}
+
+  .pulse-dot{width:7px;height:7px;border-radius:50%;background:var(--amber);box-shadow:0 0 8px var(--amber);animation:pulse 1.5s ease-in-out infinite;display:inline-block;flex-shrink:0;margin-top:3px}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+
+  .empty-state{padding:32px;text-align:center;color:var(--text-mute);font-size:11px;letter-spacing:.08em;border:1px solid var(--border);background:var(--bg2)}
+
+  /* Storage */
+  .storage-wrap{border:1px solid var(--border);background:var(--bg2);padding:20px;margin-bottom:12px}
+  .storage-bar-header{display:flex;justify-content:space-between;font-size:10px;color:var(--text-dim);margin-bottom:8px}
+  .storage-bar-track{height:10px;background:var(--bg3);border:1px solid var(--border);display:flex;overflow:hidden}
+  .storage-seg-used{height:100%;background:var(--blue);transition:width .5s ease}
+  .storage-seg-reclaimable{height:100%;background:var(--amber-dim);transition:width .5s ease}
+  .storage-seg-free{height:100%;background:var(--green-dim);flex:1;transition:width .5s ease}
+  .storage-legend{display:flex;gap:16px;margin-top:8px;font-size:10px;color:var(--text-dim);flex-wrap:wrap}
+  .legend-item{display:flex;align-items:center;gap:5px}
+  .legend-dot{width:8px;height:8px;border-radius:2px;flex-shrink:0}
+  .storage-nums{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--border);border:1px solid var(--border);margin-top:14px}
+  .snum{background:var(--bg3);padding:12px 16px}
+  .snum-label{font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim);margin-bottom:5px}
+  .snum-value{font-size:17px;font-weight:300;letter-spacing:-.02em}
+  .snum-value.amber{color:var(--amber)}
+  .snum-value.blue{color:var(--blue)}
+  .snum-value.green{color:var(--green)}
+  .snum-value.dim{color:var(--text-dim)}
+
+  .disks-mini{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;margin-bottom:24px}
+  .disk-mini{border:1px solid var(--border);background:var(--bg2);padding:14px 16px;animation:fadeUp .3s ease}
+  .disk-mini-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:8px}
+  .disk-mini-path{font-size:11px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+  .disk-mini-badge{font-size:9px;letter-spacing:.06em;text-transform:uppercase;padding:1px 6px;flex-shrink:0}
+  .disk-mini-badge.ok{background:var(--green-dim);color:var(--green)}
+  .disk-mini-badge.warn{background:var(--amber-dim);color:var(--amber)}
+  .disk-mini-badge.crit{background:var(--red-dim);color:var(--red)}
+  .disk-mini-bar{height:4px;background:var(--bg3);border:1px solid var(--border);margin-bottom:6px}
+  .disk-mini-fill{height:100%;transition:width .5s}
+  .disk-mini-fill.ok{background:var(--green)}
+  .disk-mini-fill.warn{background:var(--amber)}
+  .disk-mini-fill.crit{background:var(--red)}
+  .disk-mini-meta{font-size:10px;color:var(--text-dim);display:flex;justify-content:space-between}
+
+  /* Tables */
+  .table-section{margin-bottom:28px}
+  .table-sub{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);margin-bottom:6px}
+  .table-wrap{border:1px solid var(--border);overflow-x:auto;-webkit-overflow-scrolling:touch;animation:fadeUp .35s ease both}
+  table{width:100%;border-collapse:collapse}
+  thead th{background:var(--bg3);padding:8px 14px;text-align:left;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);border-bottom:1px solid var(--border);white-space:nowrap}
+  tbody tr{border-bottom:1px solid var(--border)}
+  tbody tr:last-child{border-bottom:none}
+  tbody tr:hover{background:var(--bg2)}
+  td{padding:9px 14px;font-size:12px;vertical-align:middle}
+  .td-r{text-align:right}
+  .td-dim{color:var(--text-dim)}
+  .td-nb{white-space:nowrap}
+  .td-num{color:var(--blue);font-variant-numeric:tabular-nums}
+  .badge{display:inline-block;padding:2px 7px;font-size:10px;letter-spacing:.06em;text-transform:uppercase}
+  .badge-done{background:var(--green-dim);color:var(--green)}
+  .badge-failed{background:var(--red-dim);color:var(--red)}
+  .badge-incomplete{background:var(--bg3);border:1px solid var(--border2);color:var(--text-dim)}
+  .badge-success{background:var(--green-dim);color:var(--green)}
+  .badge-error{background:var(--red-dim);color:var(--red)}
+  .badge-partial{background:var(--amber-dim);color:var(--amber)}
+  .badge-unknown{background:var(--bg3);border:1px solid var(--border2);color:var(--text-dim)}
+
+  .loading{padding:40px;text-align:center;color:var(--text-mute);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+  .loading::after{content:'...';animation:dots 1.2s steps(4,end) infinite}
+  @keyframes dots{0%,20%{content:'.'}40%{content:'..'}60%,100%{content:'...'}}
+
+  /* Login overlay */
+  .login-overlay{position:fixed;inset:0;background:var(--overlay-bg);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
+  .login-box{border:1px solid var(--border2);border-top:2px solid var(--amber);background:var(--bg2);padding:40px 48px;width:min(400px,calc(100vw - 32px));animation:fadeUp .3s ease}
+  .login-title{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--amber);margin-bottom:6px}
+  .login-sub{font-size:11px;color:var(--text-dim);margin-bottom:28px}
+  .login-label{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);display:block;margin-bottom:8px}
+  .login-input{width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:13px;padding:10px 14px;outline:none;transition:border-color .15s}
+  .login-input:focus{border-color:var(--amber)}
+  .login-btn{margin-top:16px;width:100%;background:var(--amber);border:none;color:var(--bg);font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;padding:11px;cursor:pointer;transition:opacity .15s;min-height:44px}
+  .login-btn:hover{opacity:.85}
+  .login-error{margin-top:12px;font-size:11px;color:var(--red);min-height:16px}
+
+  ::-webkit-scrollbar{width:6px;height:6px}
+  ::-webkit-scrollbar-track{background:var(--bg)}
+  ::-webkit-scrollbar-thumb{background:var(--border2)}
+
+  @media(max-width:768px){
+    main{padding:16px}
+    header{padding:0 16px}
+    .header-right{gap:10px}
+    .hbtn{min-height:40px;padding:8px 10px}
+    .storage-nums{grid-template-columns:1fr 1fr}
+    .login-input{font-size:16px}
+  }
+  @media(max-width:480px){
+    header{height:auto;min-height:56px;flex-wrap:wrap;padding:10px 12px}
+    .logo-sub{display:none}
+    .header-right{gap:8px}
+    main{padding:12px 10px}
+    .storage-nums{grid-template-columns:1fr 1fr}
+    .login-box{padding:28px 20px}
+    .login-btn{min-height:48px}
+    .hbtn{min-height:44px}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">◈</div>
+    <div><div class="logo-text">NestVault</div><div class="logo-sub">Atividade</div></div>
+  </div>
+  <div class="header-right">
+    <span class="last-updated" id="lastUpdated"></span>
+    <button class="hbtn" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
+    <a class="hbtn" href="/" style="text-decoration:none">← Dashboard</a>
+    <a class="hbtn" href="/disks" style="text-decoration:none">⊞ Discos</a>
+    <a class="hbtn" href="/explorer" style="text-decoration:none">⊡ Explorer</a>
+    <a class="hbtn" href="/maintenance" style="text-decoration:none">⚙ Manutenção</a>
+    <a class="hbtn active" href="/activity" style="text-decoration:none">◎ Atividade</a>
+    <button class="hbtn" id="logoutBtn">⌀ API Key</button>
+  </div>
+</header>
+
+<main>
+  <div class="error-bar" id="errorBar"></div>
+
+  <!-- Em execução -->
+  <div class="section-head" style="margin-bottom:10px">
+    <div class="section-title">Em execução</div>
+    <span class="section-sub" id="runningCount"></span>
+  </div>
+  <div id="runningSection" style="margin-bottom:28px">
+    <div class="loading">Carregando</div>
+  </div>
+
+  <!-- Armazenamento -->
+  <div class="section-head" style="margin-bottom:10px">
+    <div class="section-title">Armazenamento</div>
+  </div>
+  <div id="storageSection" style="margin-bottom:28px">
+    <div class="loading">Carregando</div>
+  </div>
+
+  <!-- Atividade recente -->
+  <div class="section-head" style="margin-bottom:10px">
+    <div class="section-title">Atividade recente</div>
+    <span class="section-sub">últimas 24h</span>
+  </div>
+  <div id="recentSection">
+    <div class="loading">Carregando</div>
+  </div>
+</main>
+
+<!-- Login overlay -->
+<div class="login-overlay" id="loginOverlay" style="display:none">
+  <div class="login-box">
+    <div class="login-title">◈ NestVault</div>
+    <div class="login-sub">Informe a API Key para continuar</div>
+    <form id="loginForm">
+      <label class="login-label" for="apiKeyInput">API Key</label>
+      <input class="login-input" id="apiKeyInput" type="password" placeholder="sua-api-key-aqui" autocomplete="off">
+      <button class="login-btn" type="submit">Entrar →</button>
+      <div class="login-error" id="loginError"></div>
+    </form>
+  </div>
+</div>
+
+<script>
+  let API_KEY = localStorage.getItem('backupApiKey') || '';
+  const H = () => ({'X-API-Key': API_KEY});
+
+  const fmtSize = b => {
+    if (!b) return '0 B';
+    const u = ['B','KB','MB','GB','TB'];
+    for (const unit of u) { if (Math.abs(b) < 1024) return b.toFixed(1)+' '+unit; b /= 1024; }
+    return b.toFixed(1)+' PB';
+  };
+  const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const fmtDate = s => s ? s.replace('T',' ').slice(0,19) : '—';
+  const fmtDuration = s => {
+    if (s == null) return '—';
+    if (s < 60) return s.toFixed(0)+'s';
+    if (s < 3600) return Math.floor(s/60)+'min '+Math.round(s%60)+'s';
+    return (s/3600).toFixed(1)+'h';
+  };
+  const elapsed = isoStr => {
+    if (!isoStr) return '—';
+    const raw = isoStr.includes('T') ? isoStr : isoStr.replace(' ','T');
+    const t = new Date(raw.endsWith('Z') ? raw : raw+'Z');
+    const s = Math.round((Date.now() - t.getTime()) / 1000);
+    if (s < 0) return '0s';
+    if (s < 60) return s+'s';
+    if (s < 3600) return Math.floor(s/60)+'min '+Math.round(s%60)+'s';
+    return (s/3600).toFixed(1)+'h';
+  };
+  const badge = s => `<span class="badge badge-${esc(s)}">${esc(s)}</span>`;
+
+  // Error bar
+  function showError(msg) {
+    const b = document.getElementById('errorBar');
+    b.textContent = '⚠ '+msg; b.classList.add('visible');
+  }
+  function clearError() { document.getElementById('errorBar').classList.remove('visible'); }
+
+  // Auth
+  function showLogin(msg='') {
+    document.getElementById('loginOverlay').style.display = 'flex';
+    document.getElementById('loginError').textContent = msg;
+    clearTimeout(_pollTimer);
+  }
+  function hideLogin() { document.getElementById('loginOverlay').style.display = 'none'; }
+
+  document.getElementById('loginForm').addEventListener('submit', e => {
+    e.preventDefault();
+    const key = document.getElementById('apiKeyInput').value.trim();
+    if (!key) return;
+    API_KEY = key; localStorage.setItem('backupApiKey', key);
+    hideLogin(); poll();
+  });
+  document.getElementById('logoutBtn').addEventListener('click', () => {
+    localStorage.removeItem('backupApiKey'); API_KEY = ''; showLogin();
+  });
+
+  // Polling
+  let _pollTimer = null;
+  let _lastUpdateTime = null;
+  let _tickTimer = null;
+
+  function _interval(data) {
+    return (data.running_versions.length + data.running_jobs.length) > 0 ? 3000 : 10000;
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch('/api/activity', {headers: H()});
+      if (r.status === 401) { showLogin('API Key inválida.'); return; }
+      if (!r.ok) throw new Error('HTTP '+r.status);
+      const data = await r.json();
+      clearError();
+      _lastUpdateTime = Date.now();
+      render(data);
+      clearTimeout(_pollTimer);
+      _pollTimer = setTimeout(poll, _interval(data));
+    } catch(e) {
+      showError('Não foi possível conectar: '+e.message);
+      clearTimeout(_pollTimer);
+      _pollTimer = setTimeout(poll, 10000);
+    }
+  }
+
+  function _startTick() {
+    clearInterval(_tickTimer);
+    _tickTimer = setInterval(() => {
+      if (!_lastUpdateTime) return;
+      const secs = Math.round((Date.now() - _lastUpdateTime) / 1000);
+      const el = document.getElementById('lastUpdated');
+      if (el) el.textContent = 'atualizado há '+secs+'s';
+    }, 1000);
+  }
+
+  // Render
+  function render(data) {
+    renderRunning(data.running_versions, data.running_jobs);
+    renderStorage(data.storage, data.disks);
+    renderRecent(data.recent_versions, data.recent_jobs);
+  }
+
+  function renderRunning(versions, jobs) {
+    const el = document.getElementById('runningSection');
+    const total = versions.length + jobs.length;
+    document.getElementById('runningCount').textContent = total ? total+' em execução' : '';
+
+    if (!total) {
+      el.innerHTML = '<div class="empty-state">Nada em execução no momento</div>';
+      return;
+    }
+
+    const vCards = versions.map(v => `
+      <div class="running-card">
+        <div class="running-card-type">Backup local</div>
+        <div class="running-card-title">
+          <span class="pulse-dot"></span>${esc(v.backup_label)}
+        </div>
+        <div class="running-card-meta">
+          <div class="running-card-row">Versão: <span>${esc(v.version_key.slice(0,19))}</span></div>
+          <div class="running-card-row">Arquivos: <span>${v.file_count.toLocaleString('pt-BR')}</span> &nbsp;·&nbsp; Tamanho: <span>${fmtSize(v.total_size_bytes)}</span></div>
+          <div class="running-card-row">Iniciado há: <span>${elapsed(v.created_at)}</span></div>
+        </div>
+      </div>`).join('');
+
+    const jCards = jobs.map(j => `
+      <div class="running-card">
+        <div class="running-card-type">Cloud Backup — ${esc(j.provider)}</div>
+        <div class="running-card-title">
+          <span class="pulse-dot"></span>${esc(j.folder_name)}
+        </div>
+        <div class="running-card-meta">
+          <div class="running-card-row">Conta: <span>${esc(j.email)}</span></div>
+          <div class="running-card-row">Destino: <span>${esc(j.target_label)}</span></div>
+          <div class="running-card-row">Iniciado há: <span>${elapsed(j.last_run_at)}</span></div>
+        </div>
+      </div>`).join('');
+
+    el.innerHTML = '<div class="running-grid">'+vCards+jCards+'</div>';
+  }
+
+  function renderStorage(storage, disks) {
+    const el = document.getElementById('storageSection');
+    const total = storage.total_bytes || 1;
+    const firmUsed = Math.max(0, storage.used_bytes - storage.reclaimable_bytes);
+    const reclaimPct = Math.min(100, storage.reclaimable_bytes / total * 100);
+    const firmPct = Math.min(100, firmUsed / total * 100);
+    const freePct = Math.max(0, 100 - firmPct - reclaimPct);
+
+    const diskCards = disks.map(d => {
+      const dp = d.total_bytes > 0 ? d.used_bytes / d.total_bytes * 100 : 0;
+      const dc = dp >= 90 ? 'crit' : dp >= 75 ? 'warn' : 'ok';
+      const parts = d.path.split('/').filter(Boolean);
+      const shortPath = parts.length > 2 ? '…/'+parts.slice(-2).join('/') : d.path;
+      return `
+        <div class="disk-mini">
+          <div class="disk-mini-header">
+            <div class="disk-mini-path" title="${esc(d.path)}">${esc(shortPath)}</div>
+            <span class="disk-mini-badge ${dc}">${dc==='ok'?'OK':dc==='warn'?'Atenção':'Crítico'}</span>
+          </div>
+          <div class="disk-mini-bar">
+            <div class="disk-mini-fill ${dc}" style="width:${dp.toFixed(1)}%"></div>
+          </div>
+          <div class="disk-mini-meta">
+            <span>${fmtSize(d.free_bytes)} livre</span>
+            <span>${dp.toFixed(0)}% usado</span>
+          </div>
+        </div>`;
+    }).join('');
+
+    el.innerHTML = `
+      <div class="storage-wrap">
+        <div class="storage-bar-header">
+          <span>Total: ${fmtSize(storage.total_bytes)}</span>
+          <span>${freePct.toFixed(1)}% livre</span>
+        </div>
+        <div class="storage-bar-track">
+          <div class="storage-seg-used" style="width:${firmPct.toFixed(2)}%"></div>
+          <div class="storage-seg-reclaimable" style="width:${reclaimPct.toFixed(2)}%"></div>
+          <div class="storage-seg-free"></div>
+        </div>
+        <div class="storage-legend">
+          <div class="legend-item"><div class="legend-dot" style="background:var(--blue)"></div>Usado: ${fmtSize(firmUsed)}</div>
+          <div class="legend-item"><div class="legend-dot" style="background:var(--amber-dim)"></div>Liberável: ${fmtSize(storage.reclaimable_bytes)}</div>
+          <div class="legend-item"><div class="legend-dot" style="background:var(--green-dim)"></div>Livre: ${fmtSize(storage.free_bytes)}</div>
+        </div>
+        <div class="storage-nums">
+          <div class="snum"><div class="snum-label">Total</div><div class="snum-value dim">${fmtSize(storage.total_bytes)}</div></div>
+          <div class="snum"><div class="snum-label">Usado</div><div class="snum-value blue">${fmtSize(storage.used_bytes)}</div></div>
+          <div class="snum"><div class="snum-label">Liberável</div><div class="snum-value amber">${fmtSize(storage.reclaimable_bytes)}</div></div>
+          <div class="snum"><div class="snum-label">Livre</div><div class="snum-value green">${fmtSize(storage.free_bytes)}</div></div>
+        </div>
+      </div>
+      <div class="disks-mini">${diskCards||'<div class="empty-state">Nenhum volume configurado</div>'}</div>`;
+  }
+
+  function renderRecent(versions, jobs) {
+    const el = document.getElementById('recentSection');
+
+    const vRows = versions.map(v => `
+      <tr>
+        <td>${esc(v.backup_label)}</td>
+        <td class="td-dim td-nb">${esc(v.version_key.slice(0,19))}</td>
+        <td>${badge(v.status)}</td>
+        <td class="td-r td-num">${fmtSize(v.total_size_bytes)}</td>
+        <td class="td-r td-dim">${v.file_count.toLocaleString('pt-BR')}</td>
+        <td class="td-r td-dim td-nb">${fmtDuration(v.duration_seconds)}</td>
+        <td class="td-dim td-nb">${fmtDate(v.finished_at)}</td>
+      </tr>`).join('');
+
+    const jRows = jobs.map(j => `
+      <tr>
+        <td class="td-dim">${esc(j.provider)}</td>
+        <td class="td-dim">${esc(j.email)}</td>
+        <td>${esc(j.folder_name)}</td>
+        <td>${esc(j.target_label)}</td>
+        <td>${badge(j.last_run_status)}</td>
+        <td class="td-dim" title="${esc(j.last_run_message||'')}">${esc((j.last_run_message||'').slice(0,60)||'—')}</td>
+        <td class="td-dim td-nb">${fmtDate(j.last_run_at)}</td>
+      </tr>`).join('');
+
+    el.innerHTML = `
+      <div class="table-section">
+        <div class="table-sub">Versões de backup</div>
+        <div class="table-wrap">
+          ${versions.length ? `<table>
+            <thead><tr>
+              <th>Label</th><th>Versão</th><th>Status</th>
+              <th class="td-r">Tamanho</th><th class="td-r">Arquivos</th>
+              <th class="td-r">Duração</th><th>Finalizado</th>
+            </tr></thead>
+            <tbody>${vRows}</tbody>
+          </table>` : '<div class="empty-state">Nenhuma versão finalizada nas últimas 24h</div>'}
+        </div>
+      </div>
+      <div class="table-section">
+        <div class="table-sub">Jobs cloud</div>
+        <div class="table-wrap">
+          ${jobs.length ? `<table>
+            <thead><tr>
+              <th>Provider</th><th>Conta</th><th>Pasta</th><th>Destino</th>
+              <th>Status</th><th>Mensagem</th><th>Executado</th>
+            </tr></thead>
+            <tbody>${jRows}</tbody>
+          </table>` : '<div class="empty-state">Nenhum job cloud executado recentemente</div>'}
+        </div>
+      </div>`;
+  }
+
+  // Theme
+  function toggleTheme() {
+    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+    if (isLight) { document.documentElement.removeAttribute('data-theme'); localStorage.setItem('nv-theme','dark'); }
+    else { document.documentElement.setAttribute('data-theme','light'); localStorage.setItem('nv-theme','light'); }
+    updateThemeBtn();
+  }
+  function updateThemeBtn() {
+    const btn = document.getElementById('themeBtn');
+    if (btn) btn.textContent = document.documentElement.getAttribute('data-theme') === 'light' ? '☾ Escuro' : '☀ Claro';
+  }
+  updateThemeBtn();
+
+  // Init
+  async function init() {
+    const resp = await fetch('/health');
+    if (!resp.ok) { showError('Servidor indisponível'); return; }
+    const test = await fetch('/api/activity', {headers: H()});
+    if (test.status === 401) { showLogin(); return; }
+    _startTick();
+    poll();
+  }
+  init();
+</script>
+</body>
+</html>
