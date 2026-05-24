@@ -271,18 +271,38 @@ async def run_cloud_backup_job(job_id: int) -> None:
 
         enc_key = storage.encryption_key if storage.ENCRYPTION_ENABLED else None
 
-        # Carrega arquivos da última versão concluída para skip por mtime
-        prev_version = (
+        # Carrega arquivos para skip por mtime:
+        # baseline = última versão done; resume = última versão incompleta (sobrescreve)
+        prev_files: dict[str, tuple[float, str]] = {}
+
+        prev_done = (
             db.query(BackupVersion)
             .filter(BackupVersion.backup_label == job.target_label, BackupVersion.status == "done")
             .order_by(BackupVersion.version_key.desc())
             .first()
         )
-        prev_files: dict[str, tuple[float, str]] = {}
-        if prev_version:
-            for vf in db.query(VersionFile).filter(VersionFile.version_id == prev_version.id).all():
+        if prev_done:
+            for vf in db.query(VersionFile).filter(VersionFile.version_id == prev_done.id).all():
                 prev_files[vf.original_path] = (vf.mtime, vf.sha256)
             log.info(f"[cloud-runner] {len(prev_files)} arquivo(s) na versão anterior para comparação de mtime")
+
+        prev_incomplete = (
+            db.query(BackupVersion)
+            .filter(
+                BackupVersion.backup_label == job.target_label,
+                BackupVersion.status.in_(["incomplete", "failed"]),
+            )
+            .order_by(BackupVersion.version_key.desc())
+            .first()
+        )
+        if prev_incomplete:
+            resume_files = {
+                vf.original_path: (vf.mtime, vf.sha256)
+                for vf in db.query(VersionFile).filter(VersionFile.version_id == prev_incomplete.id).all()
+            }
+            if resume_files:
+                prev_files.update(resume_files)
+                log.info(f"[cloud-runner] {len(resume_files)} arquivo(s) de versão incompleta adicionados para resume")
 
         errors: list[str] = []
         abort = asyncio.Event()
