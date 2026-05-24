@@ -328,6 +328,8 @@ class RunningVersionInfo(BaseModel):
     created_at: str
     file_count: int
     total_size_bytes: int
+    prev_file_count: Optional[int] = None
+    prev_size_bytes: Optional[int] = None
 
 class RunningJobInfo(BaseModel):
     id: int
@@ -755,6 +757,29 @@ def get_activity(db: Session = Depends(get_db)):
             .all()
         ):
             stats_map[row.version_id] = (row.fc, int(row.sz))
+
+    # Última versão concluída por label (referência para os cards de running)
+    prev_stats: dict[str, tuple[int, int]] = {}
+    for label in {v.backup_label for v in running_vs}:
+        last_done = (
+            db.query(BackupVersion)
+            .filter(BackupVersion.backup_label == label, BackupVersion.status == "done")
+            .order_by(BackupVersion.created_at.desc())
+            .first()
+        )
+        if last_done:
+            row = (
+                db.query(
+                    func.count(VersionFile.id).label("fc"),
+                    func.coalesce(func.sum(FileContent.size), 0).label("sz"),
+                )
+                .outerjoin(FileContent, FileContent.sha256 == VersionFile.sha256)
+                .filter(VersionFile.version_id == last_done.id)
+                .first()
+            )
+            if row:
+                prev_stats[label] = (row.fc, int(row.sz))
+
     running_version_infos = [
         RunningVersionInfo(
             backup_label=v.backup_label,
@@ -762,6 +787,8 @@ def get_activity(db: Session = Depends(get_db)):
             created_at=str(v.created_at),
             file_count=stats_map.get(v.id, (0, 0))[0],
             total_size_bytes=stats_map.get(v.id, (0, 0))[1],
+            prev_file_count=prev_stats[v.backup_label][0] if v.backup_label in prev_stats else None,
+            prev_size_bytes=prev_stats[v.backup_label][1] if v.backup_label in prev_stats else None,
         )
         for v in running_vs
     ]

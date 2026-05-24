@@ -335,6 +335,7 @@
         <div class="running-card-meta">
           <div class="running-card-row">Versão: <span>${esc(v.version_key.slice(0,19))}</span></div>
           <div class="running-card-row">Arquivos: <span>${v.file_count.toLocaleString('pt-BR')}</span> &nbsp;·&nbsp; Tamanho: <span>${fmtSize(v.total_size_bytes)}</span></div>
+          ${v.prev_file_count != null ? `<div class="running-card-row" style="color:var(--text-mute)">Últ. versão: <span style="color:var(--text-dim)">${v.prev_file_count.toLocaleString('pt-BR')} arq. · ${fmtSize(v.prev_size_bytes)}</span></div>` : ''}
           <div class="running-card-row">Iniciado há: <span>${elapsed(v.created_at)}</span></div>
         </div>
       </div>`).join('');
