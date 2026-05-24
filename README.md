@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v4.6.0`
+# 🗄️ NestVault  `v4.7.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -6,6 +6,8 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v4.7.0** — performance e observabilidade: N+1 queries eliminadas em `cleanup_orphans` e `encrypt_existing` (substituídas por `.in_()` batch); replicação paralela entre volumes via `ThreadPoolExecutor` em `storage.py`; novos índices compostos em `backup_versions` e `cloud_backup_jobs`; endpoint `GET /backups/disk-summary` permite ao dashboard buscar espaço de todos os discos em uma chamada em vez de N paralelas; debounce de 250 ms no filtro do Explorer evita queries redundantes. Cobertura de logs: todos os uploads agora logam `[upload] label/version ← path — modo sha256… (MB)` com contexto de label e versão; criação e finalização de versões logam `[versao] label/key criada` e `[versao] label/key → status` (inclusive erros/incomplete antes silenciosos); jobs cloud com ≥ 10 arquivos logam progresso a cada ~25% em `[cloud-runner] [i/total] path`.
+>
 > **v4.6.0** — página de atividade em tempo real (`/activity`): nova interface com polling adaptativo (3 s quando algo está em execução, 10 s em idle) que consolida em uma só tela o estado atual do servidor. Exibe cards animados de backups locais e jobs cloud em execução, barra de armazenamento segmentada (usado / liberável / livre) com mini-cards por volume, e tabelas de atividade das últimas 24 h (versões de backup finalizadas e jobs cloud recentes). Endpoint `GET /api/activity` no backend retorna tudo em uma chamada agregada — versões rodando com contagem de arquivos e bytes acumulados, jobs cloud ativos, storage total e por disco, e histórico recente. Link "◎ Atividade" adicionado à navegação de todas as páginas existentes.
 >
 > **v4.5.1** — pipeline producer-consumer no cloud backup: download e processamento de arquivos agora ocorrem em paralelo via `asyncio.Queue`. O producer baixa arquivos do cloud enquanto o consumer simultaneamente realiza deduplicação, armazenamento, criptografia e replicação. `crypto.encrypt_stream` (CPU-bound) movida para `run_in_executor`, liberando o event loop durante a criptografia. Fila limitada a 4 itens para controle de backpressure — evita acúmulo excessivo de arquivos temporários em disco.
@@ -1068,6 +1070,21 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 ---
 
 ## ⚡ Otimizações
+
+### v4.7.0
+
+| Componente | Mudança |
+|---|---|
+| **`storage.py` — `ensure_replicas`** | Replicação paralela via `ThreadPoolExecutor`: todas as cópias para volumes adicionais são feitas simultaneamente; operações de DB permanecem na thread principal após o pool terminar |
+| **`main.py` — `cleanup_orphans` / `encrypt_existing`** | Eliminadas N+1 queries: SHA-256s válidos buscados em uma query `.in_()` antes do loop; `encrypt_existing` busca todas as cópias em lote e agrupa por sha256 em memória em vez de uma query por arquivo |
+| **`main.py` — `storage_disks`** | `content_files` e `content_bytes` por volume calculados por `GROUP BY` em vez de um COUNT+SUM por volume |
+| **`main.py` — `GET /backups/disk-summary`** | Novo endpoint batch que retorna espaço total/livre/usado de todos os discos em uma chamada; dashboard substituiu N fetches paralelos por esta chamada única |
+| **`database.py` — novos índices** | `idx_label_status_key` (atualizado para cobrir `version_key`), `idx_version_created`, `idx_version_finished` em `backup_versions`; `idx_cbj_last_run` em `cloud_backup_jobs` |
+| **`cloud/router.py` — `list_jobs`** | `joinedload(CloudBackupJob.credential)` elimina N+1 na listagem de jobs |
+| **`explorer.html` — filtro** | Debounce de 250 ms no campo de busca — evita queries redundantes a cada keystroke |
+| **`main.py` — logs de upload** | Todos os 4 caminhos de upload (`nova`, `nova cifrada`, `dedup`, `registrada`) logam `[upload] label/version_key ← path — modo sha256… (MB)` com contexto de label e versão — antes era `[integrity]` sem correlação |
+| **`main.py` — logs de versão** | `create_version` loga `[versao] label/key criada`; `finish_version` loga `[versao] label/key → status` para todos os status (inclusive `error`/`incomplete`, antes silenciosos) |
+| **`cloud/runner.py` — logs de progresso** | `_producer` loga `[cloud-runner] [i/total] path` a cada ~25% do total para jobs com ≥ 10 arquivos |
 
 ### v4.5.1
 
