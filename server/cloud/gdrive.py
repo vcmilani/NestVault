@@ -13,7 +13,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-from .base import CloudProvider, FileEntry
+from .base import CloudProvider, FileEntry, TokenRevokedError
 
 log = logging.getLogger("backup-server")
 
@@ -68,6 +68,10 @@ class GoogleDriveProvider(CloudProvider):
                 "client_secret": _CLIENT_SECRET,
                 "grant_type":    "refresh_token",
             })
+            if r.is_error:
+                log.error(f"[gdrive] refresh_tokens → HTTP {r.status_code}: {r.text}")
+                if r.status_code == 400 and r.json().get("error") == "invalid_grant":
+                    raise TokenRevokedError("Refresh token inválido ou expirado — re-autenticação necessária")
             r.raise_for_status()
             data = r.json()
         return {

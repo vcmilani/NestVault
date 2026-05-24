@@ -15,6 +15,7 @@ from pathlib import Path
 
 import storage
 import crypto
+from cloud.base import TokenRevokedError
 from database import (
     SessionLocal, BackupID, BackupVersion, FileContent,
     FileContentCopy, VersionFile, CloudCredential, CloudBackupJob, decrypt_token,
@@ -280,6 +281,22 @@ async def run_cloud_backup_job(job_id: int) -> None:
         db.commit()
         log.info(f"[cloud-runner] Job {job_id} concluído — {summary}")
 
+    except TokenRevokedError as e:
+        log.error(f"[cloud-runner] Job {job_id} requer re-autenticação: {e}")
+        if version and version.id:
+            try:
+                version.status      = "failed"
+                version.finished_at = datetime.now()
+                db.commit()
+            except Exception:
+                pass
+        if job:
+            try:
+                job.last_run_status  = "reauth_required"
+                job.last_run_message = str(e)
+                db.commit()
+            except Exception:
+                pass
     except Exception as e:
         log.exception(f"[cloud-runner] Job {job_id} falhou: {e}")
         if version and version.id:
