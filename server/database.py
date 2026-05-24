@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 import os, hashlib, base64
 
 def _utcnow():
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now()
 
 DB_PATH = os.getenv("DB_PATH", "./backup.db")
 
