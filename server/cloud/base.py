@@ -4,6 +4,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+class TokenRevokedError(Exception):
+    """Refresh token inválido ou revogado — requer re-autenticação do usuário."""
+
+
 @dataclass
 class FileEntry:
     file_id: str

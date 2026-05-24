@@ -1,5 +1,5 @@
 """
-NestVault  v4.5.1
+NestVault  v4.8.0
 Cada execucao de backup cria uma nova versao dentro do label.
 Conteudo identico e armazenado uma unica vez no servidor (deduplicacao por sha256).
 
@@ -7,11 +7,12 @@ Uso:
     nestvault backup ~/docs --label "docs" --server http://192.168.1.100:8000
     nestvault versions --label "docs" --server http://192.168.1.100:8000
     nestvault restore /tmp/r --label "docs" --version "2026-04-25T10:42:31"
+    nestvault restore /tmp/r --label "docs" --version "2026-04-25T10:42:31" --exclude cache node_modules
     nestvault cleanup --label "docs" --keep 5
     nestvault backups --server http://192.168.1.100:8000
 """
 
-VERSION = "v4.5.1"
+VERSION = "v4.8.0"
 
 import os, sys, hashlib, argparse, base64, socket, threading
 from pathlib import Path
@@ -760,7 +761,7 @@ def list_versions(label, server=DEFAULT_SERVER):
 
 # -- Restore ------------------------------------------------------------------
 def restore(destination, label, version_key, server=DEFAULT_SERVER,
-            path_prefix=None, dry_run=False, overwrite=False):
+            path_prefix=None, dry_run=False, overwrite=False, exclude=None):
     dest_root = Path(destination)
     dest_root.mkdir(parents=True, exist_ok=True)
 
@@ -800,6 +801,10 @@ def restore(destination, label, version_key, server=DEFAULT_SERVER,
                         if path_prefix and original_path.startswith(path_prefix)
                         else original_path.lstrip("/"))
             dest_file = dest_root / relative
+
+            if any(ex in Path(relative).parts for ex in (exclude or [])):
+                stats["skipped"] += 1
+                continue
 
             if dest_file.exists() and not overwrite:
                 match = sha256_file(dest_file) == sha256
@@ -1082,6 +1087,8 @@ def main():
     pr.add_argument("--prefix", default=None)
     pr.add_argument("--overwrite", action="store_true")
     pr.add_argument("--dry-run", action="store_true")
+    pr.add_argument("--exclude", nargs="+", default=[],
+                    help="Nomes de diretório a ignorar durante o restore")
 
     # cleanup
     pc = sub.add_parser("cleanup", help="Remove versoes antigas de um ou todos os backups")
@@ -1153,6 +1160,7 @@ def main():
         restore(
             args.destination, args.label, args.version_key,
             args.server, args.prefix, args.dry_run, args.overwrite,
+            exclude=args.exclude,
         )
 
     elif args.command == "cleanup":

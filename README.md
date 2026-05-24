@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v4.7.0`
+# 🗄️ NestVault  `v4.8.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -6,6 +6,8 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v4.8.0** — `restore --exclude`: o cliente passou a aceitar `--exclude` no comando `restore`, com o mesmo comportamento do `backup` — filtra arquivos cujo caminho relativo contenha o componente de diretório especificado. Client e server agora compartilham o mesmo número de versão.
+>
 > **v4.7.0** — performance e observabilidade: N+1 queries eliminadas em `cleanup_orphans` e `encrypt_existing` (substituídas por `.in_()` batch); replicação paralela entre volumes via `ThreadPoolExecutor` em `storage.py`; novos índices compostos em `backup_versions` e `cloud_backup_jobs`; endpoint `GET /backups/disk-summary` permite ao dashboard buscar espaço de todos os discos em uma chamada em vez de N paralelas; debounce de 250 ms no filtro do Explorer evita queries redundantes. Cobertura de logs: todos os uploads agora logam `[upload] label/version ← path — modo sha256… (MB)` com contexto de label e versão; criação e finalização de versões logam `[versao] label/key criada` e `[versao] label/key → status` (inclusive erros/incomplete antes silenciosos); jobs cloud com ≥ 10 arquivos logam progresso a cada ~25% em `[cloud-runner] [i/total] path`.
 >
 > **v4.6.0** — página de atividade em tempo real (`/activity`): nova interface com polling adaptativo (3 s quando algo está em execução, 10 s em idle) que consolida em uma só tela o estado atual do servidor. Exibe cards animados de backups locais e jobs cloud em execução, barra de armazenamento segmentada (usado / liberável / livre) com mini-cards por volume, e tabelas de atividade das últimas 24 h (versões de backup finalizadas e jobs cloud recentes). Endpoint `GET /api/activity` no backend retorna tudo em uma chamada agregada — versões rodando com contagem de arquivos e bytes acumulados, jobs cloud ativos, storage total e por disco, e histórico recente. Link "◎ Atividade" adicionado à navegação de todas as páginas existentes.
@@ -688,6 +690,12 @@ nestvault restore /tmp/restore \
   --label "notebook-joao" \
   --version "2026-04-25T10:42:31" \
   --overwrite
+
+# Restaurar ignorando diretórios específicos
+nestvault restore /tmp/restore \
+  --label "notebook-joao" \
+  --version "2026-04-25T10:42:31" \
+  --exclude cache node_modules .venv
 ```
 
 | Opção | Obrigatório | Descrição |
@@ -696,6 +704,7 @@ nestvault restore /tmp/restore \
 | `--version` | ✅ | Chave da versão (obtida via `versions`) |
 | `--server` | | URL do servidor |
 | `--prefix` | | Restaurar apenas arquivos com esse prefixo |
+| `--exclude` | | Nomes de diretório a ignorar — aceita múltiplos valores |
 | `--overwrite` | | Sobrescreve arquivos existentes |
 | `--dry-run` | | Apenas lista, não baixa |
 
@@ -1085,6 +1094,13 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 | **`main.py` — logs de upload** | Todos os 4 caminhos de upload (`nova`, `nova cifrada`, `dedup`, `registrada`) logam `[upload] label/version_key ← path — modo sha256… (MB)` com contexto de label e versão — antes era `[integrity]` sem correlação |
 | **`main.py` — logs de versão** | `create_version` loga `[versao] label/key criada`; `finish_version` loga `[versao] label/key → status` para todos os status (inclusive `error`/`incomplete`, antes silenciosos) |
 | **`cloud/runner.py` — logs de progresso** | `_producer` loga `[cloud-runner] [i/total] path` a cada ~25% do total para jobs com ≥ 10 arquivos |
+
+### v4.8.0
+
+| Componente | Mudança |
+|---|---|
+| **`nestvault.py` — `restore --exclude`** | Comando `restore` passou a aceitar `--exclude` com múltiplos valores, filtrando arquivos cujo caminho relativo contenha o componente de diretório especificado — comportamento idêntico ao `--exclude` do `backup` |
+| **Versionamento unificado** | Client e server passam a compartilhar o mesmo número de versão a partir de `v4.8.0` |
 
 ### v4.5.1
 
