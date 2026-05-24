@@ -71,11 +71,14 @@ async def _producer(
 ) -> None:
     """Baixa arquivos e enfileira para processamento. Envia sentinel None ao terminar."""
     downloads = 0
+    total_files = len(all_files)
     try:
         access_token = await _fresh_access_token(credential, db)
-        for entry in all_files:
+        for i, entry in enumerate(all_files, 1):
             if abort.is_set():
                 break
+            if total_files >= 10 and (i == 1 or i % max(1, total_files // 4) == 0 or i == total_files):
+                log.info(f"[cloud-runner] [{i}/{total_files}] {entry.path}")
             prev = prev_files.get(entry.path)
             if prev and prev[0] == entry.mtime:
                 await queue.put(("skip", entry, prev[1]))

@@ -493,17 +493,14 @@
   }
 
   async function loadAllDiskInfo(backups) {
-    const results = await Promise.allSettled(
-      backups.map(b =>
-        fetch(`/backups/${encodeURIComponent(b.label)}/disks`, {headers: H()})
-          .then(r => r.ok ? r.json() : [])
-          .then(disks => ({label: b.label, disks}))
-      )
-    );
-    for (const r of results) {
-      if (r.status !== 'fulfilled') continue;
-      const {label, disks} = r.value;
-      const cell = document.getElementById(`disks-${label}`);
+    let diskSummary = {};
+    try {
+      const r = await fetch('/backups/disk-summary', {headers: H()});
+      if (r.ok) diskSummary = await r.json();
+    } catch {}
+    for (const b of backups) {
+      const disks = diskSummary[b.label] || [];
+      const cell = document.getElementById(`disks-${b.label}`);
       if (!cell) continue;
       if (!disks.length) {
         cell.innerHTML = '<span class="disk-empty">—</span>';

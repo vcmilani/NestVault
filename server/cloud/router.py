@@ -5,7 +5,7 @@ from typing import Optional, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from database import (
     get_db, CloudCredential, CloudBackupJob,
@@ -325,7 +325,7 @@ def _job_out(j: CloudBackupJob) -> JobOut:
 
 @router.get("/jobs", response_model=list[JobOut], dependencies=[Depends(require_api_key)])
 def list_jobs(db: Session = Depends(get_db)):
-    return [_job_out(j) for j in db.query(CloudBackupJob).order_by(CloudBackupJob.created_at).all()]
+    return [_job_out(j) for j in db.query(CloudBackupJob).options(joinedload(CloudBackupJob.credential)).order_by(CloudBackupJob.created_at).all()]
 
 
 @router.post("/jobs", response_model=JobOut, status_code=201, dependencies=[Depends(require_api_key)])
