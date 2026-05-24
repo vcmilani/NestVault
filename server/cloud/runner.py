@@ -5,7 +5,7 @@ Fluxo por job:
   2. Garante que o BackupID (label) existe
   3. Cria nova BackupVersion
   4. Lista arquivos recursivamente no folder configurado
-  5. Producer: para cada arquivo faz download → SHA-256 e enfileira
+  5. Producer: até _PARALLEL_DOWNLOADS downloads simultâneos → SHA-256 e enfileira
   6. Consumer (simultâneo): dedup check → store → encrypt (executor) → VersionFile
   7. Finaliza versão
 """
@@ -23,7 +23,8 @@ from database import (
 
 log = logging.getLogger("backup-server")
 
-_QUEUE_SIZE = 4  # máximo de tmp files aguardando processamento
+_PARALLEL_DOWNLOADS = 3  # downloads simultâneos no producer
+_QUEUE_SIZE = 6           # buffer da fila producer → consumer
 
 
 def _get_provider(provider_name: str):
@@ -70,50 +71,77 @@ async def _producer(
     errors: list,
     abort: asyncio.Event,
 ) -> None:
-    """Baixa arquivos e enfileira para processamento. Envia sentinel None ao terminar."""
-    downloads = 0
+    """Baixa arquivos em paralelo (até _PARALLEL_DOWNLOADS simultâneos) e enfileira para processamento."""
+    semaphore   = asyncio.Semaphore(_PARALLEL_DOWNLOADS)
+    token_lock  = asyncio.Lock()
     total_files = len(all_files)
-    try:
-        access_token = await _fresh_access_token(credential, db)
-        for i, entry in enumerate(all_files, 1):
+    state = {
+        "access_token": await _fresh_access_token(credential, db),
+        "downloads": 0,
+    }
+
+    async def _download_one(i: int, entry) -> None:
+        if abort.is_set():
+            return
+        if total_files >= 10 and (i == 1 or i % max(1, total_files // 4) == 0 or i == total_files):
+            log.info(f"[cloud-runner] [{i}/{total_files}] {entry.path}")
+        prev = prev_files.get(entry.path)
+        if prev and prev[0] == entry.mtime:
+            await queue.put(("skip", entry, prev[1]))
+            return
+
+        volume   = storage.pick_volume()
+        tmp_path = volume / f"_cloud_tmp_{os.urandom(8).hex()}"
+        result   = None
+
+        async with semaphore:
             if abort.is_set():
-                break
-            if total_files >= 10 and (i == 1 or i % max(1, total_files // 4) == 0 or i == total_files):
-                log.info(f"[cloud-runner] [{i}/{total_files}] {entry.path}")
-            prev = prev_files.get(entry.path)
-            if prev and prev[0] == entry.mtime:
-                await queue.put(("skip", entry, prev[1]))
-                continue
-
-            volume   = storage.pick_volume()
-            tmp_path = volume / f"_cloud_tmp_{os.urandom(8).hex()}"
-
-            if downloads > 0 and downloads % 10 == 0:
-                access_token = await _fresh_access_token(credential, db)
+                return
+            async with token_lock:
+                n = state["downloads"]
+                if n > 0 and n % 10 == 0:
+                    state["access_token"] = await _fresh_access_token(credential, db)
+            access_token = state["access_token"]
 
             try:
                 sha256, size = await provider.download_file_to(
                     access_token, entry.file_id, tmp_path, storage.CHUNK_SIZE
                 )
-                await queue.put(("file", entry, tmp_path, sha256, size, volume))
-                downloads += 1
+                result = (sha256, size)
+                async with token_lock:
+                    state["downloads"] += 1
             except Exception as e:
                 status = getattr(getattr(e, "response", None), "status_code", None)
                 if status in (401, 403):
                     try:
                         log.warning(f"[cloud-runner] {status} em {entry.path}, renovando token e tentando novamente")
-                        access_token = await _force_refresh_token(credential, db)
+                        async with token_lock:
+                            access_token = await _force_refresh_token(credential, db)
+                            state["access_token"] = access_token
                         sha256, size = await provider.download_file_to(
                             access_token, entry.file_id, tmp_path, storage.CHUNK_SIZE
                         )
-                        await queue.put(("file", entry, tmp_path, sha256, size, volume))
-                        downloads += 1
-                        continue
+                        result = (sha256, size)
+                        async with token_lock:
+                            state["downloads"] += 1
                     except Exception as e2:
                         e = e2
-                tmp_path.unlink(missing_ok=True)
-                errors.append(f"{entry.path}: {e}")
-                log.error(f"[cloud-runner] Erro no download de {entry.path}: {e}")
+                if result is None:
+                    tmp_path.unlink(missing_ok=True)
+                    errors.append(f"{entry.path}: {e}")
+                    log.error(f"[cloud-runner] Erro no download de {entry.path}: {e}")
+                    return
+
+        # semaphore liberado antes do put — outro download pode começar enquanto a fila estiver cheia
+        sha256, size = result
+        await queue.put(("file", entry, tmp_path, sha256, size, volume))
+
+    try:
+        tasks = [
+            asyncio.create_task(_download_one(i, entry))
+            for i, entry in enumerate(all_files, 1)
+        ]
+        await asyncio.gather(*tasks)
     finally:
         await queue.put(None)
 
