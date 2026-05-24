@@ -19,7 +19,7 @@ import asyncio, os, hashlib, secrets, base64, shutil, logging
 from pathlib import Path
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, insert, literal
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
@@ -1262,26 +1262,29 @@ def absorb_version(label: str, version_key: str, req: AbsorbRequest, db: Session
     dest = _get_version_or_404(label, version_key, db)
     if dest.status != "running":
         raise HTTPException(409, f"Versão destino está '{dest.status}' — absorb só permitido em versões running")
-    src  = _get_version_or_404(label, req.source_version_key, db)
+    src = _get_version_or_404(label, req.source_version_key, db)
 
-    existing = db.query(VersionFile.original_path).filter(VersionFile.version_id == dest.id).subquery()
-    source_files = (
-        db.query(VersionFile)
-        .filter(VersionFile.version_id == src.id,
-                ~VersionFile.original_path.in_(select(existing)))
-        .all()
+    total_src = (
+        db.query(func.count(VersionFile.id))
+        .filter(VersionFile.version_id == src.id)
+        .scalar() or 0
     )
 
-    total_src = db.query(func.count(VersionFile.id)).filter(VersionFile.version_id == src.id).scalar() or 0
-    inherited = len(source_files)
-
-    for vf in source_files:
-        db.add(VersionFile(
-            version_id=dest.id,
-            original_path=vf.original_path,
-            sha256=vf.sha256,
-            mtime=vf.mtime,
-        ))
+    existing_sq = select(VersionFile.original_path).where(VersionFile.version_id == dest.id)
+    stmt = insert(VersionFile).from_select(
+        ["version_id", "original_path", "sha256", "mtime"],
+        select(
+            literal(dest.id).label("version_id"),
+            VersionFile.original_path,
+            VersionFile.sha256,
+            VersionFile.mtime,
+        ).where(
+            VersionFile.version_id == src.id,
+            ~VersionFile.original_path.in_(existing_sq),
+        ),
+    )
+    result = db.execute(stmt)
+    inherited = result.rowcount
     db.commit()
 
     skipped = total_src - inherited
