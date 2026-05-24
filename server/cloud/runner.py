@@ -262,7 +262,7 @@ async def run_cloud_backup_job(job_id: int) -> None:
         )
 
         version.status      = "failed" if (processed == 0 and errors) else "done"
-        version.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        version.finished_at = datetime.now()
         db.commit()
 
         downloaded = processed - skipped
@@ -282,7 +282,7 @@ async def run_cloud_backup_job(job_id: int) -> None:
         if version and version.id:
             try:
                 version.status      = "failed"
-                version.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                version.finished_at = datetime.now()
                 db.commit()
             except Exception:
                 pass

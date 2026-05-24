@@ -92,7 +92,7 @@ def _cleanup_stale_running_states():
         )
         for v in stale_versions:
             v.status      = "incomplete"
-            v.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            v.finished_at = datetime.now()
             log.warning(f"[startup] Versão {v.backup_label}/{v.version_key} estava running — marcada como incomplete")
 
         if stale_jobs or stale_versions:
@@ -870,7 +870,7 @@ def get_activity(db: Session = Depends(get_db)):
         ))
 
     # 5. Versões recentes (últimas 24h, status finalizado)
-    cutoff = datetime.utcnow() - timedelta(hours=24)
+    cutoff = datetime.now() - timedelta(hours=24)
     recent_vs = (
         db.query(BackupVersion)
         .filter(
@@ -939,7 +939,7 @@ def get_activity(db: Session = Depends(get_db)):
         disks=disks_list,
         recent_versions=recent_version_infos,
         recent_jobs=recent_job_infos,
-        server_time=datetime.utcnow().isoformat(),
+        server_time=datetime.now().isoformat(),
     )
 
 
@@ -1244,7 +1244,7 @@ def get_version(label: str, version_key: str, db: Session = Depends(get_db)):
 def finish_version(label: str, version_key: str, req: VersionFinish, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     v = _get_version_or_404(label, version_key, db)
     v.status = req.status
-    v.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    v.finished_at = datetime.now()
     db.commit()
     if req.status == "done":
         log.info(f"[versao] {label}/{version_key} finalizada → disparando auto-cleanup em background")

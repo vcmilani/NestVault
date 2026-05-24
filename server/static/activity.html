@@ -237,7 +237,7 @@
   const elapsed = isoStr => {
     if (!isoStr) return '—';
     const raw = isoStr.includes('T') ? isoStr : isoStr.replace(' ','T');
-    const t = new Date(raw.endsWith('Z') ? raw : raw+'Z');
+    const t = new Date(raw);
     const s = Math.round((Date.now() - t.getTime()) / 1000);
     if (s < 0) return '0s';
     if (s < 60) return s+'s';
