@@ -618,8 +618,14 @@ def _cleanup_orphan_contents_no_commit(db: Session, limit: int | None = None) ->
     bytes_freed = 0
     safe_to_delete: list[FileContent] = []
 
+    orphan_shas = [fc.sha256 for fc in orphans]
+    copies_by_sha: dict[str, list] = {}
+    if orphan_shas:
+        for c in db.query(FileContentCopy).filter(FileContentCopy.sha256.in_(orphan_shas)).all():
+            copies_by_sha.setdefault(c.sha256, []).append(c)
+
     for fc in orphans:
-        copies = db.query(FileContentCopy).filter(FileContentCopy.sha256 == fc.sha256).all()
+        copies = copies_by_sha.get(fc.sha256, [])
         failed = False
         for copy in copies:
             p = Path(copy.stored_at)
@@ -1002,25 +1008,30 @@ def storage_info(db: Session = Depends(get_db)):
 
 @app.get("/storage/disks", response_model=list[DiskVolumeInfo], dependencies=[Depends(require_api_key)])
 def storage_disks(db: Session = Depends(get_db)):
+    rows = (
+        db.query(
+            FileContentCopy.volume_path,
+            func.count(FileContentCopy.id).label("cnt"),
+            func.coalesce(func.sum(FileContent.size), 0).label("bytes"),
+        )
+        .join(FileContent, FileContent.sha256 == FileContentCopy.sha256)
+        .group_by(FileContentCopy.volume_path)
+        .all()
+    )
+    vol_stats = {r.volume_path: (r.cnt, int(r.bytes)) for r in rows}
+
     result = []
     for v in STORAGE_VOLUMES:
         usage = _safe_disk_usage(v)
-        status = "degraded" if usage is None else "ok"
-        content_files = (db.query(func.count(FileContentCopy.id))
-                           .filter(FileContentCopy.volume_path == str(v))
-                           .scalar() or 0)
-        content_bytes = (db.query(func.coalesce(func.sum(FileContent.size), 0))
-                           .join(FileContentCopy, FileContentCopy.sha256 == FileContent.sha256)
-                           .filter(FileContentCopy.volume_path == str(v))
-                           .scalar() or 0)
+        files, bytes_ = vol_stats.get(str(v), (0, 0))
         result.append(DiskVolumeInfo(
             path=str(v),
             total_bytes=usage.total if usage else 0,
             used_bytes=usage.used  if usage else 0,
             free_bytes=usage.free  if usage else 0,
-            content_files=content_files,
-            content_bytes=int(content_bytes),
-            status=status,
+            content_files=files,
+            content_bytes=bytes_,
+            status="degraded" if usage is None else "ok",
         ))
     return result
 
@@ -1109,6 +1120,75 @@ def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db
     return result
 
 
+@app.get("/backups/disk-summary", response_model=dict[str, list[BackupDiskEntry]], dependencies=[Depends(require_api_key)])
+def all_backup_disk_summary(db: Session = Depends(get_db)):
+    """Retorna disk info da última versão done de cada backup, numa única chamada."""
+    from collections import defaultdict
+
+    max_ts_sq = (
+        db.query(
+            BackupVersion.backup_label,
+            func.max(BackupVersion.created_at).label("max_ts"),
+        )
+        .filter(BackupVersion.status == "done")
+        .group_by(BackupVersion.backup_label)
+        .subquery()
+    )
+    latest_rows = (
+        db.query(BackupVersion.backup_label, BackupVersion.id)
+        .join(
+            max_ts_sq,
+            (BackupVersion.backup_label == max_ts_sq.c.backup_label)
+            & (BackupVersion.created_at == max_ts_sq.c.max_ts)
+            & (BackupVersion.status == "done"),
+        )
+        .all()
+    )
+    if not latest_rows:
+        return {}
+
+    label_by_vid = {row.id: row.backup_label for row in latest_rows}
+    vid_list = list(label_by_vid.keys())
+
+    sha_rows = (
+        db.query(VersionFile.version_id, VersionFile.sha256)
+        .filter(VersionFile.version_id.in_(vid_list))
+        .distinct()
+        .all()
+    )
+    if not sha_rows:
+        return {row.backup_label: [] for row in latest_rows}
+
+    all_shas = list({r.sha256 for r in sha_rows})
+
+    copy_rows = (
+        db.query(FileContentCopy.sha256, FileContentCopy.volume_path, FileContent.size)
+        .join(FileContent, FileContent.sha256 == FileContentCopy.sha256)
+        .filter(FileContentCopy.sha256.in_(all_shas))
+        .all()
+    )
+    sha_copies: dict[str, list] = defaultdict(list)
+    for r in copy_rows:
+        sha_copies[r.sha256].append((r.volume_path, r.size))
+
+    label_vol: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(lambda: [0, 0]))
+    for r in sha_rows:
+        label = label_by_vid.get(r.version_id)
+        if not label:
+            continue
+        for vol, size in sha_copies.get(r.sha256, []):
+            label_vol[label][vol][0] += 1
+            label_vol[label][vol][1] += size
+
+    return {
+        label: [
+            BackupDiskEntry(volume_path=vol, file_count=stats[0], total_bytes=stats[1])
+            for vol, stats in vols.items()
+        ]
+        for label, vols in label_vol.items()
+    }
+
+
 @app.get("/backups/{label}", response_model=BackupInfo, dependencies=[Depends(require_api_key)])
 def get_backup(label: str, db: Session = Depends(get_db)):
     return _backup_info(_get_backup_or_404(label, db), db)
@@ -1193,6 +1273,7 @@ def create_version(label: str, req: VersionCreate, db: Session = Depends(get_db)
         log.info(f"[versao] {label}: {updated} versão(ões) running → incomplete")
     v = BackupVersion(backup_label=label, version_key=req.version_key)
     db.add(v); db.commit(); db.refresh(v)
+    log.info(f"[versao] {label}/{req.version_key} criada")
     return VersionCreatedResponse(created=True, version=_version_stats(v, db))
 
 
@@ -1246,8 +1327,8 @@ def finish_version(label: str, version_key: str, req: VersionFinish, background_
     v.status = req.status
     v.finished_at = datetime.now()
     db.commit()
+    log.info(f"[versao] {label}/{version_key} → {req.status}")
     if req.status == "done":
-        log.info(f"[versao] {label}/{version_key} finalizada → disparando auto-cleanup em background")
         background_tasks.add_task(_bg_auto_cleanup)
     return _version_stats(v, db)
 
@@ -1406,6 +1487,7 @@ async def upload_file(
         first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).first()
         if first_copy:
             _ensure_replicas(sha256, Path(first_copy.stored_at), db)
+        log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — registrada sha256={sha256[:8]}…")
     else:
         # Escolhe volume com mais espaço livre; tmp e conteúdo vão pro mesmo disco
         volume = _pick_volume()
@@ -1424,7 +1506,7 @@ async def upload_file(
                     else:
                         try:
                             _verify_stored_file(sha256, stored, encrypted=fc.encrypted)
-                            log.info(f"[integrity] {original_path!r} verificado OK — sha256={sha256[:8]}… (dedup)")
+                            log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — dedup sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
                             _ensure_replicas(sha256, stored, db)
                             tmp_path.unlink(missing_ok=True)
                         except HTTPException:
@@ -1443,13 +1525,12 @@ async def upload_file(
                         crypto.encrypt_stream(dest, tmp_enc, storage.encryption_key)
                         shutil.move(str(tmp_enc), str(dest))
                         _verify_stored_file(sha256, dest, encrypted=True)
-                        log.info(f"[integrity] {original_path!r} cifrado e verificado OK — sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
+                        log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — nova cifrada sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
                     except Exception:
                         tmp_enc.unlink(missing_ok=True)
                         raise
                 else:
-                    _verify_stored_file(sha256, dest, encrypted=False)
-                    log.info(f"[integrity] {original_path!r} verificado OK — sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
+                    log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — nova sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
                 fc = FileContent(sha256=sha256, stored_at=str(dest), size=size,
                                  encrypted=ENCRYPTION_ENABLED)
                 try:
@@ -1669,11 +1750,16 @@ def encrypt_existing_files(db: Session = Depends(get_db)):
 
     log.info(f"[encrypt-existing] {total} arquivo(s) pendente(s) de cifragem")
 
+    pending_shas = [fc.sha256 for fc in pending]
+    copies_q = db.query(FileContentCopy).filter(FileContentCopy.sha256.in_(pending_shas))
+    if degraded_strs:
+        copies_q = copies_q.filter(~FileContentCopy.volume_path.in_(degraded_strs))
+    encrypt_copies_by_sha: dict[str, list] = {}
+    for c in copies_q.all():
+        encrypt_copies_by_sha.setdefault(c.sha256, []).append(c)
+
     for i, fc in enumerate(pending, 1):
-        q = db.query(FileContentCopy).filter(FileContentCopy.sha256 == fc.sha256)
-        if degraded_strs:
-            q = q.filter(~FileContentCopy.volume_path.in_(degraded_strs))
-        copies = q.all()
+        copies = encrypt_copies_by_sha.get(fc.sha256, [])
 
         if not copies:
             log.warning(f"[encrypt-existing] [{i}/{total}] {fc.sha256[:8]}… sem cópia acessível — pulando")

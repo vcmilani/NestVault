@@ -62,6 +62,8 @@ class BackupVersion(Base):
     __table_args__ = (
         UniqueConstraint("backup_label", "version_key", name="uq_label_version"),
         Index("idx_label_status_key", "backup_label", "status", "version_key"),
+        Index("idx_version_created", "created_at"),
+        Index("idx_version_finished", "finished_at"),
     )
 
     id           = Column(Integer, primary_key=True)
@@ -137,6 +139,9 @@ class CloudCredential(Base):
 
 class CloudBackupJob(Base):
     __tablename__ = "cloud_backup_jobs"
+    __table_args__ = (
+        Index("idx_cbj_last_run", "last_run_at"),
+    )
 
     id              = Column(Integer, primary_key=True)
     credential_id   = Column(Integer, ForeignKey("cloud_credentials.id"), nullable=False, index=True)

@@ -6,6 +6,7 @@ volume selection, replication, and encryption logic without
 creating a circular import.
 """
 import os, shutil, logging, asyncio, threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 log = logging.getLogger("backup-server")
@@ -87,22 +88,36 @@ def ensure_replicas(sha256: str, source_path: Path, db) -> None:
     target = target_replicas()
     copies = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).all()
     vol_set = {c.volume_path for c in copies}
-    added = []
+
+    target_vols = []
     for vol in healthy_volumes():
-        if len(copies) >= target:
+        if len(copies) + len(target_vols) >= target:
             break
-        if str(vol) in vol_set:
-            continue
-        try:
-            dest = content_path(sha256, vol)
-            shutil.copy2(str(source_path), str(dest))
-            copy = FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(vol))
-            db.add(copy)
-            copies.append(copy)
-            vol_set.add(str(vol))
-            added.append(str(vol))
-        except OSError as e:
-            log.warning(f"[replication] Falha ao replicar {sha256[:8]}… para {vol}: {e}")
+        if str(vol) not in vol_set:
+            target_vols.append(vol)
+
+    if not target_vols:
+        return
+
+    def _copy(vol):
+        dest = content_path(sha256, vol)
+        shutil.copy2(str(source_path), str(dest))
+        return vol, dest
+
+    added = []
+    with ThreadPoolExecutor(max_workers=len(target_vols)) as pool:
+        futures = {pool.submit(_copy, vol): vol for vol in target_vols}
+        for future in as_completed(futures):
+            vol = futures[future]
+            try:
+                _, dest = future.result()
+                copy = FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(vol))
+                db.add(copy)
+                copies.append(copy)
+                added.append(str(vol))
+            except OSError as e:
+                log.warning(f"[replication] Falha ao replicar {sha256[:8]}… para {vol}: {e}")
+
     if added:
         log.info(f"[replication] {sha256[:8]}… → {len(added)} nova(s) cópia(s): {added}")
 

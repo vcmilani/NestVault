@@ -181,7 +181,7 @@
   </div>
 
   <div class="controls">
-    <input class="filter-input" id="filterInput" type="text" placeholder="Filtrar arquivos por nome ou caminho…" oninput="onFilter(this.value)">
+    <input class="filter-input" id="filterInput" type="text" placeholder="Filtrar arquivos por nome ou caminho…" oninput="onFilterDebounced(this.value)">
     <button class="cbtn" onclick="expandAll()">⊞ Expandir</button>
     <button class="cbtn" onclick="collapseAll()">⊟ Colapsar</button>
   </div>
@@ -417,6 +417,12 @@
   }
 
   // -- Filter -----------------------------------------------------------------
+  let _filterTimer = null;
+  function onFilterDebounced(value) {
+    clearTimeout(_filterTimer);
+    _filterTimer = setTimeout(() => onFilter(value), 250);
+  }
+
   function onFilter(q) {
     q = q.trim();
     const header = document.getElementById('filesHeader');
