@@ -12,6 +12,7 @@
 <title>Discos — NestVault</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/theme.css">
+<link rel="stylesheet" href="/static/nav.css">
 <script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
 <style>
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
@@ -103,9 +104,6 @@
     .login-input{font-size:16px}
   }
   @media(max-width:480px){
-    header{height:auto;min-height:56px;flex-wrap:wrap;padding:10px 12px}
-    .logo-sub{display:none}
-    .header-right{gap:8px}
     main{padding:12px 10px}
     .disk-stats{grid-template-columns:1fr 1fr}
     .login-box{padding:28px 20px}
@@ -122,13 +120,21 @@
     <div><div class="logo-text">NestVault</div><div class="logo-sub">v4.6</div></div>
   </div>
   <div class="header-right">
-    <button class="hbtn" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
+    <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
     <button class="hbtn" onclick="load()">↻ Refresh</button>
     <a class="hbtn" href="/" style="text-decoration:none">← Voltar</a>
     <a class="hbtn" href="/activity" style="text-decoration:none">◎ Atividade</a>
-    <button class="hbtn" id="logoutBtn">⌀ API Key</button>
+    <button class="hbtn always-visible" id="logoutBtn">⌀ API Key</button>
+    <button class="nav-hamburger"></button>
   </div>
 </header>
+
+<nav class="mobile-nav">
+  <button onclick="load();closeNav()">↻ Refresh</button>
+  <a href="/">← Voltar</a>
+  <a href="/activity">◎ Atividade</a>
+</nav>
+<div class="mobile-nav-backdrop"></div>
 
 <main>
   <div class="error-bar" id="errorBar"></div>
@@ -289,5 +295,6 @@
   }
   updateThemeBtn();
 </script>
+<script src="/static/nav.js"></script>
 </body>
 </html>
