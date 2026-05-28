@@ -9,7 +9,6 @@ Otimizacoes de performance:
 - Limpeza de arquivos ao deletar label/versao feita em background (nao bloqueia o cliente)
 """
 
-from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Depends, Header, BackgroundTasks
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -70,7 +69,6 @@ def _pick_volume() -> Path:
         raise HTTPException(503, str(e))
 
 
-@asynccontextmanager
 def _cleanup_stale_running_states():
     """Reseta estados 'running' órfãos deixados por um reinício do servidor."""
     db = SessionLocal()
@@ -121,7 +119,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="4.8.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="4.8.1", lifespan=lifespan)
 app.include_router(cloud_router)
 
 if STATIC_DIR.exists():
@@ -551,6 +549,8 @@ def _auto_cleanup_if_needed(db: Session) -> None:
         .all()
     )
     if stale:
+        stale_ids = [v.id for v in stale]
+        db.query(VersionFile).filter(VersionFile.version_id.in_(stale_ids)).delete(synchronize_session=False)
         for v in stale:
             db.delete(v)
         db.commit()
@@ -585,6 +585,7 @@ def _auto_cleanup_if_needed(db: Session) -> None:
 
     for v in deletable:
         label, key = v.backup_label, v.version_key
+        db.query(VersionFile).filter(VersionFile.version_id == v.id).delete(synchronize_session=False)
         db.delete(v)
         removed, _ = _cleanup_orphan_contents_no_commit(db)
         db.commit()

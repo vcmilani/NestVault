@@ -1,5 +1,5 @@
 """
-NestVault  v4.8.0
+NestVault  v4.8.1
 Cada execucao de backup cria uma nova versao dentro do label.
 Conteudo identico e armazenado uma unica vez no servidor (deduplicacao por sha256).
 
@@ -12,7 +12,7 @@ Uso:
     nestvault backups --server http://192.168.1.100:8000
 """
 
-VERSION = "v4.8.0"
+VERSION = "v4.8.1"
 
 import os, sys, hashlib, argparse, base64, socket, threading
 from pathlib import Path
@@ -622,7 +622,7 @@ def backup_directory(
         if accumulate and status == "done" and prev_done_key:
             try:
                 absorb_result = absorb_version(server, label, version_key, prev_done_key)
-            except requests.RequestException as e:
+            except Exception as e:
                 _err(f"Absorb: {e}")
         finish_version(server, label, version_key, status)
 
