@@ -12,6 +12,7 @@
 <title>NestVault</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/theme.css">
+<link rel="stylesheet" href="/static/nav.css">
 <script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
 <style>
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
@@ -194,18 +195,19 @@
     #authPastedUrl{font-size:16px}
   }
 
+  /* ── 600px — tablet portrait ── */
+  @media(max-width:600px){
+    .stats-bar{grid-template-columns:repeat(3,1fr)}
+  }
+
   /* ── 480px — mobile ── */
   @media(max-width:480px){
     .stats-bar{grid-template-columns:repeat(2,1fr)}
-    header{height:auto;min-height:56px;flex-wrap:wrap;padding:10px 12px}
-    .logo-sub{display:none}
-    .header-right{gap:8px;flex-wrap:wrap}
-    .last-updated{display:none}
     main{padding:12px 10px}
     .stat-box{padding:14px 12px}
     .stat-value{font-size:20px}
     .hbtn{min-height:44px;font-size:12px}
-    .login-box{padding:28px 20px}
+    .login-box{padding:28px 20px;max-height:calc(100vh - 32px);overflow-y:auto}
     .login-btn{min-height:48px}
     .diff-head{flex-wrap:wrap;gap:8px}
     .cmp-bar{flex-wrap:wrap;gap:8px}
@@ -224,14 +226,23 @@
   <div class="header-right">
     <div class="status-dot" id="statusDot"></div>
     <span class="last-updated" id="lastUpdated">—</span>
-    <button class="hbtn" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
+    <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
     <button class="hbtn" onclick="loadAll()">↻ Refresh</button>
     <a class="hbtn" href="/disks" style="text-decoration:none">⊞ Discos</a>
     <a class="hbtn" href="/maintenance" style="text-decoration:none">⚙ Manutenção</a>
     <a class="hbtn" href="/activity" style="text-decoration:none">◎ Atividade</a>
-    <button class="hbtn" id="logoutBtn">⌀ API Key</button>
+    <button class="hbtn always-visible" id="logoutBtn">⌀ API Key</button>
+    <button class="nav-hamburger"></button>
   </div>
 </header>
+
+<nav class="mobile-nav">
+  <button onclick="loadAll();closeNav()">↻ Refresh</button>
+  <a href="/disks">⊞ Discos</a>
+  <a href="/maintenance">⚙ Manutenção</a>
+  <a href="/activity">◎ Atividade</a>
+</nav>
+<div class="mobile-nav-backdrop"></div>
 
 <main>
   <div class="error-bar" id="errorBar"></div>
@@ -281,8 +292,8 @@
   </div>
 
   <!-- Modal: autenticação OAuth manual (para IPs privados) -->
-  <div id="cloudAuthModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:center;justify-content:center">
-    <div style="background:var(--bg2);border:1px solid var(--border);padding:28px;min-width:360px;max-width:520px;width:90%">
+  <div id="cloudAuthModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:center;justify-content:center;padding:16px">
+    <div style="background:var(--bg2);border:1px solid var(--border);padding:28px;width:min(520px,100%);max-height:calc(100vh - 32px);overflow-y:auto;box-sizing:border-box">
       <div style="font-size:13px;font-weight:600;margin-bottom:18px" id="authModalTitle">Conectar conta</div>
 
       <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px"><strong>1.</strong> Adicione este URI de redirecionamento nas configurações OAuth do provedor:</div>
@@ -303,8 +314,8 @@
   </div>
 
   <!-- Modal: criar job -->
-  <div id="cloudModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:center;justify-content:center">
-    <div style="background:var(--bg2);border:1px solid var(--border);padding:28px;min-width:360px;max-width:480px;width:90%">
+  <div id="cloudModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:center;justify-content:center;padding:16px">
+    <div style="background:var(--bg2);border:1px solid var(--border);padding:28px;width:min(480px,100%);max-height:calc(100vh - 32px);overflow-y:auto;box-sizing:border-box">
       <div id="cloudModalTitle" style="font-size:13px;font-weight:600;margin-bottom:18px">Novo job de backup</div>
       <label for="jCredential" style="font-size:11px;color:var(--text-dim)">Conta</label>
       <select id="jCredential" style="width:100%;margin:4px 0 12px;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:var(--mono);padding:6px 8px;font-size:12px"></select>
@@ -1071,5 +1082,6 @@
   }
   updateThemeBtn();
 </script>
+<script src="/static/nav.js"></script>
 </body>
 </html>

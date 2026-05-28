@@ -12,6 +12,7 @@
 <title>NestVault — Explorer</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/theme.css">
+<link rel="stylesheet" href="/static/nav.css">
 <script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
 <style>
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
@@ -122,6 +123,11 @@
   ::-webkit-scrollbar-track{background:var(--bg)}
   ::-webkit-scrollbar-thumb{background:var(--border2)}
 
+  /* Explorer tabs (mobile only) */
+  .explorer-tabs{display:none;border-bottom:1px solid var(--border);background:var(--bg2)}
+  .explorer-tab{flex:1;background:none;border:none;border-bottom:2px solid transparent;color:var(--text-dim);font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;padding:10px 16px;cursor:pointer;transition:color .15s,border-color .15s;min-height:42px;user-select:none;-webkit-tap-highlight-color:transparent}
+  .explorer-tab.active{color:var(--amber);border-bottom-color:var(--amber)}
+
   @media(max-width:768px){
     main{padding:16px}
     header{padding:0 16px}
@@ -130,19 +136,21 @@
     .t-hash{display:none}
     .hbtn{min-height:40px;padding:8px 12px}
     .cbtn{min-height:40px}
-    .explorer-layout{flex-direction:column;height:auto;min-height:300px}
-    .tree-panel{width:100%;max-height:40vh;border-right:none;border-bottom:1px solid var(--border)}
-    .tree-panel .t-count{display:none}
-    .files-panel{min-height:200px;max-height:60vh}
+    .explorer-tabs{display:flex}
+    .explorer-layout{flex-direction:column;height:calc(100vh - 270px);min-height:300px}
+    .tree-panel{width:100%;height:100%;max-height:none;border-right:none;border-bottom:none;flex:1}
+    .tree-panel.tab-hidden{display:none}
+    .files-panel{height:100%;max-height:none;flex:1}
+    .files-panel.tab-hidden{display:none}
     .login-input{font-size:16px}
     .filter-input{font-size:16px}
   }
   @media(max-width:480px){
     .t-count{display:none}
-    .logo-sub{display:none}
     main{padding:10px 12px}
     .cbtn{min-height:44px}
     .hbtn{min-height:44px}
+    .explorer-layout{height:calc(100vh - 230px)}
   }
 </style>
 </head>
@@ -154,13 +162,21 @@
     <div><div class="logo-text">NestVault</div><div class="logo-sub">Explorer</div></div>
   </div>
   <div class="header-right">
-    <button class="hbtn" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
+    <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
     <a class="hbtn" href="/">← Dashboard</a>
     <a class="hbtn" href="/disks">⊞ Discos</a>
     <a class="hbtn" href="/activity">◎ Atividade</a>
-    <button class="hbtn" id="logoutBtn">⌀ API Key</button>
+    <button class="hbtn always-visible" id="logoutBtn">⌀ API Key</button>
+    <button class="nav-hamburger"></button>
   </div>
 </header>
+
+<nav class="mobile-nav">
+  <a href="/">← Dashboard</a>
+  <a href="/disks">⊞ Discos</a>
+  <a href="/activity">◎ Atividade</a>
+</nav>
+<div class="mobile-nav-backdrop"></div>
 
 <main>
   <div class="error-bar" id="errorBar"></div>
@@ -186,11 +202,16 @@
     <button class="cbtn" onclick="collapseAll()">⊟ Colapsar</button>
   </div>
 
+  <div class="explorer-tabs" id="explorerTabs">
+    <button class="explorer-tab active" id="tabTree" onclick="switchTab('tree')">📁 Pastas</button>
+    <button class="explorer-tab" id="tabFiles" onclick="switchTab('files')">📄 Arquivos</button>
+  </div>
+
   <div class="explorer-layout">
     <div class="tree-panel" id="dirTree">
       <div class="loading">Carregando</div>
     </div>
-    <div class="files-panel">
+    <div class="files-panel tab-hidden" id="filesPanel">
       <div class="files-header" id="filesHeader"></div>
       <div class="files-list" id="filesList">
         <div class="files-placeholder">
@@ -378,6 +399,7 @@
       const node = nodeMap.get(path);
       if (node) renderFileList(node);
     }
+    if (window.innerWidth <= 768) switchTab('files');
   }
 
   function expandAll() {
@@ -556,6 +578,25 @@
     if (btn) btn.textContent = document.documentElement.getAttribute('data-theme') === 'light' ? '☾ Escuro' : '☀ Claro';
   }
   updateThemeBtn();
+
+  function switchTab(tab) {
+    const tree = document.getElementById('dirTree');
+    const files = document.getElementById('filesPanel');
+    const tabTree = document.getElementById('tabTree');
+    const tabFiles = document.getElementById('tabFiles');
+    if (tab === 'tree') {
+      tree.classList.remove('tab-hidden');
+      files.classList.add('tab-hidden');
+      tabTree.classList.add('active');
+      tabFiles.classList.remove('active');
+    } else {
+      files.classList.remove('tab-hidden');
+      tree.classList.add('tab-hidden');
+      tabFiles.classList.add('active');
+      tabTree.classList.remove('active');
+    }
+  }
 </script>
+<script src="/static/nav.js"></script>
 </body>
 </html>

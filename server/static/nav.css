@@ -1,0 +1,105 @@
+/* ── nav.css — hamburger + mobile navigation ────────────────────────── */
+
+/* Hamburger button */
+.nav-hamburger {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid var(--border2);
+  color: var(--text-dim);
+  width: 36px;
+  height: 36px;
+  cursor: pointer;
+  transition: border-color .15s, color .15s;
+  flex-shrink: 0;
+  padding: 0;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.nav-hamburger:hover,
+.nav-hamburger:active { border-color: var(--amber); color: var(--amber); }
+.nav-hamburger svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: square;
+  pointer-events: none;
+}
+
+/* Mobile nav drawer */
+.mobile-nav {
+  display: none;
+  position: fixed;
+  top: 56px;
+  left: 0;
+  right: 0;
+  background: var(--bg2);
+  border-bottom: 2px solid var(--amber);
+  z-index: 9;
+  flex-direction: column;
+}
+.mobile-nav.open { display: flex; }
+
+.mobile-nav a,
+.mobile-nav button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 20px;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: none;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 13px;
+  letter-spacing: .06em;
+  text-decoration: none;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  min-height: 48px;
+  box-sizing: border-box;
+  transition: background .1s, color .1s;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.mobile-nav a:last-child,
+.mobile-nav button:last-child { border-bottom: none; }
+.mobile-nav a:hover,
+.mobile-nav a:active,
+.mobile-nav button:hover,
+.mobile-nav button:active { background: var(--bg3); color: var(--amber); }
+.mobile-nav a.active {
+  color: var(--amber);
+  padding-left: 17px;
+  border-left: 3px solid var(--amber);
+}
+
+/* Backdrop to close the menu on outside click */
+.mobile-nav-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  top: 56px;
+  z-index: 8;
+}
+.mobile-nav-backdrop.open { display: block; }
+
+/* ── Breakpoint: show hamburger, hide nav buttons ── */
+@media(max-width:768px) {
+  .nav-hamburger { display: flex; }
+  .header-right .hbtn:not(.always-visible) { display: none !important; }
+  .header-right { gap: 8px !important; }
+}
+
+@media(max-width:480px) {
+  header { height: 56px !important; padding: 0 10px !important; flex-wrap: nowrap !important; }
+  .header-right { gap: 6px !important; flex-wrap: nowrap !important; }
+  .logo-sub { display: none; }
+  #statusDot { display: none; }
+  .last-updated { display: none !important; }
+  .hbtn.always-visible { padding: 5px 8px; font-size: 10px; }
+}
