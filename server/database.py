@@ -61,17 +61,17 @@ class BackupVersion(Base):
     __tablename__ = "backup_versions"
     __table_args__ = (
         UniqueConstraint("backup_label", "version_key", name="uq_label_version"),
-        Index("idx_label_status_key", "backup_label", "status", "version_key"),
+        Index("idx_label_status_created", "backup_label", "status", "created_at"),
         Index("idx_version_created", "created_at"),
         Index("idx_version_finished", "finished_at"),
     )
 
     id           = Column(Integer, primary_key=True)
-    backup_label = Column(String, ForeignKey("backup_ids.label"), nullable=False, index=True)
-    version_key  = Column(String, nullable=False, index=True)
+    backup_label = Column(String, ForeignKey("backup_ids.label"), nullable=False)
+    version_key  = Column(String, nullable=False)
     created_at   = Column(DateTime, default=_utcnow)
     finished_at  = Column(DateTime, nullable=True)
-    status       = Column(String, default="running", index=True)
+    status       = Column(String, default="running")
 
     backup = relationship("BackupID", back_populates="versions")
     files  = relationship("VersionFile", back_populates="version", lazy="dynamic",
@@ -94,7 +94,6 @@ class FileContentCopy(Base):
     __tablename__ = "file_content_copies"
     __table_args__ = (
         UniqueConstraint("sha256", "volume_path", name="uq_sha256_volume"),
-        Index("idx_fcc_sha256", "sha256"),
         Index("idx_fcc_volume", "volume_path"),
     )
 
@@ -113,7 +112,7 @@ class VersionFile(Base):
 
     id            = Column(Integer, primary_key=True)
     version_id    = Column(Integer, ForeignKey("backup_versions.id"), nullable=False, index=True)
-    original_path = Column(String, nullable=False, index=True)
+    original_path = Column(String, nullable=False)
     sha256        = Column(String(64), ForeignKey("file_contents.sha256"), nullable=False)
     mtime         = Column(Float, nullable=False)
     created_at    = Column(DateTime, default=_utcnow)
@@ -212,17 +211,49 @@ def decrypt_token(encrypted: str) -> str:
 
 
 def init_db():
+    import logging as _initlog
+    _log_init = _initlog.getLogger("backup-server")
+
     Base.metadata.create_all(bind=engine)
-    # Migração: adiciona coluna encrypted em bancos existentes (ignora se já existir)
+
     with engine.connect() as conn:
+        # Migração: adiciona coluna encrypted em bancos existentes (ignora se já existir)
         try:
             conn.execute(text(
                 "ALTER TABLE file_contents ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0"
             ))
             conn.commit()
+            _log_init.info("[db-migrate] Coluna file_contents.encrypted adicionada")
         except Exception as e:
             if "duplicate column" not in str(e).lower():
                 raise
+
+        # Migração de índices: remove redundantes, cria composto otimizado
+        _index_migrations = [
+            # Remove índices de coluna única que o composto já cobre
+            ("DROP INDEX IF EXISTS backup_versions_backup_label_index",
+             "Removendo índice redundante: backup_versions.backup_label"),
+            ("DROP INDEX IF EXISTS backup_versions_status_index",
+             "Removendo índice redundante: backup_versions.status"),
+            ("DROP INDEX IF EXISTS backup_versions_version_key_index",
+             "Removendo índice redundante: backup_versions.version_key"),
+            # Remove composto antigo (sem created_at) e cria o novo
+            ("DROP INDEX IF EXISTS idx_label_status_key",
+             "Removendo índice composto antigo: idx_label_status_key"),
+            ("CREATE INDEX IF NOT EXISTS idx_label_status_created ON backup_versions (backup_label, status, created_at)",
+             "Criando índice composto otimizado: idx_label_status_created"),
+            # Remove índice redundante com a unique constraint (sha256, volume_path)
+            ("DROP INDEX IF EXISTS idx_fcc_sha256",
+             "Removendo índice redundante: file_content_copies.sha256"),
+            # Remove índice redundante com a unique constraint (version_id, original_path)
+            ("DROP INDEX IF EXISTS version_files_original_path_index",
+             "Removendo índice redundante: version_files.original_path"),
+        ]
+        for stmt, msg in _index_migrations:
+            conn.execute(text(stmt))
+            _log_init.info(f"[db-migrate] {msg}")
+        conn.commit()
+        _log_init.info("[db-migrate] Migração de índices concluída")
 
 
 def get_db():
