@@ -157,6 +157,17 @@ class CloudBackupJob(Base):
     credential = relationship("CloudCredential", back_populates="jobs")
 
 
+class MaintenanceJob(Base):
+    __tablename__ = "maintenance_jobs"
+
+    id          = Column(Integer, primary_key=True)
+    job_type    = Column(String, nullable=False)
+    status      = Column(String, nullable=False, default="running")
+    started_at  = Column(DateTime, default=_utcnow)
+    finished_at = Column(DateTime, nullable=True)
+    summary     = Column(String, nullable=True)
+
+
 # -- Token encryption ---------------------------------------------------------
 import logging as _logging
 _log = _logging.getLogger("backup-server")
