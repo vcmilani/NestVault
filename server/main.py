@@ -1,5 +1,5 @@
 """
-NestVault  v4.5
+NestVault  v5.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -119,7 +119,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="4.8.1", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="5.0", lifespan=lifespan)
 app.include_router(cloud_router)
 
 if STATIC_DIR.exists():
@@ -1840,3 +1840,89 @@ def cleanup_versions(label: str, req: CleanupRequest, db: Session = Depends(get_
         versions_removed=keys_removed,
         storage_files_removed=orphans_removed,
     )
+
+
+# -- Cleanup por data ---------------------------------------------------------
+def _latest_done_subquery(db: Session):
+    """Subquery com os IDs da versão done mais recente de cada label."""
+    return (
+        db.query(func.max(BackupVersion.id))
+        .filter(BackupVersion.status == "done")
+        .group_by(BackupVersion.backup_label)
+        .subquery()
+    )
+
+
+@app.get("/maintenance/cleanup-by-date/preview", dependencies=[Depends(require_api_key)])
+def cleanup_by_date_preview(before: str, label: Optional[str] = None, db: Session = Depends(get_db)):
+    scope = f"label={label}" if label else "todos os labels"
+    log.info(f"[cleanup-by-date/preview] consultando antes de {before}, escopo={scope}")
+    cutoff = datetime.fromisoformat(before)
+    latest_done = _latest_done_subquery(db)
+    q = (
+        db.query(BackupVersion.backup_label, func.count(BackupVersion.id))
+        .filter(BackupVersion.created_at < cutoff)
+        .filter(BackupVersion.status != "running")
+        .filter(~BackupVersion.id.in_(latest_done))
+    )
+    if label:
+        q = q.filter(BackupVersion.backup_label == label)
+    rows = q.group_by(BackupVersion.backup_label).all()
+    total = sum(r[1] for r in rows)
+    log.info(f"[cleanup-by-date/preview] {total} versão(ões) elegível(is): " +
+             ", ".join(f"{r[0]}={r[1]}" for r in rows) if rows else "[cleanup-by-date/preview] nenhuma versão elegível")
+    return {"total": total, "per_label": [{"label": r[0], "count": r[1]} for r in rows]}
+
+
+@app.post("/maintenance/cleanup-by-date", dependencies=[Depends(require_api_key)])
+def cleanup_by_date(before: str, label: Optional[str] = None, db: Session = Depends(get_db)):
+    scope = f"label={label}" if label else "todos os labels"
+    log.info(f"[cleanup-by-date] iniciando exclusão antes de {before}, escopo={scope}")
+    cutoff = datetime.fromisoformat(before)
+    latest_done = _latest_done_subquery(db)
+    q = (
+        db.query(BackupVersion)
+        .filter(BackupVersion.created_at < cutoff)
+        .filter(BackupVersion.status != "running")
+        .filter(~BackupVersion.id.in_(latest_done))
+    )
+    if label:
+        q = q.filter(BackupVersion.backup_label == label)
+    versions = q.all()
+
+    per_label: dict[str, int] = {}
+    version_ids: list[int] = []
+    for v in versions:
+        per_label[v.backup_label] = per_label.get(v.backup_label, 0) + 1
+        version_ids.append(v.id)
+
+    if not version_ids:
+        log.info(f"[cleanup-by-date] nenhuma versão elegível — abortando")
+        return {"total_deleted": 0, "per_label": [], "storage_files_removed": 0, "bytes_freed": 0}
+
+    log.info(f"[cleanup-by-date] {len(version_ids)} versão(ões) a remover: " +
+             ", ".join(f"{lbl}={cnt}" for lbl, cnt in per_label.items()))
+
+    log.info(f"[cleanup-by-date] removendo VersionFiles de {len(version_ids)} versão(ões)…")
+    deleted_files = db.query(VersionFile).filter(VersionFile.version_id.in_(version_ids)).delete(
+        synchronize_session=False
+    )
+    log.info(f"[cleanup-by-date] {deleted_files} VersionFile(s) removido(s)")
+
+    log.info(f"[cleanup-by-date] removendo BackupVersions…")
+    db.query(BackupVersion).filter(BackupVersion.id.in_(version_ids)).delete(
+        synchronize_session=False
+    )
+    db.commit()
+    log.info(f"[cleanup-by-date] commit concluído")
+
+    log.info(f"[cleanup-by-date] iniciando limpeza de orphan contents…")
+    removed, bytes_freed = _cleanup_orphan_contents(db)
+    log.info(f"[cleanup-by-date] concluído — {len(version_ids)} versão(ões) removida(s), "
+             f"{removed} arquivo(s) de storage liberado(s), {bytes_freed} bytes")
+    return {
+        "total_deleted": len(version_ids),
+        "per_label": [{"label": k, "deleted": cnt} for k, cnt in per_label.items()],
+        "storage_files_removed": removed,
+        "bytes_freed": bytes_freed,
+    }

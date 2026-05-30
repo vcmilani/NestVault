@@ -203,7 +203,7 @@ async def _consumer(
                 fc = FileContent(sha256=sha256, stored_at=str(dest), size=size, encrypted=bool(enc_key))
                 db.add(fc)
                 db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(volume)))
-                db.flush()
+                db.commit()  # libera o lock antes do I/O de replicação
                 storage.ensure_replicas(sha256, dest, db)
 
             db.add(VersionFile(
