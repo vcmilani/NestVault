@@ -591,8 +591,12 @@ async function runCleanupByDate() {
       showError('cleanupdate', detail);
     } else {
       const d = await r.json();
-      showSuccess('cleanupdate', `${d.total_deleted} versão(ões) removida(s) · ${d.storage_files_removed} arquivo(s) de storage · ${fmtBytes(d.bytes_freed)} liberado(s)`);
-      loadLabels();
+      if (d.scheduled === 0) {
+        showSuccess('cleanupdate', 'Nenhuma versão elegível para exclusão.');
+      } else {
+        showSuccess('cleanupdate', `${d.scheduled} versão(ões) agendada(s) para exclusão em background.`);
+        loadLabels();
+      }
     }
   } catch(e) {
     showError('cleanupdate', 'Erro de conexão: ' + e.message);

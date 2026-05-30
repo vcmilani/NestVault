@@ -665,6 +665,7 @@ def _cleanup_orphan_contents_no_commit(db: Session, limit: int | None = None) ->
 
 
 _BG_CLEANUP_BATCH = 500
+_CLEANUP_BY_DATE_BATCH = 50  # versões por lote para evitar lock prolongado
 
 def _bg_cleanup_orphan_contents() -> None:
     """Background task: cria sua propria sessao DB e limpa conteudos orfaos em lotes."""
@@ -693,6 +694,44 @@ def _bg_auto_cleanup() -> None:
     try:
         log.info("[bg-auto-cleanup] verificando necessidade de limpeza automática")
         _auto_cleanup_if_needed(db)
+    finally:
+        db.close()
+
+
+def _bg_cleanup_by_date(version_ids: list[int], scope: str) -> None:
+    """Background task: exclui versões por data em lotes para não travar o SQLite."""
+    db = SessionLocal()
+    try:
+        total = len(version_ids)
+        total_files = 0
+        log.info(f"[bg-cleanup-by-date] iniciando: {total} versão(ões), escopo={scope}")
+
+        for i in range(0, total, _CLEANUP_BY_DATE_BATCH):
+            batch = version_ids[i:i + _CLEANUP_BY_DATE_BATCH]
+            deleted_files = db.query(VersionFile).filter(VersionFile.version_id.in_(batch)).delete(
+                synchronize_session=False
+            )
+            db.query(BackupVersion).filter(BackupVersion.id.in_(batch)).delete(
+                synchronize_session=False
+            )
+            db.commit()
+            total_files += deleted_files
+            log.debug(
+                f"[bg-cleanup-by-date] lote {i // _CLEANUP_BY_DATE_BATCH + 1}: "
+                f"{len(batch)} versão(ões), {deleted_files} VersionFile(s)"
+            )
+
+        log.info(f"[bg-cleanup-by-date] {total} versão(ões) e {total_files} VersionFile(s) removido(s)")
+
+        orphan_total = 0
+        while True:
+            removed, _ = _cleanup_orphan_contents_no_commit(db, limit=_BG_CLEANUP_BATCH)
+            if not removed:
+                break
+            db.commit()
+            orphan_total += removed
+
+        log.info(f"[bg-cleanup-by-date] concluído — {orphan_total} arquivo(s) de storage liberado(s)")
     finally:
         db.close()
 
@@ -1875,54 +1914,40 @@ def cleanup_by_date_preview(before: str, label: Optional[str] = None, db: Sessio
 
 
 @app.post("/maintenance/cleanup-by-date", dependencies=[Depends(require_api_key)])
-def cleanup_by_date(before: str, label: Optional[str] = None, db: Session = Depends(get_db)):
+def cleanup_by_date(
+    before: str,
+    background_tasks: BackgroundTasks,
+    label: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
     scope = f"label={label}" if label else "todos os labels"
-    log.info(f"[cleanup-by-date] iniciando exclusão antes de {before}, escopo={scope}")
+    log.info(f"[cleanup-by-date] agendando exclusão antes de {before}, escopo={scope}")
     cutoff = datetime.fromisoformat(before)
     latest_done = _latest_done_subquery(db)
     q = (
-        db.query(BackupVersion)
+        db.query(BackupVersion.id, BackupVersion.backup_label)
         .filter(BackupVersion.created_at < cutoff)
         .filter(BackupVersion.status != "running")
         .filter(~BackupVersion.id.in_(latest_done))
     )
     if label:
         q = q.filter(BackupVersion.backup_label == label)
-    versions = q.all()
+    rows = q.all()
 
     per_label: dict[str, int] = {}
     version_ids: list[int] = []
-    for v in versions:
-        per_label[v.backup_label] = per_label.get(v.backup_label, 0) + 1
-        version_ids.append(v.id)
+    for vid, lbl in rows:
+        per_label[lbl] = per_label.get(lbl, 0) + 1
+        version_ids.append(vid)
 
     if not version_ids:
-        log.info(f"[cleanup-by-date] nenhuma versão elegível — abortando")
-        return {"total_deleted": 0, "per_label": [], "storage_files_removed": 0, "bytes_freed": 0}
+        log.info("[cleanup-by-date] nenhuma versão elegível — abortando")
+        return {"scheduled": 0, "per_label": []}
 
-    log.info(f"[cleanup-by-date] {len(version_ids)} versão(ões) a remover: " +
+    log.info(f"[cleanup-by-date] {len(version_ids)} versão(ões) agendada(s): " +
              ", ".join(f"{lbl}={cnt}" for lbl, cnt in per_label.items()))
-
-    log.info(f"[cleanup-by-date] removendo VersionFiles de {len(version_ids)} versão(ões)…")
-    deleted_files = db.query(VersionFile).filter(VersionFile.version_id.in_(version_ids)).delete(
-        synchronize_session=False
-    )
-    log.info(f"[cleanup-by-date] {deleted_files} VersionFile(s) removido(s)")
-
-    log.info(f"[cleanup-by-date] removendo BackupVersions…")
-    db.query(BackupVersion).filter(BackupVersion.id.in_(version_ids)).delete(
-        synchronize_session=False
-    )
-    db.commit()
-    log.info(f"[cleanup-by-date] commit concluído")
-
-    log.info(f"[cleanup-by-date] iniciando limpeza de orphan contents…")
-    removed, bytes_freed = _cleanup_orphan_contents(db)
-    log.info(f"[cleanup-by-date] concluído — {len(version_ids)} versão(ões) removida(s), "
-             f"{removed} arquivo(s) de storage liberado(s), {bytes_freed} bytes")
+    background_tasks.add_task(_bg_cleanup_by_date, version_ids, scope)
     return {
-        "total_deleted": len(version_ids),
-        "per_label": [{"label": k, "deleted": cnt} for k, cnt in per_label.items()],
-        "storage_files_removed": removed,
-        "bytes_freed": bytes_freed,
+        "scheduled": len(version_ids),
+        "per_label": [{"label": k, "count": cnt} for k, cnt in per_label.items()],
     }
