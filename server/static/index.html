@@ -93,6 +93,7 @@
   .badge-failed{background:var(--red-dim);color:var(--red)}
   .badge-running{background:var(--amber-dim);color:var(--amber)}
   .badge-incomplete{background:var(--bg3);border:1px solid var(--border2);color:var(--text-dim)}
+  .badge-absorb{background:color-mix(in srgb,var(--blue) 12%,var(--bg2));color:var(--blue)}
   @keyframes spin{to{transform:rotate(360deg)}}
   .badge-running::before{content:'⟳ ';display:inline-block;animation:spin .9s linear infinite}
   tr.row-running>td:first-child{border-left:2px solid var(--amber)}
@@ -221,7 +222,7 @@
 <header>
   <div class="logo">
     <div class="logo-icon">◈</div>
-    <div><div class="logo-text">NestVault</div><div class="logo-sub">v4.6</div></div>
+    <div><div class="logo-text">NestVault</div><div class="logo-sub">v5.0</div></div>
   </div>
   <div class="header-right">
     <div class="status-dot" id="statusDot"></div>
@@ -580,7 +581,7 @@
             </label>
           </td>
           <td><span class="chevron">▶</span>${esc(v.version_key)}</td>
-          <td>${badge(v.status)}</td>
+          <td>${badge(v.status)}${v.absorbed_count > 0 ? ' <span class="badge badge-absorb" title="'+v.absorbed_count+' arquivo(s) herdados via absorve">⊕ absorve</span>' : ''}</td>
           <td class="num-cell">${v.file_count}</td>
           <td class="size-cell">${fmtSize(v.total_size_bytes)}</td>
           <td class="num-cell dim-cell">${fmtDuration(v.duration_seconds)}</td>
