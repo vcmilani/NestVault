@@ -113,6 +113,9 @@
   .badge-error{background:var(--red-dim);color:var(--red)}
   .badge-partial{background:var(--amber-dim);color:var(--amber)}
   .badge-unknown{background:var(--bg3);border:1px solid var(--border2);color:var(--text-dim)}
+  .badge-running{background:var(--amber-dim);color:var(--amber)}
+  .badge-failed{background:var(--red-dim);color:var(--red)}
+  .running-card.maintenance{border-left-color:var(--text-dim)}
 
   .loading{padding:40px;text-align:center;color:var(--text-mute);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
   .loading::after{content:'...';animation:dots 1.2s steps(4,end) infinite}
@@ -285,7 +288,8 @@
   let _tickTimer = null;
 
   function _interval(data) {
-    return (data.running_versions.length + data.running_jobs.length) > 0 ? 3000 : 10000;
+    const hasMaintRunning = (data.maintenance_jobs || []).some(j => j.status === 'running');
+    return (data.running_versions.length + data.running_jobs.length > 0 || hasMaintRunning) ? 3000 : 10000;
   }
 
   async function poll() {
@@ -318,14 +322,21 @@
 
   // Render
   function render(data) {
-    renderRunning(data.running_versions, data.running_jobs);
+    renderRunning(data.running_versions, data.running_jobs, data.maintenance_jobs || []);
     renderStorage(data.storage, data.disks);
-    renderRecent(data.recent_versions, data.recent_jobs);
+    renderRecent(data.recent_versions, data.recent_jobs, data.maintenance_jobs || []);
   }
 
-  function renderRunning(versions, jobs) {
+  const JOB_TYPE_LABELS = {
+    'cleanup-by-date': 'Limpeza por data',
+    'auto-cleanup':    'Limpeza automática',
+    'cleanup-orphans': 'Limpeza de órfãos',
+  };
+
+  function renderRunning(versions, jobs, maintJobs) {
     const el = document.getElementById('runningSection');
-    const total = versions.length + jobs.length;
+    const runningMaint = maintJobs.filter(m => m.status === 'running');
+    const total = versions.length + jobs.length + runningMaint.length;
     document.getElementById('runningCount').textContent = total ? total+' em execução' : '';
 
     if (!total) {
@@ -360,7 +371,19 @@
         </div>
       </div>`).join('');
 
-    el.innerHTML = '<div class="running-grid">'+vCards+jCards+'</div>';
+    const mCards = runningMaint.map(m => `
+      <div class="running-card maintenance">
+        <div class="running-card-type">Manutenção</div>
+        <div class="running-card-title">
+          <span class="pulse-dot"></span>${esc(JOB_TYPE_LABELS[m.job_type] || m.job_type)}
+        </div>
+        <div class="running-card-meta">
+          ${m.summary ? `<div class="running-card-row">Info: <span>${esc(m.summary)}</span></div>` : ''}
+          <div class="running-card-row">Iniciado há: <span>${elapsed(m.started_at)}</span></div>
+        </div>
+      </div>`).join('');
+
+    el.innerHTML = '<div class="running-grid">'+vCards+jCards+mCards+'</div>';
   }
 
   function renderStorage(storage, disks) {
@@ -418,8 +441,9 @@
       <div class="disks-mini">${diskCards||'<div class="empty-state">Nenhum volume configurado</div>'}</div>`;
   }
 
-  function renderRecent(versions, jobs) {
+  function renderRecent(versions, jobs, maintJobs) {
     const el = document.getElementById('recentSection');
+    const recentMaint = maintJobs.filter(m => m.status !== 'running');
 
     const vRows = versions.map(v => `
       <tr>
@@ -442,6 +466,19 @@
         <td class="td-dim" title="${esc(j.last_run_message||'')}">${esc((j.last_run_message||'').slice(0,60)||'—')}</td>
         <td class="td-dim td-nb">${fmtDate(j.last_run_at)}</td>
       </tr>`).join('');
+
+    const mRows = recentMaint.map(m => {
+      const dur = (m.finished_at && m.started_at)
+        ? fmtDuration(Math.round((new Date(m.finished_at.includes('T') ? m.finished_at : m.finished_at.replace(' ','T')).getTime() - new Date(m.started_at.includes('T') ? m.started_at : m.started_at.replace(' ','T')).getTime()) / 1000))
+        : '—';
+      return `<tr>
+        <td>${esc(JOB_TYPE_LABELS[m.job_type] || m.job_type)}</td>
+        <td>${badge(m.status)}</td>
+        <td class="td-dim">${esc(m.summary || '—')}</td>
+        <td class="td-r td-dim td-nb">${dur}</td>
+        <td class="td-dim td-nb">${fmtDate(m.finished_at)}</td>
+      </tr>`;
+    }).join('');
 
     el.innerHTML = `
       <div class="table-section">
@@ -467,6 +504,18 @@
             </tr></thead>
             <tbody>${jRows}</tbody>
           </table>` : '<div class="empty-state">Nenhum job cloud executado recentemente</div>'}
+        </div>
+      </div>
+      <div class="table-section">
+        <div class="table-sub">Manutenção</div>
+        <div class="table-wrap">
+          ${recentMaint.length ? `<table>
+            <thead><tr>
+              <th>Operação</th><th>Status</th><th>Resumo</th>
+              <th class="td-r">Duração</th><th>Concluído</th>
+            </tr></thead>
+            <tbody>${mRows}</tbody>
+          </table>` : '<div class="empty-state">Nenhuma operação de manutenção nas últimas 24h</div>'}
         </div>
       </div>`;
   }

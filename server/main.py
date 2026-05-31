@@ -1,5 +1,5 @@
 """
-NestVault  v4.5
+NestVault  v5.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -22,7 +22,7 @@ from sqlalchemy import func, select, insert, literal
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
-from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, CloudBackupJob, CloudCredential
+from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, CloudBackupJob, CloudCredential, MaintenanceJob
 import crypto
 import storage
 from auth import require_api_key, API_KEY, AUTH_ENABLED
@@ -119,7 +119,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="4.8.1", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="5.0", lifespan=lifespan)
 app.include_router(cloud_router)
 
 if STATIC_DIR.exists():
@@ -357,6 +357,14 @@ class RecentJobInfo(BaseModel):
     last_run_status: str
     last_run_message: Optional[str]
 
+class MaintenanceJobInfo(BaseModel):
+    id: int
+    job_type: str
+    status: str
+    started_at: str
+    finished_at: Optional[str]
+    summary: Optional[str]
+
 class ActivityResponse(BaseModel):
     running_versions: list[RunningVersionInfo]
     running_jobs: list[RunningJobInfo]
@@ -364,6 +372,7 @@ class ActivityResponse(BaseModel):
     disks: list[DiskVolumeInfo]
     recent_versions: list[RecentVersionInfo]
     recent_jobs: list[RecentJobInfo]
+    maintenance_jobs: list[MaintenanceJobInfo]
     server_time: str
 
 
@@ -531,16 +540,19 @@ def _backup_info(b: BackupID, db: Session) -> BackupInfo:
     )
 
 
-def _auto_cleanup_if_needed(db: Session) -> None:
+def _auto_cleanup_if_needed(db: Session) -> str | None:
+    """Retorna resumo do que foi limpo, ou None se nenhuma limpeza foi necessária."""
     factor = _target_replicas()
     ok = _volumes_with_free_space()
     if ok >= factor:
-        return
+        return None
 
     log.warning(
         f"[auto-cleanup] Apenas {ok}/{len(_healthy_volumes())} volume(s) com ≥{CLEANUP_MIN_FREE_PCT:.0f}% livre "
         f"— fator de replicação={factor} não pode ser mantido, iniciando limpeza..."
     )
+
+    total_removed = 0
 
     # 1ª prioridade: versões incomplete e failed — sempre deletáveis
     stale = (
@@ -556,10 +568,11 @@ def _auto_cleanup_if_needed(db: Session) -> None:
         db.commit()
         _cleanup_orphan_contents(db)
         ok = _volumes_with_free_space()
+        total_removed += len(stale)
         log.info(f"[auto-cleanup] {len(stale)} versão(ões) incomplete/failed removida(s) — volumes com espaço: {ok}/{len(_healthy_volumes())}")
         if ok >= factor:
             log.info(f"[auto-cleanup] Replicação pode ser mantida ({ok} volume(s) ok), encerrando.")
-            return
+            return f"{total_removed} versão(ões) removida(s) (incompletas/falhas)"
 
     # 2ª prioridade: versões done antigas (mantém sempre a mais recente por label)
     labels_with_versions = (
@@ -590,12 +603,14 @@ def _auto_cleanup_if_needed(db: Session) -> None:
         removed, _ = _cleanup_orphan_contents_no_commit(db)
         db.commit()
         ok = _volumes_with_free_space()
+        total_removed += 1
         log.info(f"[auto-cleanup] Removida {label}/{key} — {removed} arquivo(s) — volumes com espaço: {ok}/{len(_healthy_volumes())}")
         if ok >= factor:
             log.info(f"[auto-cleanup] Replicação pode ser mantida ({ok} volume(s) ok), encerrando.")
-            return
+            return f"{total_removed} versão(ões) removida(s)"
 
     log.info(f"[auto-cleanup] Concluído — todas as labels com 1 versão. Volumes com espaço: {ok}/{len(_healthy_volumes())}.")
+    return f"{total_removed} versão(ões) removida(s)"
 
 
 def _cleanup_orphan_contents(db: Session) -> tuple[int, int]:
@@ -665,6 +680,7 @@ def _cleanup_orphan_contents_no_commit(db: Session, limit: int | None = None) ->
 
 
 _BG_CLEANUP_BATCH = 500
+_CLEANUP_BY_DATE_BATCH = 50  # versões por lote para evitar lock prolongado
 
 def _bg_cleanup_orphan_contents() -> None:
     """Background task: cria sua propria sessao DB e limpa conteudos orfaos em lotes."""
@@ -672,15 +688,25 @@ def _bg_cleanup_orphan_contents() -> None:
     try:
         log.info("[bg-cleanup] iniciando limpeza de conteúdos órfãos")
         total = 0
+        bytes_total = 0
         while True:
-            removed, _ = _cleanup_orphan_contents_no_commit(db, limit=_BG_CLEANUP_BATCH)
+            removed, freed = _cleanup_orphan_contents_no_commit(db, limit=_BG_CLEANUP_BATCH)
             if not removed:
                 break
             db.commit()
             total += removed
+            bytes_total += freed
             log.debug(f"[bg-cleanup] lote: {removed} arquivo(s) removido(s) (total={total})")
         if total:
             log.info(f"[bg-cleanup] {total} arquivo(s) orfao(s) removido(s) do storage")
+            mj = MaintenanceJob(
+                job_type="cleanup-orphans",
+                status="done",
+                finished_at=datetime.now(),
+                summary=f"{total} arquivo(s) órfão(s) removido(s), {round(bytes_total/1024/1024, 1)} MB liberados",
+            )
+            db.add(mj)
+            db.commit()
         else:
             log.info("[bg-cleanup] nenhuma limpeza necessária, não havia arquivos órfãos")
     finally:
@@ -692,7 +718,79 @@ def _bg_auto_cleanup() -> None:
     db = SessionLocal()
     try:
         log.info("[bg-auto-cleanup] verificando necessidade de limpeza automática")
-        _auto_cleanup_if_needed(db)
+        summary = _auto_cleanup_if_needed(db)
+        if summary:
+            mj = MaintenanceJob(
+                job_type="auto-cleanup",
+                status="done",
+                finished_at=datetime.now(),
+                summary=summary,
+            )
+            db.add(mj)
+            db.commit()
+    finally:
+        db.close()
+
+
+def _bg_cleanup_by_date(version_ids: list[int], scope: str) -> None:
+    """Background task: exclui versões por data em lotes para não travar o SQLite."""
+    db = SessionLocal()
+    try:
+        total = len(version_ids)
+        total_files = 0
+        log.info(f"[bg-cleanup-by-date] iniciando: {total} versão(ões), escopo={scope}")
+
+        mj = MaintenanceJob(
+            job_type="cleanup-by-date",
+            status="running",
+            summary=f"Escopo: {scope} — {total} versão(ões)",
+        )
+        db.add(mj)
+        db.commit()
+        mj_id = mj.id
+
+        try:
+            for i in range(0, total, _CLEANUP_BY_DATE_BATCH):
+                batch = version_ids[i:i + _CLEANUP_BY_DATE_BATCH]
+                deleted_files = db.query(VersionFile).filter(VersionFile.version_id.in_(batch)).delete(
+                    synchronize_session=False
+                )
+                db.query(BackupVersion).filter(BackupVersion.id.in_(batch)).delete(
+                    synchronize_session=False
+                )
+                db.commit()
+                total_files += deleted_files
+                log.debug(
+                    f"[bg-cleanup-by-date] lote {i // _CLEANUP_BY_DATE_BATCH + 1}: "
+                    f"{len(batch)} versão(ões), {deleted_files} VersionFile(s)"
+                )
+
+            log.info(f"[bg-cleanup-by-date] {total} versão(ões) e {total_files} VersionFile(s) removido(s)")
+
+            orphan_total = 0
+            bytes_total = 0
+            while True:
+                removed, freed = _cleanup_orphan_contents_no_commit(db, limit=_BG_CLEANUP_BATCH)
+                if not removed:
+                    break
+                db.commit()
+                orphan_total += removed
+                bytes_total += freed
+
+            log.info(f"[bg-cleanup-by-date] concluído — {orphan_total} arquivo(s) de storage liberado(s)")
+
+            mj = db.get(MaintenanceJob, mj_id)
+            mj.status = "done"
+            mj.finished_at = datetime.now()
+            mj.summary = f"{total} versão(ões) removidas, {orphan_total} arquivo(s) liberados ({round(bytes_total/1024/1024, 1)} MB)"
+            db.commit()
+        except Exception:
+            mj = db.get(MaintenanceJob, mj_id)
+            if mj:
+                mj.status = "failed"
+                mj.finished_at = datetime.now()
+                db.commit()
+            raise
     finally:
         db.close()
 
@@ -939,6 +1037,29 @@ def get_activity(db: Session = Depends(get_db)):
         for j, c in recent_job_rows
     ]
 
+    # 7. Maintenance jobs (em execução + últimas 24h)
+    maint_rows = (
+        db.query(MaintenanceJob)
+        .filter(
+            (MaintenanceJob.status == "running") |
+            (MaintenanceJob.started_at >= cutoff)
+        )
+        .order_by(MaintenanceJob.started_at.desc())
+        .limit(20)
+        .all()
+    )
+    maintenance_job_infos = [
+        MaintenanceJobInfo(
+            id=m.id,
+            job_type=m.job_type,
+            status=m.status,
+            started_at=str(m.started_at),
+            finished_at=str(m.finished_at) if m.finished_at else None,
+            summary=m.summary,
+        )
+        for m in maint_rows
+    ]
+
     return ActivityResponse(
         running_versions=running_version_infos,
         running_jobs=running_job_infos,
@@ -946,6 +1067,7 @@ def get_activity(db: Session = Depends(get_db)):
         disks=disks_list,
         recent_versions=recent_version_infos,
         recent_jobs=recent_job_infos,
+        maintenance_jobs=maintenance_job_infos,
         server_time=datetime.now().isoformat(),
     )
 
@@ -1840,3 +1962,75 @@ def cleanup_versions(label: str, req: CleanupRequest, db: Session = Depends(get_
         versions_removed=keys_removed,
         storage_files_removed=orphans_removed,
     )
+
+
+# -- Cleanup por data ---------------------------------------------------------
+def _latest_done_subquery(db: Session):
+    """Subquery com os IDs da versão done mais recente de cada label."""
+    return (
+        db.query(func.max(BackupVersion.id))
+        .filter(BackupVersion.status == "done")
+        .group_by(BackupVersion.backup_label)
+        .subquery()
+    )
+
+
+@app.get("/maintenance/cleanup-by-date/preview", dependencies=[Depends(require_api_key)])
+def cleanup_by_date_preview(before: str, label: Optional[str] = None, db: Session = Depends(get_db)):
+    scope = f"label={label}" if label else "todos os labels"
+    log.info(f"[cleanup-by-date/preview] consultando antes de {before}, escopo={scope}")
+    cutoff = datetime.fromisoformat(before)
+    latest_done = _latest_done_subquery(db)
+    q = (
+        db.query(BackupVersion.backup_label, func.count(BackupVersion.id))
+        .filter(BackupVersion.created_at < cutoff)
+        .filter(BackupVersion.status != "running")
+        .filter(~BackupVersion.id.in_(latest_done))
+    )
+    if label:
+        q = q.filter(BackupVersion.backup_label == label)
+    rows = q.group_by(BackupVersion.backup_label).all()
+    total = sum(r[1] for r in rows)
+    log.info(f"[cleanup-by-date/preview] {total} versão(ões) elegível(is): " +
+             ", ".join(f"{r[0]}={r[1]}" for r in rows) if rows else "[cleanup-by-date/preview] nenhuma versão elegível")
+    return {"total": total, "per_label": [{"label": r[0], "count": r[1]} for r in rows]}
+
+
+@app.post("/maintenance/cleanup-by-date", dependencies=[Depends(require_api_key)])
+def cleanup_by_date(
+    before: str,
+    background_tasks: BackgroundTasks,
+    label: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    scope = f"label={label}" if label else "todos os labels"
+    log.info(f"[cleanup-by-date] agendando exclusão antes de {before}, escopo={scope}")
+    cutoff = datetime.fromisoformat(before)
+    latest_done = _latest_done_subquery(db)
+    q = (
+        db.query(BackupVersion.id, BackupVersion.backup_label)
+        .filter(BackupVersion.created_at < cutoff)
+        .filter(BackupVersion.status != "running")
+        .filter(~BackupVersion.id.in_(latest_done))
+    )
+    if label:
+        q = q.filter(BackupVersion.backup_label == label)
+    rows = q.all()
+
+    per_label: dict[str, int] = {}
+    version_ids: list[int] = []
+    for vid, lbl in rows:
+        per_label[lbl] = per_label.get(lbl, 0) + 1
+        version_ids.append(vid)
+
+    if not version_ids:
+        log.info("[cleanup-by-date] nenhuma versão elegível — abortando")
+        return {"scheduled": 0, "per_label": []}
+
+    log.info(f"[cleanup-by-date] {len(version_ids)} versão(ões) agendada(s): " +
+             ", ".join(f"{lbl}={cnt}" for lbl, cnt in per_label.items()))
+    background_tasks.add_task(_bg_cleanup_by_date, version_ids, scope)
+    return {
+        "scheduled": len(version_ids),
+        "per_label": [{"label": k, "count": cnt} for k, cnt in per_label.items()],
+    }

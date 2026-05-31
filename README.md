@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v4.8.0`
+# 🗄️ NestVault  `v5.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -6,6 +6,8 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v5.0** — limpeza de versões por data: nova opção na tela de manutenção para remover permanentemente versões criadas antes de uma data escolhida. Suporta escopo global (todos os labels) ou por label específico via dropdown. Exibe preview detalhado por label antes de executar, mostrando quantas versões cada backup perderá. A versão `done` mais recente de cada label é **sempre preservada** — mesmo que seja anterior à data de corte. Versões em status `running` nunca são removidas. Dois novos endpoints: `GET /maintenance/cleanup-by-date/preview` (preview sem efeito colateral) e `POST /maintenance/cleanup-by-date` (execução). Prompt interativo de API Key no cliente Python: ao receber erro 401 (chave ausente ou inválida), o cliente solicita a chave via terminal (`getpass`) e retenta automaticamente a operação sem necessidade de reiniciar o comando.
+>
 > **v4.8.0** — `restore --exclude`: o cliente passou a aceitar `--exclude` no comando `restore`, com o mesmo comportamento do `backup` — filtra arquivos cujo caminho relativo contenha o componente de diretório especificado. Client e server agora compartilham o mesmo número de versão.
 >
 > **v4.7.0** — performance e observabilidade: N+1 queries eliminadas em `cleanup_orphans` e `encrypt_existing` (substituídas por `.in_()` batch); replicação paralela entre volumes via `ThreadPoolExecutor` em `storage.py`; novos índices compostos em `backup_versions` e `cloud_backup_jobs`; endpoint `GET /backups/disk-summary` permite ao dashboard buscar espaço de todos os discos em uma chamada em vez de N paralelas; debounce de 250 ms no filtro do Explorer evita queries redundantes. Cobertura de logs: todos os uploads agora logam `[upload] label/version ← path — modo sha256… (MB)` com contexto de label e versão; criação e finalização de versões logam `[versao] label/key criada` e `[versao] label/key → status` (inclusive erros/incomplete antes silenciosos); jobs cloud com ≥ 10 arquivos logam progresso a cada ~25% em `[cloud-runner] [i/total] path`.
@@ -438,6 +440,8 @@ export BACKUP_API_KEY="uma-chave-secreta-forte-aqui"
 ```
 
 > Se o servidor estiver sem autenticação, basta omitir a variável.
+>
+> **v5.0 — prompt interativo:** se `BACKUP_API_KEY` não estiver definida ou a chave estiver errada, o cliente detecta o erro 401 e solicita a chave via terminal antes de retentar automaticamente. A operação original é executada sem precisar reiniciar o comando.
 
 ---
 
@@ -1071,6 +1075,7 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
   - **Reconciliar Replicação** — remove cópias excedentes e preenche faltantes em uma só operação
   - **Cifrar Existentes** — cifra arquivos não criptografados (requer confirmar digitando `CIFRAR` — irreversível)
   - **Limpar Versões Antigas** — mantém apenas N versões mais recentes de um label escolhido
+  - **Excluir Versões por Data** *(v5.0)* — exibe preview por label de quantas versões serão removidas antes de uma data; a versão `done` mais recente de cada label é sempre preservada
   - **Excluir Label Completo** — exclui um label e todas as suas versões (requer digitar o nome do label)
 - **Discos** — página `/disks` com painel de volumes: espaço total/livre/usado, arquivos físicos por volume e status (ok/degraded)
 - **Explorer de arquivos** — navegação e download de arquivos de uma versão específica via `/explorer`
@@ -1094,6 +1099,15 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 | **`main.py` — logs de upload** | Todos os 4 caminhos de upload (`nova`, `nova cifrada`, `dedup`, `registrada`) logam `[upload] label/version_key ← path — modo sha256… (MB)` com contexto de label e versão — antes era `[integrity]` sem correlação |
 | **`main.py` — logs de versão** | `create_version` loga `[versao] label/key criada`; `finish_version` loga `[versao] label/key → status` para todos os status (inclusive `error`/`incomplete`, antes silenciosos) |
 | **`cloud/runner.py` — logs de progresso** | `_producer` loga `[cloud-runner] [i/total] path` a cada ~25% do total para jobs com ≥ 10 arquivos |
+
+### v5.0
+
+| Componente | Mudança |
+|---|---|
+| **`main.py` — `GET /maintenance/cleanup-by-date/preview`** | Novo endpoint de preview: retorna contagem de versões elegíveis para remoção agrupadas por label, filtradas por `before` (data de corte) e `label` opcional. Versões `running` e a versão `done` mais recente de cada label são excluídas do conjunto via subquery `max(id) GROUP BY backup_label` |
+| **`main.py` — `POST /maintenance/cleanup-by-date`** | Novo endpoint de execução: deleta versões elegíveis (mesmas regras do preview), remove `VersionFile`s explicitamente (SQLite sem FK cascade por padrão), executa `_cleanup_orphan_contents()` e retorna estatísticas por label |
+| **`maintenance.html` — card "Excluir Versões por Data"** | Novo card na grade de manutenção com dropdown de label (Todos os labels / label específico) e input de data; preview carrega automaticamente ao mudar qualquer campo e exibe tabela por label com total em vermelho; botão habilitado apenas quando `total > 0`; após execução atualiza preview automaticamente |
+| **`nestvault.py` — `_AuthSession` / `_prompt_api_key`** | Subclasse de `requests.Session` que intercepta respostas 401: solicita a API Key via `getpass.getpass()` (sem eco no terminal) e retenta a requisição original com a nova chave — transparente para todos os comandos sem nenhuma alteração nos call sites |
 
 ### v4.8.0
 
@@ -1375,6 +1389,8 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 | `POST` | `/maintenance/rereplicate` | Re-replica conteúdos com menos cópias que `REPLICATION_FACTOR` |
 | `POST` | `/maintenance/reconcile-replication` | Reconcilia replicação: remove cópias excedentes e preenche faltantes conforme `REPLICATION_FACTOR` |
 | `POST` | `/maintenance/encrypt-existing` | Cifra arquivos físicos ainda não criptografados (requer `ENCRYPTION_ENABLED=true`) |
+| `GET` | `/maintenance/cleanup-by-date/preview` | Preview de versões elegíveis para remoção antes de uma data (`?before=YYYY-MM-DD[&label=X]`) |
+| `POST` | `/maintenance/cleanup-by-date` | Remove versões anteriores a uma data; preserva última versão `done` por label e versões `running` (`?before=YYYY-MM-DD[&label=X]`) |
 
 ### Cloud Backup *(v4.0)*
 
@@ -1752,6 +1768,8 @@ A resposta de `/check/batch` é `list[CheckBatchResultItem]` na mesma ordem dos 
 | `POST /maintenance/rereplicate` | — | `RereplicateResponse` |
 | `POST /maintenance/reconcile-replication` | — | `ReconcileResponse` |
 | `POST /maintenance/encrypt-existing` | — | `EncryptExistingResponse` |
+| `GET /maintenance/cleanup-by-date/preview` | query: `before`, `label` (opcional) | `{ total, per_label: [{label, count}] }` |
+| `POST /maintenance/cleanup-by-date` | query: `before`, `label` (opcional) | `{ total_deleted, per_label: [{label, deleted}], storage_files_removed, bytes_freed }` |
 
 ---
 

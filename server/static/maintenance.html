@@ -98,6 +98,17 @@
   .login-btn{width:100%;background:var(--amber);border:none;color:var(--bg);font-family:var(--mono);font-size:11px;font-weight:500;letter-spacing:.08em;padding:10px;cursor:pointer;text-transform:uppercase}
   .login-btn:hover{opacity:.9}
 
+  /* excluir por data — preview */
+  .date-preview-wrap:empty{display:none}
+  .date-preview-wrap{margin-bottom:12px;font-size:10px;line-height:1.8}
+  .date-preview-loading{color:var(--text-mute);letter-spacing:.06em;padding:6px 0}
+  .date-preview-empty{color:var(--text-mute);letter-spacing:.05em;padding:6px 0}
+  .date-preview-table{border:1px solid var(--border);background:var(--bg3);padding:10px 14px}
+  .date-preview-row{display:flex;justify-content:space-between;gap:12px;padding:2px 0}
+  .date-preview-lbl{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .date-preview-cnt{color:var(--amber);white-space:nowrap;flex-shrink:0}
+  .date-preview-total{border-top:1px solid var(--border);margin-top:6px;padding-top:6px;color:var(--red);display:flex;justify-content:space-between;font-weight:500}
+
   @media(max-width:768px){
     header{padding:0 16px}
     main{padding:16px}
@@ -299,6 +310,39 @@
       </div>
     </div>
 
+
+    <!-- Excluir Versões por Data -->
+    <div class="op-card risk-high" style="animation-delay:.35s">
+      <div class="op-header">
+        <div class="op-title-wrap">
+          <span class="op-icon">⊖</span>
+          <div>
+            <div class="op-name">Excluir Versões por Data</div>
+            <div class="op-endpoint">POST /maintenance/cleanup-by-date</div>
+          </div>
+        </div>
+        <span class="risk-badge high">Alto risco</span>
+      </div>
+      <div class="op-desc">Remove permanentemente versões criadas antes de uma data. A versão <em>done</em> mais recente de cada label é sempre preservada.</div>
+      <div class="op-form">
+        <div class="form-row">
+          <span class="form-label">Label</span>
+          <select class="op-select" id="cleanupdate-label" onchange="loadCleanupByDatePreview()">
+            <option value="">Todos os labels</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Antes de</span>
+          <input type="date" class="op-input op-input-wide" id="cleanupdate-before" onchange="loadCleanupByDatePreview()">
+        </div>
+      </div>
+      <div class="date-preview-wrap" id="cleanupdate-preview"></div>
+      <div class="op-footer">
+        <button class="run-btn danger" id="btn-cleanupdate" onclick="runCleanupByDate()" disabled>✕ Excluir versões</button>
+        <div class="op-result" id="result-cleanupdate"></div>
+      </div>
+    </div>
+
   </div>
 </main>
 
@@ -462,11 +506,16 @@ async function loadLabels() {
     s.innerHTML = '<option value="">Carregando…</option>';
     s.disabled = true;
   });
+  const cdl = document.getElementById('cleanupdate-label');
+  cdl.innerHTML = '<option value="">Carregando…</option>';
+  cdl.disabled = true;
 
   try {
     const r = await fetch('/backups', {headers: H()});
     if (r.status === 401) {
       ids.forEach(id => { const s = document.getElementById(id); s.disabled = false; s.innerHTML = '<option value="">— selecione —</option>'; });
+      cdl.disabled = false;
+      cdl.innerHTML = '<option value="">Todos os labels</option>';
       showLogin('API Key inválida.');
       return;
     }
@@ -478,9 +527,82 @@ async function loadLabels() {
         return `<option value="${b.label}">${b.label} (${ver})</option>`;
       }).join('');
     ids.forEach(id => { const s = document.getElementById(id); s.disabled = false; s.innerHTML = opts; });
+    cdl.disabled = false;
+    cdl.innerHTML = '<option value="">Todos os labels</option>' +
+      backups.map(b => `<option value="${b.label}">${b.label}</option>`).join('');
   } catch(e) {
     ids.forEach(id => { const s = document.getElementById(id); s.disabled = false; s.innerHTML = '<option value="">Erro ao carregar</option>'; });
+    cdl.disabled = false;
+    cdl.innerHTML = '<option value="">Todos os labels</option>';
   }
+}
+
+// -- Excluir Versões por Data -------------------------------------------------
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function loadCleanupByDatePreview() {
+  const before = document.getElementById('cleanupdate-before').value;
+  const label  = document.getElementById('cleanupdate-label').value;
+  const wrap   = document.getElementById('cleanupdate-preview');
+  const btn    = document.getElementById('btn-cleanupdate');
+
+  btn.disabled = true;
+  if (!before) { wrap.innerHTML = ''; return; }
+
+  wrap.innerHTML = '<div class="date-preview-loading">↻ Consultando…</div>';
+  try {
+    const qs = `before=${encodeURIComponent(before)}` + (label ? `&label=${encodeURIComponent(label)}` : '');
+    const r = await fetch(`/maintenance/cleanup-by-date/preview?${qs}`, {headers: H()});
+    if (r.status === 401) { showLogin('API Key inválida.'); wrap.innerHTML = ''; return; }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    if (d.total === 0) {
+      wrap.innerHTML = '<div class="date-preview-empty">Nenhuma versão a remover para a data selecionada.</div>';
+      return;
+    }
+    const rows = d.per_label.map(row =>
+      `<div class="date-preview-row"><span class="date-preview-lbl">${esc(row.label)}</span><span class="date-preview-cnt">${row.count} versão(ões)</span></div>`
+    ).join('');
+    wrap.innerHTML = `<div class="date-preview-table">${rows}<div class="date-preview-total"><span>Total</span><span>${d.total} versão(ões) a excluir</span></div></div>`;
+    btn.disabled = false;
+  } catch(e) {
+    wrap.innerHTML = `<div class="date-preview-empty" style="color:var(--red)">Erro: ${esc(e.message)}</div>`;
+  }
+}
+
+async function runCleanupByDate() {
+  const before = document.getElementById('cleanupdate-before').value;
+  const label  = document.getElementById('cleanupdate-label').value;
+  if (!before) return;
+
+  const scopeMsg = label ? `label "${label}"` : 'todos os labels';
+  if (!confirm(`Excluir permanentemente todas as versões anteriores a ${before} em ${scopeMsg}?\n\nA versão done mais recente de cada label será preservada.\n\nEssa ação é IRREVERSÍVEL.`)) return;
+
+  setRunning('cleanupdate', true, '✕ Excluir versões');
+  try {
+    const qs = `before=${encodeURIComponent(before)}` + (label ? `&label=${encodeURIComponent(label)}` : '');
+    const r = await apiCall('POST', `/maintenance/cleanup-by-date?${qs}`);
+    if (r.status === 401) { showLogin('API Key inválida.'); setRunning('cleanupdate', false, '✕ Excluir versões'); return; }
+    if (!r.ok) {
+      let detail = `HTTP ${r.status}`;
+      try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}
+      showError('cleanupdate', detail);
+    } else {
+      const d = await r.json();
+      if (d.scheduled === 0) {
+        showSuccess('cleanupdate', 'Nenhuma versão elegível para exclusão.');
+      } else {
+        showSuccess('cleanupdate', `${d.scheduled} versão(ões) agendada(s) para exclusão em background.`);
+        loadLabels();
+      }
+    }
+  } catch(e) {
+    showError('cleanupdate', 'Erro de conexão: ' + e.message);
+  }
+  setRunning('cleanupdate', false, '✕ Excluir versões');
+  loadCleanupByDatePreview();
 }
 
 // -- Auth / theme -------------------------------------------------------------
@@ -523,6 +645,7 @@ function updateThemeBtn() {
 
 // init
 updateThemeBtn();
+document.getElementById('cleanupdate-before').max = new Date().toISOString().split('T')[0];
 if (!API_KEY) { showLogin(''); }
 else          { loadLabels(); }
 </script>
