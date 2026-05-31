@@ -66,12 +66,13 @@ class BackupVersion(Base):
         Index("idx_version_finished", "finished_at"),
     )
 
-    id           = Column(Integer, primary_key=True)
-    backup_label = Column(String, ForeignKey("backup_ids.label"), nullable=False)
-    version_key  = Column(String, nullable=False)
-    created_at   = Column(DateTime, default=_utcnow)
-    finished_at  = Column(DateTime, nullable=True)
-    status       = Column(String, default="running")
+    id             = Column(Integer, primary_key=True)
+    backup_label   = Column(String, ForeignKey("backup_ids.label"), nullable=False)
+    version_key    = Column(String, nullable=False)
+    created_at     = Column(DateTime, default=_utcnow)
+    finished_at    = Column(DateTime, nullable=True)
+    status         = Column(String, default="running")
+    absorbed_count = Column(Integer, nullable=False, default=0, server_default="0")
 
     backup = relationship("BackupID", back_populates="versions")
     files  = relationship("VersionFile", back_populates="version", lazy="dynamic",
@@ -235,6 +236,17 @@ def init_db():
             ))
             conn.commit()
             _log_init.info("[db-migrate] Coluna file_contents.encrypted adicionada")
+        except Exception as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+
+        # Migração: adiciona absorbed_count em bancos existentes
+        try:
+            conn.execute(text(
+                "ALTER TABLE backup_versions ADD COLUMN absorbed_count INTEGER NOT NULL DEFAULT 0"
+            ))
+            conn.commit()
+            _log_init.info("[db-migrate] Coluna backup_versions.absorbed_count adicionada")
         except Exception as e:
             if "duplicate column" not in str(e).lower():
                 raise
