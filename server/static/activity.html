@@ -114,6 +114,7 @@
   .badge-partial{background:var(--amber-dim);color:var(--amber)}
   .badge-unknown{background:var(--bg3);border:1px solid var(--border2);color:var(--text-dim)}
   .badge-running{background:var(--amber-dim);color:var(--amber)}
+  .badge-absorb{background:color-mix(in srgb,var(--blue) 12%,var(--bg2));color:var(--blue)}
   .badge-failed{background:var(--red-dim);color:var(--red)}
   .running-card.maintenance{border-left-color:var(--text-dim)}
 
@@ -449,7 +450,7 @@
       <tr>
         <td>${esc(v.backup_label)}</td>
         <td class="td-dim td-nb">${esc(v.version_key.slice(0,19))}</td>
-        <td>${badge(v.status)}</td>
+        <td>${badge(v.status)}${v.absorbed_count > 0 ? ' <span class="badge badge-absorb" title="'+v.absorbed_count+' arquivo(s) herdados via absorve">⊕ absorve</span>' : ''}</td>
         <td class="td-r td-num">${fmtSize(v.total_size_bytes)}</td>
         <td class="td-r td-dim">${v.file_count.toLocaleString('pt-BR')}</td>
         <td class="td-r td-dim td-nb">${fmtDuration(v.duration_seconds)}</td>

@@ -347,6 +347,7 @@ class RecentVersionInfo(BaseModel):
     duration_seconds: Optional[float]
     file_count: int
     total_size_bytes: int
+    absorbed_count: int = 0
 
 class RecentJobInfo(BaseModel):
     id: int
@@ -1014,6 +1015,7 @@ def get_activity(db: Session = Depends(get_db)):
             status=v.status, created_at=str(v.created_at),
             finished_at=str(v.finished_at) if v.finished_at else None,
             duration_seconds=duration, file_count=fc, total_size_bytes=sz,
+            absorbed_count=v.absorbed_count or 0,
         ))
 
     # 6. Jobs cloud recentes (não rodando, últimos 10)
