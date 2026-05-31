@@ -1,5 +1,5 @@
 """
-NestVault  v4.8.1
+NestVault  v5.0
 Cada execucao de backup cria uma nova versao dentro do label.
 Conteudo identico e armazenado uma unica vez no servidor (deduplicacao por sha256).
 
@@ -10,9 +10,22 @@ Uso:
     nestvault restore /tmp/r --label "docs" --version "2026-04-25T10:42:31" --exclude cache node_modules
     nestvault cleanup --label "docs" --keep 5
     nestvault backups --server http://192.168.1.100:8000
+
+Changelog:
+  v5.0  Prompt automático de API Key em erros 401 — ao receber autenticação
+        negada, o cliente solicita a chave interativamente e retenta a
+        operação sem necessidade de re-executar o comando.
+  v4.8  Limpeza de versões por data (cleanup-by-date) com execução em background
+        e lotes para evitar database is locked; operações de manutenção
+        aparecem na tela de atividades da interface web.
+  v4.7  Hamburger menu e responsividade mobile em todas as páginas da UI.
+  v4.6  Modo acumulativo (--accumulate): herda arquivos ausentes da versão
+        anterior via absorb, ideal para galerias e acervos parciais.
+  v4.5  Suporte a criptografia de arquivos existentes (encrypt-existing) e
+        reconciliação de replicação (reconcile-replication).
 """
 
-VERSION = "v4.8.1"
+VERSION = "v5.0"
 
 import os, sys, hashlib, argparse, base64, socket, threading
 from pathlib import Path
@@ -112,6 +125,15 @@ def _load_api_key() -> str:
 
 API_KEY = _load_api_key()
 IGNORED_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
+
+
+def _prompt_api_key():
+    global API_KEY
+    import getpass
+    _warn("Autenticação necessária — informe a API Key.")
+    key = getpass.getpass("  API Key: ").strip()
+    if key:
+        API_KEY = key
 CHUNK_SIZE = 1024 * 1024  # 1 MB
 
 
@@ -163,7 +185,18 @@ def _is_excluded(fp: Path, root: Path, ex: str) -> bool:
 
 
 # -- HTTP session -------------------------------------------------------------
-_session = requests.Session()
+class _AuthSession(requests.Session):
+    def request(self, method, url, **kwargs):
+        r = super().request(method, url, **kwargs)
+        if r.status_code == 401:
+            _prompt_api_key()
+            if 'headers' in kwargs and API_KEY:
+                kwargs['headers']['X-API-Key'] = API_KEY
+            r = super().request(method, url, **kwargs)
+        return r
+
+
+_session = _AuthSession()
 _session.headers.update({"Connection": "keep-alive"})
 
 

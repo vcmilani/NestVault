@@ -6,7 +6,7 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
-> **v5.0** — limpeza de versões por data: nova opção na tela de manutenção para remover permanentemente versões criadas antes de uma data escolhida. Suporta escopo global (todos os labels) ou por label específico via dropdown. Exibe preview detalhado por label antes de executar, mostrando quantas versões cada backup perderá. A versão `done` mais recente de cada label é **sempre preservada** — mesmo que seja anterior à data de corte. Versões em status `running` nunca são removidas. Dois novos endpoints: `GET /maintenance/cleanup-by-date/preview` (preview sem efeito colateral) e `POST /maintenance/cleanup-by-date` (execução).
+> **v5.0** — limpeza de versões por data: nova opção na tela de manutenção para remover permanentemente versões criadas antes de uma data escolhida. Suporta escopo global (todos os labels) ou por label específico via dropdown. Exibe preview detalhado por label antes de executar, mostrando quantas versões cada backup perderá. A versão `done` mais recente de cada label é **sempre preservada** — mesmo que seja anterior à data de corte. Versões em status `running` nunca são removidas. Dois novos endpoints: `GET /maintenance/cleanup-by-date/preview` (preview sem efeito colateral) e `POST /maintenance/cleanup-by-date` (execução). Prompt interativo de API Key no cliente Python: ao receber erro 401 (chave ausente ou inválida), o cliente solicita a chave via terminal (`getpass`) e retenta automaticamente a operação sem necessidade de reiniciar o comando.
 >
 > **v4.8.0** — `restore --exclude`: o cliente passou a aceitar `--exclude` no comando `restore`, com o mesmo comportamento do `backup` — filtra arquivos cujo caminho relativo contenha o componente de diretório especificado. Client e server agora compartilham o mesmo número de versão.
 >
@@ -440,6 +440,8 @@ export BACKUP_API_KEY="uma-chave-secreta-forte-aqui"
 ```
 
 > Se o servidor estiver sem autenticação, basta omitir a variável.
+>
+> **v5.0 — prompt interativo:** se `BACKUP_API_KEY` não estiver definida ou a chave estiver errada, o cliente detecta o erro 401 e solicita a chave via terminal antes de retentar automaticamente. A operação original é executada sem precisar reiniciar o comando.
 
 ---
 
@@ -1105,6 +1107,7 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 | **`main.py` — `GET /maintenance/cleanup-by-date/preview`** | Novo endpoint de preview: retorna contagem de versões elegíveis para remoção agrupadas por label, filtradas por `before` (data de corte) e `label` opcional. Versões `running` e a versão `done` mais recente de cada label são excluídas do conjunto via subquery `max(id) GROUP BY backup_label` |
 | **`main.py` — `POST /maintenance/cleanup-by-date`** | Novo endpoint de execução: deleta versões elegíveis (mesmas regras do preview), remove `VersionFile`s explicitamente (SQLite sem FK cascade por padrão), executa `_cleanup_orphan_contents()` e retorna estatísticas por label |
 | **`maintenance.html` — card "Excluir Versões por Data"** | Novo card na grade de manutenção com dropdown de label (Todos os labels / label específico) e input de data; preview carrega automaticamente ao mudar qualquer campo e exibe tabela por label com total em vermelho; botão habilitado apenas quando `total > 0`; após execução atualiza preview automaticamente |
+| **`nestvault.py` — `_AuthSession` / `_prompt_api_key`** | Subclasse de `requests.Session` que intercepta respostas 401: solicita a API Key via `getpass.getpass()` (sem eco no terminal) e retenta a requisição original com a nova chave — transparente para todos os comandos sem nenhuma alteração nos call sites |
 
 ### v4.8.0
 
