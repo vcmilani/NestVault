@@ -42,7 +42,6 @@ STORAGE_DIR          = storage.STORAGE_DIR
 ENCRYPTION_ENABLED   = storage.ENCRYPTION_ENABLED
 CHUNK_SIZE           = storage.CHUNK_SIZE
 REPLICATION_FACTOR   = storage.REPLICATION_FACTOR
-CLEANUP_MIN_FREE_PCT = storage.CLEANUP_MIN_FREE_PCT
 STORAGE_FALLBACK_THRESHOLD_GB = storage.STORAGE_FALLBACK_THRESHOLD_GB
 
 STATIC_DIR   = Path(__file__).parent / "static"
@@ -551,7 +550,7 @@ def _auto_cleanup_if_needed(db: Session) -> str | None:
         return None
 
     log.warning(
-        f"[auto-cleanup] Apenas {ok}/{len(_healthy_volumes())} volume(s) com ≥{CLEANUP_MIN_FREE_PCT:.0f}% livre "
+        f"[auto-cleanup] Apenas {ok}/{len(_healthy_volumes())} volume(s) com ≥{STORAGE_FALLBACK_THRESHOLD_GB:.0f} GB livre "
         f"— fator de replicação={factor} não pode ser mantido, iniciando limpeza..."
     )
 

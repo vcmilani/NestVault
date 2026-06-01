@@ -23,8 +23,7 @@ encryption_key: bytes | None = None  # set by main.py lifespan: storage.encrypti
 
 CHUNK_SIZE = 1024 * 1024
 REPLICATION_FACTOR = int(os.getenv("REPLICATION_FACTOR", "1"))
-CLEANUP_MIN_FREE_PCT = float(os.getenv("STORAGE_MIN_FREE_PCT", "5.0"))
-# Limiar absoluto (GB) abaixo do qual um volume é considerado esgotado e o próximo da fila assume.
+# Limiar absoluto (GB) abaixo do qual um volume é considerado esgotado para escrita e para o auto-cleanup.
 STORAGE_FALLBACK_THRESHOLD_GB = float(os.getenv("STORAGE_FALLBACK_THRESHOLD_GB", "10.0"))
 
 # -- Volume health ------------------------------------------------------------
@@ -198,7 +197,7 @@ def volumes_with_free_space() -> int:
         if v in _degraded_volumes:
             continue
         u = safe_disk_usage(v)
-        if u and u.free / u.total * 100 >= CLEANUP_MIN_FREE_PCT:
+        if u and u.free >= STORAGE_FALLBACK_THRESHOLD_GB * 1024 ** 3:
             count += 1
     return count
 
