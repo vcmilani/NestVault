@@ -25,9 +25,10 @@ def test_pick_volume_picks_first_declared(tmp_path):
     v2 = tmp_path / "v2"
     v1.mkdir(); v2.mkdir()
 
+    GB = 1024 ** 3
     def fake_usage(path):
         # v1 tem menos espaço livre que v2, mas v1 é declarado primeiro → deve ser escolhido
-        return DiskUsage(total=1000, used=200, free=800) if path == v1 else DiskUsage(total=1000, used=100, free=900)
+        return DiskUsage(total=100*GB, used=80*GB, free=20*GB) if path == v1 else DiskUsage(total=100*GB, used=70*GB, free=30*GB)
 
     with patch.object(storage, "STORAGE_VOLUMES", [v1, v2]):
         with patch("storage.shutil.disk_usage", side_effect=fake_usage):
@@ -40,12 +41,13 @@ def test_pick_volume_priority_cascade(tmp_path):
     v2 = tmp_path / "v2"
     v1.mkdir(); v2.mkdir()
 
+    GB = 1024 ** 3
     def fake_usage(path):
-        # v1 com 2% livre (abaixo do threshold padrão de 5%) → esgotado
-        # v2 com 50% livre → elegível
+        # v1 com 5 GB livre (abaixo do threshold de 10 GB) → esgotado
+        # v2 com 20 GB livre (acima do threshold) → elegível
         if path == v1:
-            return DiskUsage(total=1000, used=980, free=20)
-        return DiskUsage(total=1000, used=500, free=500)
+            return DiskUsage(total=100*GB, used=95*GB, free=5*GB)
+        return DiskUsage(total=100*GB, used=80*GB, free=20*GB)
 
     with patch.object(storage, "STORAGE_VOLUMES", [v1, v2]):
         with patch("storage.shutil.disk_usage", side_effect=fake_usage):
@@ -58,12 +60,13 @@ def test_pick_volume_fallback_disk_skipped_when_primary_available(tmp_path):
     fallback = tmp_path / "fallback"
     primary.mkdir(); fallback.mkdir()
 
+    GB = 1024 ** 3
     def fake_usage(path):
-        # primary tem 30% livre; fallback tem 90% livre (muito mais espaço)
+        # primary tem 20 GB livre (acima do threshold de 10 GB); fallback tem 90 GB
         # mas fallback só deve ser usado se primary esgotar
         if path == primary:
-            return DiskUsage(total=1000, used=700, free=300)
-        return DiskUsage(total=10000, used=1000, free=9000)
+            return DiskUsage(total=100*GB, used=80*GB, free=20*GB)
+        return DiskUsage(total=200*GB, used=110*GB, free=90*GB)
 
     with patch.object(storage, "STORAGE_VOLUMES", [primary, fallback]):
         with patch("storage.shutil.disk_usage", side_effect=fake_usage):
@@ -76,11 +79,12 @@ def test_pick_volume_all_exhausted_fallback_to_most_free(tmp_path):
     v2 = tmp_path / "v2"
     v1.mkdir(); v2.mkdir()
 
+    GB = 1024 ** 3
     def fake_usage(path):
-        # Ambos abaixo do threshold (3% e 4%)
+        # Ambos abaixo do threshold de 10 GB (3 GB e 5 GB)
         if path == v1:
-            return DiskUsage(total=1000, used=970, free=30)
-        return DiskUsage(total=1000, used=960, free=40)
+            return DiskUsage(total=100*GB, used=97*GB, free=3*GB)
+        return DiskUsage(total=100*GB, used=95*GB, free=5*GB)
 
     with patch.object(storage, "STORAGE_VOLUMES", [v1, v2]):
         with patch("storage.shutil.disk_usage", side_effect=fake_usage):

@@ -24,9 +24,8 @@ encryption_key: bytes | None = None  # set by main.py lifespan: storage.encrypti
 CHUNK_SIZE = 1024 * 1024
 REPLICATION_FACTOR = int(os.getenv("REPLICATION_FACTOR", "1"))
 CLEANUP_MIN_FREE_PCT = float(os.getenv("STORAGE_MIN_FREE_PCT", "5.0"))
-# Limiar abaixo do qual um volume é considerado esgotado e o próximo da fila assume.
-# Usa o mesmo padrão de CLEANUP_MIN_FREE_PCT (5%) mas pode ser configurado independentemente.
-STORAGE_FALLBACK_THRESHOLD_PCT = float(os.getenv("STORAGE_FALLBACK_THRESHOLD_PCT", str(CLEANUP_MIN_FREE_PCT)))
+# Limiar absoluto (GB) abaixo do qual um volume é considerado esgotado e o próximo da fila assume.
+STORAGE_FALLBACK_THRESHOLD_GB = float(os.getenv("STORAGE_FALLBACK_THRESHOLD_GB", "10.0"))
 
 # -- Volume health ------------------------------------------------------------
 _degraded_volumes: set[Path] = set()
@@ -70,7 +69,7 @@ def pick_volume() -> Path:
         if vol not in hvols_set:
             continue
         usage = safe_disk_usage(vol)
-        if usage and (usage.free / usage.total * 100) > STORAGE_FALLBACK_THRESHOLD_PCT:
+        if usage and usage.free > STORAGE_FALLBACK_THRESHOLD_GB * 1024 ** 3:
             return vol
 
     # Todos os volumes estão esgotados — último recurso: o com mais espaço livre.
