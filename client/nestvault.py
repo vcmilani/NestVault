@@ -1,5 +1,5 @@
 """
-NestVault  v5.0
+NestVault  v5.1.0
 Cada execucao de backup cria uma nova versao dentro do label.
 Conteudo identico e armazenado uma unica vez no servidor (deduplicacao por sha256).
 
@@ -12,6 +12,9 @@ Uso:
     nestvault backups --server http://192.168.1.100:8000
 
 Changelog:
+  v5.1.0  Opção de reconectar conta cloud: botão "↺ Reconectar" no dashboard
+          para contas com token revogado (reauth_required); reutiliza a
+          credencial existente preservando todos os jobs associados.
   v5.0  Prompt automático de API Key em erros 401 — ao receber autenticação
         negada, o cliente solicita a chave interativamente e retenta a
         operação sem necessidade de re-executar o comando.
@@ -25,7 +28,7 @@ Changelog:
         reconciliação de replicação (reconcile-replication).
 """
 
-VERSION = "v5.0"
+VERSION = "v5.1.0"
 
 import os, sys, hashlib, argparse, base64, socket, threading
 from pathlib import Path

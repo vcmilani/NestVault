@@ -14,7 +14,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-from .base import CloudProvider, FileEntry
+from .base import CloudProvider, FileEntry, TokenRevokedError
 
 log = logging.getLogger("backup-server")
 
@@ -91,6 +91,13 @@ class OneDriveProvider(CloudProvider):
             if not r.is_success:
                 body = r.text
                 log.error(f"[onedrive] refresh_tokens falhou {r.status_code}: {body}")
+                if r.status_code == 400:
+                    try:
+                        err = r.json().get("error", "")
+                    except Exception:
+                        err = ""
+                    if err in ("invalid_grant", "interaction_required"):
+                        raise TokenRevokedError("Refresh token inválido ou expirado — re-autenticação necessária")
                 raise httpx.HTTPStatusError(
                     f"{r.status_code} {r.reason_phrase} — {body}",
                     request=r.request, response=r,
