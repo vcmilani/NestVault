@@ -810,12 +810,17 @@
     const el = document.getElementById('cloudAccountsWrap');
     if (!accounts.length) { el.innerHTML = '<div class="empty">Nenhuma conta conectada</div>'; return; }
     el.innerHTML = `<table><thead><tr>
-      <th>Provider</th><th>Conta</th><th>Nome</th><th></th>
+      <th>Provider</th><th>Conta</th><th>Nome</th><th>Status</th><th></th>
     </tr></thead><tbody>${accounts.map(a => `<tr>
       <td>${providerLabel[a.provider]||a.provider}</td>
       <td>${esc(a.email)}</td>
       <td>${esc(a.display_name||'')}</td>
-      <td style="white-space:nowrap"><button class="small-btn btn-danger" onclick="disconnectAccount(${a.id},'${esc(a.email)}')">Desconectar</button>
+      <td>${a.needs_reauth
+        ? '<span style="color:var(--red);font-size:10px;letter-spacing:.06em">⚠ TOKEN REVOGADO</span>'
+        : '<span style="color:var(--text-mute);font-size:10px">—</span>'}</td>
+      <td style="white-space:nowrap">${a.needs_reauth
+        ? `<button class="small-btn" style="border-color:var(--amber);color:var(--amber)" onclick="reconnectCloud(${a.id},'${a.provider}')">↺ Reconectar</button> `
+        : ''}<button class="small-btn btn-danger" onclick="disconnectAccount(${a.id},'${esc(a.email)}')">Desconectar</button>
           <button class="small-btn" onclick="openJobModal(${a.id}, '${a.provider}')">+ Job</button></td>
     </tr>`).join('')}</tbody></table>`;
   }
@@ -852,7 +857,7 @@
     }).join('')}</tbody></table>`;
   }
 
-  let _authState = null, _authProvider = null;
+  let _authState = null, _authProvider = null, _reconnectCredentialId = null;
   let _editingJobId = null, _jobsCache = {};
 
   async function connectCloud(provider) {
@@ -872,9 +877,25 @@
     document.getElementById('cloudAuthModal').style.display = 'flex';
   }
 
+  async function reconnectCloud(credentialId, provider) {
+    const r = await fetch(`/cloud/accounts/${provider}/auth?manual=true&reconnect_credential_id=${credentialId}`, {headers: H()});
+    if (!r.ok) { showError('Erro ao gerar URL de reconexão'); return; }
+    const {url, state, redirect_uri} = await r.json();
+    _authState = state; _authProvider = provider; _reconnectCredentialId = credentialId;
+    const names = {gdrive: 'Google Drive', onedrive: 'OneDrive'};
+    document.getElementById('authModalTitle').textContent = `Reconectar ${names[provider] || provider}`;
+    document.getElementById('authRedirectUri').textContent = redirect_uri;
+    document.getElementById('authLink').href = url;
+    document.getElementById('authPastedUrl').value = '';
+    document.getElementById('authError').style.display = 'none';
+    document.getElementById('authConnectBtn').textContent = 'Reconectar';
+    document.getElementById('cloudAuthModal').style.display = 'flex';
+  }
+
   function closeAuthModal() {
     document.getElementById('cloudAuthModal').style.display = 'none';
-    _authState = null; _authProvider = null;
+    _authState = null; _authProvider = null; _reconnectCredentialId = null;
+    document.getElementById('authConnectBtn').textContent = 'Conectar';
   }
 
   async function submitAuthCode() {
@@ -898,7 +919,7 @@
       headers: {...H(), 'Content-Type': 'application/json'},
       body: JSON.stringify({code, state}),
     });
-    btn.disabled = false; btn.textContent = 'Conectar';
+    btn.disabled = false; btn.textContent = _reconnectCredentialId ? 'Reconectar' : 'Conectar';
     if (!r.ok) {
       const d = await r.json().catch(() => ({}));
       errEl.textContent = d.detail || 'Erro ao conectar conta';

@@ -118,7 +118,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="5.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="5.1.0", lifespan=lifespan)
 app.include_router(cloud_router)
 
 if STATIC_DIR.exists():

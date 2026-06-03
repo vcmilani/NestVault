@@ -86,6 +86,7 @@ class AccountOut(BaseModel):
     email: str
     display_name: Optional[str]
     created_at: str
+    needs_reauth: bool = False
 
 def _clean_folder_id(v: str) -> str:
     """Aceita URL completa do Drive ou só o ID; extrai só o ID."""
@@ -146,21 +147,70 @@ class ManualExchangeRequest(BaseModel):
     state: str
 
 
+# -- Helpers de credencial ----------------------------------------------------
+
+def _upsert_credential(pending: dict, tokens: dict, info: dict, db: Session) -> CloudCredential:
+    cred_id = pending.get("reconnect_credential_id")
+    if cred_id is not None:
+        cred = db.get(CloudCredential, cred_id)
+        if cred is None:
+            raise HTTPException(404, f"Conta {cred_id} não encontrada para reconexão")
+        cred.access_token  = tokens["access_token"]
+        cred.refresh_token = encrypt_token(tokens["refresh_token"])
+        cred.token_expiry  = tokens.get("expiry")
+        db.query(CloudBackupJob).filter(
+            CloudBackupJob.credential_id == cred_id,
+            CloudBackupJob.last_run_status == "reauth_required",
+        ).update({"last_run_status": None, "last_run_message": None}, synchronize_session=False)
+        db.commit()
+        log.info(f"[cloud] Conta {cred_id} ({cred.email}) reconectada com sucesso")
+    else:
+        cred = CloudCredential(
+            provider=pending["provider"],
+            email=info["email"],
+            display_name=info.get("display_name"),
+            access_token=tokens["access_token"],
+            refresh_token=encrypt_token(tokens["refresh_token"]),
+            token_expiry=tokens.get("expiry"),
+        )
+        db.add(cred)
+        db.commit()
+        db.refresh(cred)
+        log.info(f"[cloud] Conta conectada: {info['email']} ({pending['provider']})")
+    return cred
+
+
 # -- Contas -------------------------------------------------------------------
 
 @router.get("/accounts", response_model=list[AccountOut], dependencies=[Depends(require_api_key)])
 def list_accounts(db: Session = Depends(get_db)):
+    creds = db.query(CloudCredential).order_by(CloudCredential.created_at).all()
+    reauth_ids = {
+        row.credential_id
+        for row in db.query(CloudBackupJob.credential_id)
+            .filter(CloudBackupJob.last_run_status == "reauth_required")
+            .distinct().all()
+    }
     return [
         AccountOut(
             id=c.id, provider=c.provider, email=c.email,
             display_name=c.display_name, created_at=str(c.created_at),
+            needs_reauth=(c.id in reauth_ids),
         )
-        for c in db.query(CloudCredential).order_by(CloudCredential.created_at).all()
+        for c in creds
     ]
 
 
 @router.get("/accounts/{provider}/auth", response_model=AuthUrlOut, dependencies=[Depends(require_api_key)])
-def get_auth_url(provider: str, manual: bool = Query(False)):
+def get_auth_url(
+    provider: str,
+    manual: bool = Query(False),
+    reconnect_credential_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+):
+    if reconnect_credential_id is not None:
+        _require_credential(reconnect_credential_id, db)
+
     provider_obj = _get_provider(provider)
     state = secrets.token_urlsafe(24)
     redirect_uri = _localhost_callback_uri(provider) if manual else _callback_uri(provider)
@@ -174,7 +224,12 @@ def get_auth_url(provider: str, manual: bool = Query(False)):
     else:
         kwargs = {}
 
-    _pending_states[state] = {"provider": provider, "redirect_uri": redirect_uri, **extra}
+    _pending_states[state] = {
+        "provider": provider,
+        "redirect_uri": redirect_uri,
+        "reconnect_credential_id": reconnect_credential_id,
+        **extra,
+    }
     url = provider_obj.get_auth_url(redirect_uri=redirect_uri, state=state, **kwargs)
     return AuthUrlOut(url=url, state=state, redirect_uri=redirect_uri)
 
@@ -195,18 +250,7 @@ async def manual_exchange(provider: str, req: ManualExchangeRequest, db: Session
         raise HTTPException(400, "Provedor não retornou refresh_token. No Google, certifique-se de usar prompt=consent na primeira autorização.")
 
     info = await provider_obj.get_account_info(tokens["access_token"])
-    cred = CloudCredential(
-        provider=provider,
-        email=info["email"],
-        display_name=info.get("display_name"),
-        access_token=tokens["access_token"],
-        refresh_token=encrypt_token(tokens["refresh_token"]),
-        token_expiry=tokens.get("expiry"),
-    )
-    db.add(cred)
-    db.commit()
-    db.refresh(cred)
-    log.info(f"[cloud] Conta conectada (manual): {info['email']} ({provider})")
+    cred = _upsert_credential(pending, tokens, info, db)
     return AccountOut(
         id=cred.id, provider=cred.provider, email=cred.email,
         display_name=cred.display_name, created_at=str(cred.created_at),
@@ -260,18 +304,7 @@ async def oauth_callback(
         raise HTTPException(400, "Google/Microsoft não retornou refresh_token. Certifique-se de que prompt=consent está ativo.")
 
     info = await provider_obj.get_account_info(tokens["access_token"])
-
-    cred = CloudCredential(
-        provider=provider,
-        email=info["email"],
-        display_name=info.get("display_name"),
-        access_token=tokens["access_token"],
-        refresh_token=encrypt_token(tokens["refresh_token"]),
-        token_expiry=tokens.get("expiry"),
-    )
-    db.add(cred)
-    db.commit()
-    log.info(f"[cloud] Conta conectada: {info['email']} ({provider})")
+    _upsert_credential(pending, tokens, info, db)
     return RedirectResponse(url="/?cloud_connected=1")
 
 
