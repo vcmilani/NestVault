@@ -168,15 +168,20 @@ async def _consumer(
 
         if kind == "skip":
             _, entry, sha256 = item
-            db.add(VersionFile(
-                version_id=version_id,
-                original_path=entry.path,
-                sha256=sha256,
-                mtime=entry.mtime,
-            ))
-            db.commit()
-            processed += 1
-            skipped   += 1
+            try:
+                db.add(VersionFile(
+                    version_id=version_id,
+                    original_path=entry.path,
+                    sha256=sha256,
+                    mtime=entry.mtime,
+                ))
+                db.commit()
+                processed += 1
+                skipped   += 1
+            except Exception as e:
+                errors.append(f"{entry.path}: {e}")
+                log.error(f"[cloud-runner] Erro ao registrar skip {entry.path}: {e}")
+                db.rollback()
             continue
 
         _, entry, tmp_path, sha256, size, volume = item
@@ -230,6 +235,7 @@ async def run_cloud_backup_job(job_id: int) -> None:
     db = SessionLocal()
     job: CloudBackupJob | None = None
     version: BackupVersion | None = None
+    version_db_id: int | None = None
     try:
         job = db.get(CloudBackupJob, job_id)
         if not job:
@@ -262,10 +268,17 @@ async def run_cloud_backup_job(job_id: int) -> None:
         db.add(version)
         db.commit()
         db.refresh(version)
+        version_db_id = version.id
 
         # Lista arquivos no cloud
         log.info(f"[cloud-runner] Listando arquivos em {job.folder_name} ({job.folder_id})")
-        all_files = await provider.list_folder_recursive(access_token, job.folder_id)
+        all_files_raw = await provider.list_folder_recursive(access_token, job.folder_id)
+        seen: dict = {}
+        for entry in all_files_raw:
+            seen[entry.path] = entry
+        all_files = list(seen.values())
+        if len(all_files) != len(all_files_raw):
+            log.warning(f"[cloud-runner] {len(all_files_raw) - len(all_files)} entrada(s) duplicada(s) removida(s) da listagem")
         total     = len(all_files)
         log.info(f"[cloud-runner] {total} arquivo(s) encontrado(s)")
 
@@ -331,7 +344,8 @@ async def run_cloud_backup_job(job_id: int) -> None:
 
     except TokenRevokedError as e:
         log.error(f"[cloud-runner] Job {job_id} requer re-autenticação: {e}")
-        if version and version.id:
+        db.rollback()
+        if version and version_db_id:
             try:
                 version.status      = "failed"
                 version.finished_at = datetime.now()
@@ -347,7 +361,8 @@ async def run_cloud_backup_job(job_id: int) -> None:
                 pass
     except Exception as e:
         log.exception(f"[cloud-runner] Job {job_id} falhou: {e}")
-        if version and version.id:
+        db.rollback()
+        if version and version_db_id:
             try:
                 version.status      = "failed"
                 version.finished_at = datetime.now()
