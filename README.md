@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v5.1.0`
+# 🗄️ NestVault  `v5.2.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -6,6 +6,8 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v5.2.0** — limpeza noturna automática com política de retenção progressiva: versões `failed`/`incomplete` com mais de 1 semana são removidas se houver versão `done` mais recente; dentro de 1 mês todas as versões são preservadas; entre 1 e 6 meses é guardada 1 versão `done` por semana; acima de 6 meses, 1 versão `done` por mês. A rotina roda automaticamente à meia-noite e pode ser acionada manualmente via `POST /maintenance/nightly-cleanup`. O resultado de cada execução fica registrado no histórico de manutenção da tela de atividade.
+>
 > **v5.1.0** — opção de reconectar conta cloud: quando um refresh token é revogado ou expira, os jobs de backup ficam marcados com `reauth_required`. A nova coluna "Status" na aba de contas do dashboard exibe `⚠ TOKEN REVOGADO` e apresenta o botão `↺ Reconectar`, que reabre o fluxo OAuth reutilizando a credencial existente — todos os jobs associados são preservados. Ao concluir, os tokens são atualizados e o status `reauth_required` dos jobs é limpo automaticamente. Corrigido: OneDrive agora lança `TokenRevokedError` em caso de `invalid_grant`, fazendo o runner marcar o job como `reauth_required` em vez de `error`.
 >
 > **v5.0** — limpeza de versões por data: nova opção na tela de manutenção para remover permanentemente versões criadas antes de uma data escolhida. Suporta escopo global (todos os labels) ou por label específico via dropdown. Exibe preview detalhado por label antes de executar, mostrando quantas versões cada backup perderá. A versão `done` mais recente de cada label é **sempre preservada** — mesmo que seja anterior à data de corte. Versões em status `running` nunca são removidas. Dois novos endpoints: `GET /maintenance/cleanup-by-date/preview` (preview sem efeito colateral) e `POST /maintenance/cleanup-by-date` (execução). Prompt interativo de API Key no cliente Python: ao receber erro 401 (chave ausente ou inválida), o cliente solicita a chave via terminal (`getpass`) e retenta automaticamente a operação sem necessidade de reiniciar o comando.

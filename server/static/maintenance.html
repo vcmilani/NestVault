@@ -170,6 +170,25 @@
 
   <div class="ops-grid">
 
+    <!-- Limpeza Noturna -->
+    <div class="op-card risk-medium" style="animation-delay:0s">
+      <div class="op-header">
+        <div class="op-title-wrap">
+          <span class="op-icon">↺</span>
+          <div>
+            <div class="op-name">Limpeza Noturna</div>
+            <div class="op-endpoint">POST /maintenance/nightly-cleanup</div>
+          </div>
+        </div>
+        <span class="risk-badge medium">Médio risco</span>
+      </div>
+      <div class="op-desc">Aplica a política de retenção progressiva em todas as versões: dentro de 1 mês tudo é preservado; entre 1 e 6 meses guarda 1 versão <em>done</em> por semana; acima de 6 meses, 1 por mês. Versões <em>failed/incomplete</em> com mais de 1 semana são removidas se houver versão <em>done</em> mais recente. Executa automaticamente à meia-noite — use este botão para acionar manualmente.</div>
+      <div class="op-footer">
+        <button class="run-btn" id="btn-nightly" onclick="runOp('nightly')">▶ Executar agora</button>
+        <div class="op-result" id="result-nightly"></div>
+      </div>
+    </div>
+
     <!-- Limpeza de Órfãos -->
     <div class="op-card" style="animation-delay:.05s">
       <div class="op-header">
@@ -352,6 +371,7 @@ let API_KEY = localStorage.getItem('backupApiKey') || '';
 const H = () => ({'X-API-Key': API_KEY});
 
 const OPS = {
+  nightly:    {endpoint: '/maintenance/nightly-cleanup',       confirm: false},
   orphans:    {endpoint: '/maintenance/cleanup-orphans',       confirm: false},
   rereplicate:{endpoint: '/maintenance/rereplicate',           confirm: false},
   reconcile:  {endpoint: '/maintenance/reconcile-replication', confirm: false},
@@ -377,6 +397,7 @@ function fmtResult(key, data) {
   if ('cleaned'         in data) lines.push(`${data.cleaned} cópia(s) removida(s)`);
   if ('skipped'         in data) lines.push(`${data.skipped} pulado(s)`);
   if ('target_copies'   in data) lines.push(`fator alvo: ${data.target_copies}`);
+  if (data.status === 'started') lines.push('iniciado em background — veja o histórico de atividade');
   return lines.join(' · ');
 }
 

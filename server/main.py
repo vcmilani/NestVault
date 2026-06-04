@@ -1,5 +1,5 @@
 """
-NestVault  v5.0
+NestVault  v5.2.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -111,6 +111,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.start()
     sched.reload_jobs_from_db()
     sched.schedule_daily_digest()
+    sched.schedule_nightly_cleanup()
     log.info(f"Servidor iniciado — {len(STORAGE_VOLUMES)} volume(s): {[str(v) for v in STORAGE_VOLUMES]}")
     log.info(f"Auth: {'habilitada' if AUTH_ENABLED else 'desabilitada'}")
     yield
@@ -118,7 +119,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="5.1.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="5.2.0", lifespan=lifespan)
 app.include_router(cloud_router)
 
 if STATIC_DIR.exists():
@@ -1886,6 +1887,18 @@ def compare_versions(label: str, v1: str, v2: str, db: Session = Depends(get_db)
 
 
 # -- Maintenance --------------------------------------------------------------
+def _bg_run_nightly_cleanup() -> None:
+    from nightly_cleanup import run_nightly_cleanup
+    run_nightly_cleanup()
+
+
+@app.post("/maintenance/nightly-cleanup", dependencies=[Depends(require_api_key)])
+def force_nightly_cleanup(background_tasks: BackgroundTasks):
+    """Executa manualmente a rotina de limpeza noturna em background."""
+    background_tasks.add_task(_bg_run_nightly_cleanup)
+    return {"status": "started"}
+
+
 @app.post("/maintenance/cleanup-orphans", response_model=OrphanCleanupResponse, dependencies=[Depends(require_api_key)])
 def force_cleanup_orphans(db: Session = Depends(get_db)):
     """Remove todos os FileContents nao referenciados por nenhuma versao ativa."""
