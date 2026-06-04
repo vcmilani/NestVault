@@ -818,9 +818,8 @@
       <td>${a.needs_reauth
         ? '<span style="color:var(--red);font-size:10px;letter-spacing:.06em">⚠ TOKEN REVOGADO</span>'
         : '<span style="color:var(--text-mute);font-size:10px">—</span>'}</td>
-      <td style="white-space:nowrap">${a.needs_reauth
-        ? `<button class="small-btn" style="border-color:var(--amber);color:var(--amber)" onclick="reconnectCloud(${a.id},'${a.provider}')">↺ Reconectar</button> `
-        : ''}<button class="small-btn btn-danger" onclick="disconnectAccount(${a.id},'${esc(a.email)}')">Desconectar</button>
+      <td style="white-space:nowrap"><button class="small-btn" style="${a.needs_reauth ? 'border-color:var(--amber);color:var(--amber)' : ''}" onclick="reconnectCloud(${a.id},'${a.provider}')">↺ Reconectar</button>
+        <button class="small-btn btn-danger" onclick="disconnectAccount(${a.id},'${esc(a.email)}')">Desconectar</button>
           <button class="small-btn" onclick="openJobModal(${a.id}, '${a.provider}')">+ Job</button></td>
     </tr>`).join('')}</tbody></table>`;
   }

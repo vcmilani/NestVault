@@ -249,7 +249,7 @@ async def manual_exchange(provider: str, req: ManualExchangeRequest, db: Session
     if not tokens.get("refresh_token"):
         raise HTTPException(400, "Provedor não retornou refresh_token. No Google, certifique-se de usar prompt=consent na primeira autorização.")
 
-    info = await provider_obj.get_account_info(tokens["access_token"])
+    info = {} if pending.get("reconnect_credential_id") else await provider_obj.get_account_info(tokens["access_token"])
     cred = _upsert_credential(pending, tokens, info, db)
     return AccountOut(
         id=cred.id, provider=cred.provider, email=cred.email,
@@ -303,7 +303,7 @@ async def oauth_callback(
     if not tokens.get("refresh_token"):
         raise HTTPException(400, "Google/Microsoft não retornou refresh_token. Certifique-se de que prompt=consent está ativo.")
 
-    info = await provider_obj.get_account_info(tokens["access_token"])
+    info = {} if pending.get("reconnect_credential_id") else await provider_obj.get_account_info(tokens["access_token"])
     _upsert_credential(pending, tokens, info, db)
     return RedirectResponse(url="/?cloud_connected=1")
 
