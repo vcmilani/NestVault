@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v5.2.0`
+# 🗄️ NestVault  `v5.3.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -6,7 +6,9 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
-> **v5.2.0** — limpeza noturna automática com política de retenção progressiva: versões `failed`/`incomplete` com mais de 1 semana são removidas se houver versão `done` mais recente; dentro de 1 mês todas as versões são preservadas; entre 1 e 6 meses é guardada 1 versão `done` por semana; acima de 6 meses, 1 versão `done` por mês. A rotina roda automaticamente à meia-noite e pode ser acionada manualmente via `POST /maintenance/nightly-cleanup`. O resultado de cada execução fica registrado no histórico de manutenção da tela de atividade.
+> **v5.3.0** — refinamento da política de retenção noturna: a faixa "guardar tudo" foi reduzida de 30 dias para 24 horas; entre 1 dia e 30 dias passa a ser guardada 1 versão `done` por dia (a mais recente de cada dia calendário). As demais faixas permanecem iguais: 30–180 dias → 1 por semana; acima de 180 dias → 1 por mês.
+>
+> **v5.2.0** — limpeza noturna automática com política de retenção progressiva: versões `failed`/`incomplete` com mais de 1 semana são removidas se houver versão `done` mais recente; dentro de 1 mês todas as versões eram preservadas; entre 1 e 6 meses é guardada 1 versão `done` por semana; acima de 6 meses, 1 versão `done` por mês. A rotina roda automaticamente à meia-noite e pode ser acionada manualmente via `POST /maintenance/nightly-cleanup`. O resultado de cada execução fica registrado no histórico de manutenção da tela de atividade.
 >
 > **v5.1.0** — opção de reconectar conta cloud: quando um refresh token é revogado ou expira, os jobs de backup ficam marcados com `reauth_required`. A nova coluna "Status" na aba de contas do dashboard exibe `⚠ TOKEN REVOGADO` e apresenta o botão `↺ Reconectar`, que reabre o fluxo OAuth reutilizando a credencial existente — todos os jobs associados são preservados. Ao concluir, os tokens são atualizados e o status `reauth_required` dos jobs é limpo automaticamente. Corrigido: OneDrive agora lança `TokenRevokedError` em caso de `invalid_grant`, fazendo o runner marcar o job como `reauth_required` em vez de `error`.
 >
