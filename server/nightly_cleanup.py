@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 log = logging.getLogger("backup-server")
 
+_ONE_DAY    = timedelta(hours=24)
 _ONE_WEEK   = timedelta(days=7)
 _ONE_MONTH  = timedelta(days=30)
 _SIX_MONTHS = timedelta(days=180)
@@ -73,10 +74,12 @@ def _cleanup_orphan_contents(db) -> tuple[int, int]:
 
 def _versions_to_keep(done_versions: list[BackupVersion], now: datetime) -> set[int]:
     """Calcula quais IDs de versões done devem ser preservadas pela política de retenção."""
+    cutoff_day        = now - _ONE_DAY
     cutoff_month      = now - _ONE_MONTH
     cutoff_six_months = now - _SIX_MONTHS
 
     keep: set[int] = set()
+    seen_days:   set = set()
     seen_weeks:  set[tuple] = set()
     seen_months: set[tuple] = set()
 
@@ -84,8 +87,14 @@ def _versions_to_keep(done_versions: list[BackupVersion], now: datetime) -> set[
     for v in sorted(done_versions, key=lambda x: x.created_at, reverse=True):
         age = v.created_at
 
-        if age >= cutoff_month:
+        if age >= cutoff_day:
             keep.add(v.id)
+
+        elif age >= cutoff_month:
+            day_key = age.date()
+            if day_key not in seen_days:
+                seen_days.add(day_key)
+                keep.add(v.id)
 
         elif age >= cutoff_six_months:
             iso = age.isocalendar()
@@ -115,6 +124,7 @@ def run_nightly_cleanup() -> None:
         labels = [row[0] for row in db.query(BackupID.label).all()]
 
         total_stale   = 0
+        total_day     = 0
         total_week    = 0
         total_month   = 0
         labels_touched = 0
@@ -161,8 +171,10 @@ def run_nightly_cleanup() -> None:
                     if v.id not in keep_ids:
                         if v.created_at < now - _SIX_MONTHS:
                             total_month += 1
-                        else:
+                        elif v.created_at < now - _ONE_MONTH:
                             total_week += 1
+                        else:
+                            total_day += 1
 
                 _delete_versions(db, done_to_delete)
                 log.debug(f"[nightly-cleanup] {label}: {len(done_to_delete)} versão(ões) done removida(s) por retenção")
@@ -170,7 +182,7 @@ def run_nightly_cleanup() -> None:
             if stale_to_delete or done_to_delete:
                 labels_touched += 1
 
-        total_removed = total_stale + total_week + total_month
+        total_removed = total_stale + total_day + total_week + total_month
 
         # Limpeza de conteúdos órfãos após todas as exclusões
         orphans_removed, bytes_freed = _cleanup_orphan_contents(db)
@@ -178,6 +190,8 @@ def run_nightly_cleanup() -> None:
         summary_parts = []
         if total_stale:
             summary_parts.append(f"{total_stale} stale (failed/incomplete)")
+        if total_day:
+            summary_parts.append(f"{total_day} done por dia")
         if total_week:
             summary_parts.append(f"{total_week} done por semana")
         if total_month:
