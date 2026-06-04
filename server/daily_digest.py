@@ -52,7 +52,13 @@ def _fmt_bytes(n: int) -> str:
 
 
 def _version_diff(db, version: BackupVersion) -> dict:
-    """Compara a versão com a anterior do mesmo label para obter arquivos adicionados/modificados/removidos."""
+    """Compara a versão com a anterior done do mesmo label (adicionados/modificados/removidos).
+
+    Carrega os arquivos de cada versão em queries separadas — adequado para o digest,
+    que processa poucas versões de uma só vez e roda raramente.
+    Para o endpoint de atividade (polling frequente com até 30 versões), veja a lógica
+    bulk em get_activity() em main.py, que usa uma única query IN para todos os arquivos.
+    """
     prev = (
         db.query(BackupVersion)
         .filter(

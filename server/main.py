@@ -347,6 +347,9 @@ class RecentVersionInfo(BaseModel):
     file_count: int
     total_size_bytes: int
     absorbed_count: int = 0
+    diff_added: Optional[int] = None
+    diff_modified: Optional[int] = None
+    diff_removed: Optional[int] = None
 
 class RecentJobInfo(BaseModel):
     id: int
@@ -1003,18 +1006,65 @@ def get_activity(db: Session = Depends(get_db)):
             .all()
         ):
             rstats[row.version_id] = (row.fc, int(row.sz))
+    # Calcula diffs das versões done vs. predecessor done do mesmo label.
+    # Usa estratégia bulk (N queries de 1 linha + 1 query IN) para ser eficiente com polling
+    # frequente. A versão por-chamada está em _version_diff() em daily_digest.py — adequada
+    # para o digest, que processa poucas versões de uma só vez e roda raramente.
+    done_vs = [v for v in recent_vs if v.status == "done"]
+    prev_id_map: dict[int, Optional[int]] = {}
+    for v in done_vs:
+        prev = (
+            db.query(BackupVersion.id)
+            .filter(
+                BackupVersion.backup_label == v.backup_label,
+                BackupVersion.version_key < v.version_key,
+                BackupVersion.status == "done",
+            )
+            .order_by(BackupVersion.version_key.desc())
+            .first()
+        )
+        prev_id_map[v.id] = prev.id if prev else None
+
+    all_diff_ids = set(prev_id_map.keys()) | {pid for pid in prev_id_map.values() if pid}
+    files_by_vid: dict[int, dict[str, str]] = {}
+    if all_diff_ids:
+        for row in (
+            db.query(VersionFile.version_id, VersionFile.original_path, VersionFile.sha256)
+            .filter(VersionFile.version_id.in_(all_diff_ids))
+            .all()
+        ):
+            files_by_vid.setdefault(row.version_id, {})[row.original_path] = row.sha256
+
+    diff_map: dict[int, dict] = {}
+    for v in done_vs:
+        cur = files_by_vid.get(v.id, {})
+        prev_id = prev_id_map.get(v.id)
+        if prev_id is None:
+            diff_map[v.id] = {"added": len(cur), "modified": 0, "removed": 0}
+        else:
+            prv = files_by_vid.get(prev_id, {})
+            diff_map[v.id] = {
+                "added":    sum(1 for p in cur if p not in prv),
+                "modified": sum(1 for p, h in cur.items() if p in prv and prv[p] != h),
+                "removed":  sum(1 for p in prv if p not in cur),
+            }
+
     recent_version_infos = []
     for v in recent_vs:
         fc, sz = rstats.get(v.id, (0, 0))
         duration = None
         if v.finished_at and v.created_at:
             duration = round((v.finished_at - v.created_at).total_seconds(), 1)
+        d = diff_map.get(v.id)
         recent_version_infos.append(RecentVersionInfo(
             backup_label=v.backup_label, version_key=v.version_key,
             status=v.status, created_at=str(v.created_at),
             finished_at=str(v.finished_at) if v.finished_at else None,
             duration_seconds=duration, file_count=fc, total_size_bytes=sz,
             absorbed_count=v.absorbed_count or 0,
+            diff_added=d["added"] if d else None,
+            diff_modified=d["modified"] if d else None,
+            diff_removed=d["removed"] if d else None,
         ))
 
     # 6. Jobs cloud recentes (não rodando, últimos 10)
