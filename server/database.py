@@ -172,7 +172,7 @@ class MaintenanceJob(Base):
 class SsdCachePendingMove(Base):
     __tablename__ = "ssd_cache_pending_moves"
 
-    sha256      = Column(String(64), primary_key=True)
+    sha256      = Column(String(64), ForeignKey("file_contents.sha256"), primary_key=True)
     ssd_path    = Column(String, nullable=False)
     dest_volume = Column(String, nullable=False)
     dest_path   = Column(String, nullable=False)

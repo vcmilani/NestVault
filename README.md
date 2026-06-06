@@ -342,6 +342,12 @@ export BASE_URL="http://192.168.1.100:8000"
 # Threshold mínimo de espaço livre (GB) antes de usar o próximo disco da lista (padrão: 10)
 export STORAGE_FALLBACK_THRESHOLD_GB=10
 
+# SSD cache tier (opcional — padrão desabilitado)
+# Uploads são gravados no SSD primeiro; movidos para HDD em background
+export SSD_CACHE_ENABLED=true
+export SSD_CACHE_DIR="/tmp/nestvault_ssd_cache"   # diretório no SSD
+export SSD_CACHE_MAX_GB=20                         # limite de staging no SSD (padrão: 20 GB)
+
 # Daily digest via Telegram (opcional — omitir desabilita o envio)
 export TELEGRAM_BOT_TOKEN="123456789:ABCdef..."   # token gerado pelo @BotFather
 export TELEGRAM_CHAT_ID="987654321"               # seu chat_id (veja abaixo como obter)
@@ -381,6 +387,18 @@ Sem essas variáveis o servidor funciona normalmente — apenas o cloud backup f
 
 Sem `TELEGRAM_BOT_TOKEN` e `TELEGRAM_CHAT_ID` o digest é gerado internamente mas não enviado. Sem variável de IA o servidor envia um resumo estruturado com os dados brutos do banco.
 
+#### Configuração SSD Cache
+
+| Variável | Obrigatório | Padrão | Descrição |
+|---|:-:|---|---|
+| `SSD_CACHE_ENABLED` | | `false` | Habilita o cache tier no SSD |
+| `SSD_CACHE_DIR` | ✓ se enabled | — | Caminho de um diretório **no SSD** para staging de uploads |
+| `SSD_CACHE_MAX_GB` | | `20.0` | Limite máximo de uso do SSD pela fila pendente (GB) |
+
+Quando habilitado, uploads são escritos no SSD e o servidor responde ao cliente imediatamente; a movimentação para o HDD ocorre em background. Se o SSD atingir o limite ou tiver menos de 2 GB livres, o upload recai silenciosamente para o HDD. Moves pendentes sobrevivem a reinicializações (persistidos em `ssd_cache_pending_moves` no banco).
+
+> **Não use MicroSD como `SSD_CACHE_DIR`.** Write sequencial de cartões rápidos (~130 MB/s) é marginalmente melhor que HDD, mas sofrem throttling térmico sob carga e têm endurance muito inferior a um SSD real. O benefício é nulo e o desgaste é alto.
+
 `STORAGE_DIRS` e `STORAGE_DIR` são mutuamente compatíveis: se apenas `STORAGE_DIR` estiver definido, o servidor opera normalmente com um único volume. Se `STORAGE_DIRS` estiver definido, ele tem precedência e pode listar quantos pontos de montagem forem necessários.
 
 ### 3. Iniciar o servidor
@@ -413,6 +431,10 @@ Environment="REPLICATION_FACTOR=2"
 # Environment="GDRIVE_CLIENT_SECRET=<secret>"
 # Environment="ONEDRIVE_CLIENT_ID=<id>"
 # Environment="BASE_URL=http://192.168.1.100:8000"
+# SSD cache — omitir se não houver SSD interno ou ganho não for necessário
+# Environment="SSD_CACHE_ENABLED=true"
+# Environment="SSD_CACHE_DIR=/tmp/nestvault_ssd_cache"
+# Environment="SSD_CACHE_MAX_GB=20"
 ExecStart=/home/pi/backup_system/server/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
 Restart=always
 

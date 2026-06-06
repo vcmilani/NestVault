@@ -51,7 +51,6 @@ _degraded_volumes        = storage._degraded_volumes
 _safe_disk_usage         = storage.safe_disk_usage
 _healthy_volumes         = storage.healthy_volumes
 _target_replicas         = storage.target_replicas
-_content_path            = storage.content_path
 _ensure_replicas         = storage.ensure_replicas
 _rereplicate_to_volume   = storage.rereplicate_to_volume
 _rereplicate_all         = storage.rereplicate_all
@@ -1749,6 +1748,7 @@ async def upload_file(
                         log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — nova cifrada sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
                     except Exception:
                         tmp_enc.unlink(missing_ok=True)
+                        dest.unlink(missing_ok=True)
                         raise
                 else:
                     log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — nova sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
