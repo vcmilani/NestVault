@@ -169,6 +169,17 @@ class MaintenanceJob(Base):
     summary     = Column(String, nullable=True)
 
 
+class SsdCachePendingMove(Base):
+    __tablename__ = "ssd_cache_pending_moves"
+
+    sha256      = Column(String(64), primary_key=True)
+    ssd_path    = Column(String, nullable=False)
+    dest_volume = Column(String, nullable=False)
+    dest_path   = Column(String, nullable=False)
+    created_at  = Column(DateTime, default=_utcnow)
+    retry_count = Column(Integer, nullable=False, default=0)
+
+
 # -- Token encryption ---------------------------------------------------------
 import logging as _logging
 _log = _logging.getLogger("backup-server")

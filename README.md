@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v5.3.0`
+# 🗄️ NestVault  `v6.0.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -6,6 +6,8 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v6.0.0** — SSD cache tier para backup local: quando `SSD_CACHE_ENABLED=true`, uploads são gravados primeiro no SSD (via `SSD_CACHE_DIR`), o servidor responde ao cliente imediatamente, e a movimentação para o disco lento ocorre de forma assíncrona em background. Se o SSD atingir o limite configurado em `SSD_CACHE_MAX_GB`, o upload recai silenciosamente para o HDD sem interrupção. Moves pendentes sobrevivem a reinicializações do servidor (persistidos em `ssd_cache_pending_moves` no banco). Ganho especialmente relevante em redes 2.5 GbE, onde o HDD se torna o gargalo claro (100–150 MB/s vs. 312 MB/s de rede). Desabilitado por padrão — zero impacto para configurações sem SSD cache.
+>
 > **v5.3.0** — refinamento da política de retenção noturna: a faixa "guardar tudo" foi reduzida de 30 dias para 24 horas; entre 1 dia e 30 dias passa a ser guardada 1 versão `done` por dia (a mais recente de cada dia calendário). As demais faixas permanecem iguais: 30–180 dias → 1 por semana; acima de 180 dias → 1 por mês.
 >
 > **v5.2.0** — limpeza noturna automática com política de retenção progressiva: versões `failed`/`incomplete` com mais de 1 semana são removidas se houver versão `done` mais recente; dentro de 1 mês todas as versões eram preservadas; entre 1 e 6 meses é guardada 1 versão `done` por semana; acima de 6 meses, 1 versão `done` por mês. A rotina roda automaticamente à meia-noite e pode ser acionada manualmente via `POST /maintenance/nightly-cleanup`. O resultado de cada execução fica registrado no histórico de manutenção da tela de atividade.

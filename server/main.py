@@ -1,5 +1,5 @@
 """
-NestVault  v5.2.0
+NestVault  v6.0.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -22,7 +22,7 @@ from sqlalchemy import func, select, insert, literal
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
-from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, CloudBackupJob, CloudCredential, MaintenanceJob
+from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, CloudBackupJob, CloudCredential, MaintenanceJob, SsdCachePendingMove
 import crypto
 import storage
 from auth import require_api_key, API_KEY, AUTH_ENABLED
@@ -59,6 +59,8 @@ _cleanup_excess_copies   = storage.cleanup_excess_copies
 _backfill_content_copies = storage.backfill_content_copies
 _volume_health_monitor   = storage.volume_health_monitor
 _volumes_with_free_space = storage.volumes_with_free_space
+_ssd_cache_write_dir     = storage.ssd_cache_write_dir
+_ssd_content_path        = storage.ssd_content_path
 
 
 def _pick_volume() -> Path:
@@ -98,6 +100,39 @@ def _cleanup_stale_running_states():
         db.close()
 
 
+def _bg_process_ssd_pending_moves():
+    db = SessionLocal()
+    try:
+        while storage.process_ssd_pending_moves(db):
+            pass
+    except Exception as e:
+        log.error(f"[ssd-cache] Erro no worker de move: {e}")
+    finally:
+        db.close()
+
+
+def _resume_ssd_pending_moves():
+    if not storage.SSD_CACHE_ENABLED or not storage.SSD_CACHE_DIR:
+        return
+    db = SessionLocal()
+    try:
+        count = db.query(SsdCachePendingMove).count()
+        if not count:
+            return
+        log.info(f"[ssd-cache] {count} move(s) pendentes encontrados — retomando")
+        total = 0
+        while True:
+            done = storage.process_ssd_pending_moves(db)
+            total += done
+            if done == 0:
+                break
+        log.info(f"[ssd-cache] recovery concluída — {total} arquivo(s) movidos para HDD")
+    except Exception as e:
+        log.error(f"[ssd-cache] Erro na recovery de moves pendentes: {e}")
+    finally:
+        db.close()
+
+
 async def lifespan(_: FastAPI):
     init_db()
     _cleanup_stale_running_states()
@@ -107,19 +142,22 @@ async def lifespan(_: FastAPI):
     else:
         log.info("Criptografia: desabilitada")
     asyncio.get_running_loop().run_in_executor(None, _backfill_content_copies)
+    asyncio.get_running_loop().run_in_executor(None, _resume_ssd_pending_moves)
     monitor = asyncio.create_task(_volume_health_monitor())
     sched.scheduler.start()
     sched.reload_jobs_from_db()
     sched.schedule_daily_digest()
     sched.schedule_nightly_cleanup()
     log.info(f"Servidor iniciado — {len(STORAGE_VOLUMES)} volume(s): {[str(v) for v in STORAGE_VOLUMES]}")
+    if storage.SSD_CACHE_ENABLED and storage.SSD_CACHE_DIR:
+        log.info(f"SSD cache: habilitado — {storage.SSD_CACHE_DIR} (max {storage.SSD_CACHE_MAX_GB} GB)")
     log.info(f"Auth: {'habilitada' if AUTH_ENABLED else 'desabilitada'}")
     yield
     monitor.cancel()
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="5.2.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="6.0.0", lifespan=lifespan)
 app.include_router(cloud_router)
 
 if STATIC_DIR.exists():
@@ -1637,6 +1675,7 @@ def check_batch(req: CheckBatchRequest, db: Session = Depends(get_db)):
 @app.post("/upload", response_model=UploadResponse, dependencies=[Depends(require_api_key)])
 async def upload_file(
     request: Request,
+    background_tasks: BackgroundTasks,
     backup_label:   str           = Header(..., alias="X-Backup-Label"),
     version_key:    str           = Header(..., alias="X-Version-Key"),
     original_path:  str           = Header(..., alias="X-Original-Path"),
@@ -1668,9 +1707,11 @@ async def upload_file(
             _ensure_replicas(sha256, Path(first_copy.stored_at), db)
         log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — registrada sha256={sha256[:8]}…")
     else:
-        # Escolhe volume com mais espaço livre; tmp e conteúdo vão pro mesmo disco
-        volume = _pick_volume()
-        sha256, size, tmp_path = await _stream_request_to_disk(request, volume)
+        # Escolhe volume HDD de destino final; decide se usa SSD como staging
+        volume    = _pick_volume()
+        ssd_dir   = _ssd_cache_write_dir(db)
+        write_dir = ssd_dir if ssd_dir else volume
+        sha256, size, tmp_path = await _stream_request_to_disk(request, write_dir)
 
         try:
             fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
@@ -1695,7 +1736,8 @@ async def upload_file(
                     tmp_path.unlink(missing_ok=True)
 
             if not fc:
-                dest = _content_path(sha256, volume)
+                use_ssd = ssd_dir is not None
+                dest = _ssd_content_path(sha256) if use_ssd else _content_path(sha256, volume)
                 shutil.move(str(tmp_path), str(dest))
                 if ENCRYPTION_ENABLED:
                     log.info(f"[upload] cifrando {original_path!r} ({size / 1024 / 1024:.2f} MB) — sha256={sha256[:8]}…")
@@ -1714,7 +1756,17 @@ async def upload_file(
                                  encrypted=ENCRYPTION_ENABLED)
                 try:
                     db.add(fc)
-                    db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(volume)))
+                    if use_ssd:
+                        db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(ssd_dir)))
+                        hdd_dest = volume / "_content" / sha256[:2] / sha256
+                        db.add(SsdCachePendingMove(
+                            sha256=sha256,
+                            ssd_path=str(dest),
+                            dest_volume=str(volume),
+                            dest_path=str(hdd_dest),
+                        ))
+                    else:
+                        db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(volume)))
                     db.flush()
                 except IntegrityError:
                     # Upload concorrente do mesmo sha256 venceu — usar o registro já criado
@@ -1722,7 +1774,10 @@ async def upload_file(
                     dest.unlink(missing_ok=True)
                     fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
                 else:
-                    _ensure_replicas(sha256, dest, db)
+                    if use_ssd:
+                        background_tasks.add_task(_bg_process_ssd_pending_moves)
+                    else:
+                        _ensure_replicas(sha256, dest, db)
         except Exception:
             tmp_path.unlink(missing_ok=True)
             raise

@@ -5,7 +5,7 @@ Extracted from main.py so that the cloud backup module can reuse
 volume selection, replication, and encryption logic without
 creating a circular import.
 """
-import os, shutil, logging, asyncio, threading
+import os, shutil, logging, asyncio, threading, hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -25,6 +25,14 @@ CHUNK_SIZE = 1024 * 1024
 REPLICATION_FACTOR = int(os.getenv("REPLICATION_FACTOR", "1"))
 # Limiar absoluto (GB) abaixo do qual um volume é considerado esgotado para escrita e para o auto-cleanup.
 STORAGE_FALLBACK_THRESHOLD_GB = float(os.getenv("STORAGE_FALLBACK_THRESHOLD_GB", "10.0"))
+
+# -- SSD cache config ---------------------------------------------------------
+SSD_CACHE_ENABLED = os.getenv("SSD_CACHE_ENABLED", "false").lower() == "true"
+SSD_CACHE_MAX_GB  = float(os.getenv("SSD_CACHE_MAX_GB", "20.0"))
+_ssd_cache_raw    = os.getenv("SSD_CACHE_DIR", "")
+SSD_CACHE_DIR: Path | None = Path(_ssd_cache_raw) if _ssd_cache_raw else None
+if SSD_CACHE_DIR:
+    (SSD_CACHE_DIR / "_content").mkdir(parents=True, exist_ok=True)
 
 # -- Volume health ------------------------------------------------------------
 _degraded_volumes: set[Path] = set()
@@ -284,3 +292,100 @@ async def volume_health_monitor() -> None:
             if usage:
                 log.info(f"[volume] {v} recuperado — iniciando re-replicação")
                 asyncio.get_running_loop().run_in_executor(None, rereplicate_to_volume, v)
+
+
+# -- SSD cache helpers --------------------------------------------------------
+
+def ssd_content_path(sha256: str) -> Path:
+    assert SSD_CACHE_DIR is not None
+    dest = SSD_CACHE_DIR / "_content" / sha256[:2] / sha256
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    return dest
+
+
+def ssd_cache_write_dir(db) -> "Path | None":
+    """Returns SSD_CACHE_DIR if enabled and cache budget is not exceeded, else None."""
+    if not SSD_CACHE_ENABLED or not SSD_CACHE_DIR:
+        return None
+    try:
+        usage = shutil.disk_usage(SSD_CACHE_DIR)
+        if usage.free < 2 * 1024 ** 3:
+            log.debug("[ssd-cache] SSD com menos de 2 GB livre — fallback para HDD")
+            return None
+    except OSError:
+        return None
+    from database import SsdCachePendingMove, FileContent
+    from sqlalchemy import func
+    used_bytes = (
+        db.query(func.coalesce(func.sum(FileContent.size), 0))
+        .join(SsdCachePendingMove, SsdCachePendingMove.sha256 == FileContent.sha256)
+        .scalar()
+    ) or 0
+    if used_bytes >= SSD_CACHE_MAX_GB * 1024 ** 3:
+        log.debug(f"[ssd-cache] limite de {SSD_CACHE_MAX_GB} GB atingido — fallback para HDD")
+        return None
+    return SSD_CACHE_DIR
+
+
+def _file_sha256_raw(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def process_ssd_pending_moves(db) -> int:
+    """Move up to 10 pending SSD-cached files to their HDD destination. Returns count moved."""
+    from database import SsdCachePendingMove, FileContent, FileContentCopy
+    from sqlalchemy.exc import IntegrityError
+    moves = db.query(SsdCachePendingMove).limit(10).all()
+    completed = 0
+    for move in moves:
+        ssd_path = Path(move.ssd_path)
+        dest_path = Path(move.dest_path)
+        dest_volume = Path(move.dest_volume)
+        if not ssd_path.exists():
+            log.warning(f"[ssd-cache] {move.sha256[:8]}… arquivo ausente no SSD — removendo registro")
+            db.delete(move)
+            db.commit()
+            continue
+        try:
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            ssd_hash = _file_sha256_raw(ssd_path)
+            shutil.copy2(str(ssd_path), str(dest_path))
+            hdd_hash = _file_sha256_raw(dest_path)
+            if ssd_hash != hdd_hash:
+                dest_path.unlink(missing_ok=True)
+                move.retry_count += 1
+                log.warning(f"[ssd-cache] {move.sha256[:8]}… cópia corrompida no HDD — retry {move.retry_count}")
+                db.commit()
+                continue
+            fc = db.query(FileContent).filter(FileContent.sha256 == move.sha256).first()
+            if fc:
+                fc.stored_at = str(dest_path)
+            ssd_copy = (db.query(FileContentCopy)
+                        .filter(FileContentCopy.sha256 == move.sha256,
+                                FileContentCopy.stored_at == move.ssd_path)
+                        .first())
+            if ssd_copy:
+                db.delete(ssd_copy)
+            db.add(FileContentCopy(sha256=move.sha256, stored_at=str(dest_path), volume_path=str(dest_volume)))
+            db.flush()
+            ensure_replicas(move.sha256, dest_path, db)
+            db.delete(move)
+            db.commit()
+            ssd_path.unlink(missing_ok=True)
+            completed += 1
+            log.info(f"[ssd-cache] {move.sha256[:8]}… movido SSD → {dest_path}")
+        except IntegrityError:
+            db.rollback()
+            dest_path.unlink(missing_ok=True)
+            log.debug(f"[ssd-cache] {move.sha256[:8]}… já processado por worker concorrente — OK")
+        except OSError as e:
+            move.retry_count += 1
+            log.warning(f"[ssd-cache] Erro ao mover {move.sha256[:8]}…: {e} — retry {move.retry_count}")
+            if move.retry_count >= 5:
+                log.error(f"[ssd-cache] {move.sha256[:8]}… atingiu 5 retries — permanece no SSD")
+            db.commit()
+    return completed
