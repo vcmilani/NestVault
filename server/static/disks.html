@@ -46,6 +46,7 @@
   .disk-card:hover::before{transform:scaleX(1)}
   .disk-card.warn::before{background:var(--amber);transform:scaleX(1)}
   .disk-card.crit::before{background:var(--red);transform:scaleX(1)}
+  .disk-card.cache::before{background:var(--blue);transform:scaleX(1)}
 
   .disk-header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:18px;gap:12px}
   .disk-path{font-size:12px;color:var(--text);word-break:break-all;line-height:1.5;flex:1}
@@ -53,6 +54,7 @@
   .disk-badge.ok{background:var(--green-dim);color:var(--green)}
   .disk-badge.warn{background:var(--amber-dim);color:var(--amber)}
   .disk-badge.crit{background:var(--red-dim);color:var(--red)}
+  .disk-badge.cache{background:var(--blue-dim);color:var(--blue)}
 
   .disk-stats{display:grid;grid-template-columns:1fr 1fr 1fr;gap:1px;background:var(--border);border:1px solid var(--border);margin-bottom:16px}
   .disk-stat{background:var(--bg3);padding:12px 14px}
@@ -66,6 +68,7 @@
   .disk-bar-fill.ok{background:var(--green)}
   .disk-bar-fill.warn{background:var(--amber)}
   .disk-bar-fill.crit{background:var(--red)}
+  .disk-bar-fill.cache{background:var(--blue)}
 
   .disk-bar-labels{display:flex;justify-content:space-between;font-size:10px;color:var(--text-mute);margin-bottom:16px}
 
@@ -224,12 +227,13 @@
     const cards = disks.map((d, i) => {
       const usedPct = d.total_bytes > 0 ? d.used_bytes / d.total_bytes * 100 : 0;
       const freePct = 100 - usedPct;
-      const barCls  = usedPct >= 90 ? 'crit' : usedPct >= 75 ? 'warn' : 'ok';
-      const badgeLabel = usedPct >= 90 ? 'Crítico' : usedPct >= 75 ? 'Atenção' : 'OK';
+      const barCls  = d.is_cache ? 'cache' : (usedPct >= 90 ? 'crit' : usedPct >= 75 ? 'warn' : 'ok');
+      const badgeLabel = d.is_cache ? 'Cache SSD' : (usedPct >= 90 ? 'Crítico' : usedPct >= 75 ? 'Atenção' : 'OK');
       const delay = (i * 0.08).toFixed(2);
+      const contentLabel = d.is_cache ? 'Arquivos em cache' : 'Arquivos de conteúdo';
 
       return `
-        <div class="disk-card ${barCls !== 'ok' ? barCls : ''}" style="animation-delay:${delay}s">
+        <div class="disk-card ${d.is_cache ? 'cache' : (barCls !== 'ok' ? barCls : '')}" style="animation-delay:${delay}s">
           <div class="disk-header">
             <div class="disk-path">${esc(d.path)}</div>
             <span class="disk-badge ${barCls}">${badgeLabel}</span>
@@ -260,7 +264,7 @@
 
           <div class="disk-content-info">
             <div class="disk-ci-item">
-              <span class="disk-ci-label">Arquivos de conteúdo</span>
+              <span class="disk-ci-label">${contentLabel}</span>
               <span class="disk-ci-value">${d.content_files.toLocaleString('pt-BR')}</span>
             </div>
             <div class="disk-ci-item">

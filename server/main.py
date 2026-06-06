@@ -329,6 +329,7 @@ class DiskVolumeInfo(BaseModel):
     content_files: int
     content_bytes: int
     status: Literal["ok", "degraded"]
+    is_cache: bool = False
 
 class BackupDiskEntry(BaseModel):
     volume_path: str
@@ -1246,6 +1247,19 @@ def storage_disks(db: Session = Depends(get_db)):
             content_files=files,
             content_bytes=bytes_,
             status="degraded" if usage is None else "ok",
+        ))
+    if storage.SSD_CACHE_ENABLED and storage.SSD_CACHE_DIR:
+        usage = _safe_disk_usage(storage.SSD_CACHE_DIR)
+        files, bytes_ = vol_stats.get(str(storage.SSD_CACHE_DIR), (0, 0))
+        result.append(DiskVolumeInfo(
+            path=str(storage.SSD_CACHE_DIR),
+            total_bytes=usage.total if usage else 0,
+            used_bytes=usage.used  if usage else 0,
+            free_bytes=usage.free  if usage else 0,
+            content_files=files,
+            content_bytes=bytes_,
+            status="degraded" if usage is None else "ok",
+            is_cache=True,
         ))
     return result
 

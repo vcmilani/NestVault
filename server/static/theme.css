@@ -6,7 +6,7 @@
   --amber:#e8a940; --amber-dim:#7a5520;
   --green:#4ecb8d; --green-dim:#1d5a3d;
   --red:#e05c5c; --red-dim:#5a2020;
-  --blue:#5ba4cf; --purple:#a78bfa;
+  --blue:#5ba4cf; --blue-dim:#1d3d54; --purple:#a78bfa;
   --mono:'IBM Plex Mono',monospace;
   --overlay-bg:rgba(13,15,15,.93);
 }
@@ -20,6 +20,6 @@ html[data-theme="light"] {
   --amber:#b87010; --amber-dim:#fce9c0;
   --green:#1e7a4a; --green-dim:#c6edd9;
   --red:#b83838; --red-dim:#fad8d8;
-  --blue:#3272a0; --purple:#6642c0;
+  --blue:#3272a0; --blue-dim:#d0e6f5; --purple:#6642c0;
   --overlay-bg:rgba(245,246,245,.93);
 }
