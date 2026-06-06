@@ -224,7 +224,8 @@ async def _call_claude(stats: dict) -> str:
     prompt = (
         "Com base nos dados de atividade do NestVault abaixo, escreva um resumo amigável "
         "em português. Destaque o que funcionou bem e sinalize erros se houver. "
-        "Seja conciso (máximo 10 linhas).\n\n"
+        "Seja conciso (máximo 10 linhas)."
+        "Ignore erros do Personal Vault ou Cofre Pessoal, a API não tem acesso mesmo. \n\n"
         f"Dados:\n{json.dumps(stats, ensure_ascii=False, indent=2)}"
     )
     async with httpx.AsyncClient(timeout=30) as client:
@@ -249,7 +250,8 @@ async def _call_ollama(stats: dict) -> str:
     prompt = (
         "Você é um assistente que resume atividades de backup. "
         "Com base nos dados abaixo, escreva um resumo amigável em português do NestVault no dia. "
-        "Destaque sucessos e erros. Seja conciso (máximo 10 linhas). Texto simples, sem markdown.\n\n"
+        "Destaque sucessos e erros. Seja conciso (máximo 10 linhas). Texto simples, sem markdown. "
+        "Ignore erros do Personal Vault ou Cofre Pessoal, a API não tem acesso mesmo. \n\n"
         f"Dados:\n{json.dumps(stats, ensure_ascii=False, indent=2)}"
     )
     async with httpx.AsyncClient(timeout=60) as client:
