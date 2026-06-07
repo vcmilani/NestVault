@@ -339,9 +339,14 @@ def process_ssd_pending_moves(db) -> int:
     """Move up to 10 pending SSD-cached files to their HDD destination. Returns count moved."""
     from database import SsdCachePendingMove, FileContent, FileContentCopy
     from sqlalchemy.exc import IntegrityError
-    moves = db.query(SsdCachePendingMove).limit(10).all()
+    # Collect only sha256 keys upfront; commits inside the loop expire session objects,
+    # so we re-query each row fresh to avoid "Instance has been deleted" errors.
+    pending_sha256s = [m.sha256 for m in db.query(SsdCachePendingMove).limit(10).all()]
     completed = 0
-    for move in moves:
+    for sha256 in pending_sha256s:
+        move = db.query(SsdCachePendingMove).filter(SsdCachePendingMove.sha256 == sha256).first()
+        if move is None:
+            continue  # processed by concurrent worker
         ssd_path = Path(move.ssd_path)
         dest_path = Path(move.dest_path)
         dest_volume = Path(move.dest_volume)
