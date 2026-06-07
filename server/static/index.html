@@ -405,22 +405,26 @@
 
   async function loadAll() {
     clearError();
+    // Inicia disk-summary em paralelo mas não bloqueia o render principal
+    const diskSummaryPromise = fetch('/backups/disk-summary', {headers: H()}).catch(() => null);
     try {
-      const [respBackups, respDisk, respDiskSummary] = await Promise.all([
+      const [respBackups, respDisk] = await Promise.all([
         fetch('/backups', {headers: H()}),
         fetch('/storage/info', {headers: H()}),
-        fetch('/backups/disk-summary', {headers: H()}),
       ]);
       if (respBackups.status === 401) { showLogin('API Key inválida.'); return; }
       if (!respBackups.ok) throw new Error(`HTTP ${respBackups.status}`);
       const backups = await respBackups.json();
       const disk = respDisk.ok ? await respDisk.json() : null;
-      const diskSummary = respDiskSummary.ok ? await respDiskSummary.json() : {};
 
       renderStats(backups, disk);
       renderBackups(backups);
-      renderDiskCells(backups, diskSummary);
       document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString('pt-BR');
+
+      // Preenche células de disco quando o fetch (já em andamento) completar
+      const respDiskSummary = await diskSummaryPromise;
+      const diskSummary = (respDiskSummary && respDiskSummary.ok) ? await respDiskSummary.json() : {};
+      renderDiskCells(backups, diskSummary);
     } catch(e) {
       showError('Não foi possível conectar: '+e.message);
     }
