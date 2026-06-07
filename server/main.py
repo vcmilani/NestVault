@@ -9,7 +9,7 @@ Otimizacoes de performance:
 - Limpeza de arquivos ao deletar label/versao feita em background (nao bloqueia o cliente)
 """
 
-from fastapi import FastAPI, Request, HTTPException, Depends, Header, BackgroundTasks
+from fastapi import FastAPI, Request, HTTPException, Depends, Header, BackgroundTasks, Query
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -314,6 +314,24 @@ class EncryptExistingResponse(BaseModel):
     files_encrypted: int
     bytes_processed: int
     skipped: int
+
+class MigrateDiskRequest(BaseModel):
+    source: str
+    destinations: list[str]
+
+class MigrateDiskDestInfo(BaseModel):
+    path: str
+    free_bytes: int
+    capacity_bytes: int
+
+class MigrateDiskPreviewResponse(BaseModel):
+    source: str
+    files_to_copy: int
+    bytes_to_copy: int
+    files_already_on_dest: int
+    destinations: list[MigrateDiskDestInfo]
+    can_proceed: bool
+    reason: Optional[str]
 
 class StorageInfoResponse(BaseModel):
     total_bytes: int
@@ -835,6 +853,183 @@ def _bg_cleanup_by_date(version_ids: list[int], scope: str) -> None:
                 mj.finished_at = datetime.now()
                 db.commit()
             raise
+    finally:
+        db.close()
+
+
+_MIGRATE_BATCH = 50
+
+def _verify_file_sha256(path: Path, expected: str) -> bool:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest() == expected
+
+
+def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
+    """Background task: copia conteúdo de um volume de origem para destinos e remove a origem."""
+    db = SessionLocal()
+    try:
+        mj = db.get(MaintenanceJob, job_id)
+
+        # Carrega todas as cópias que estão no volume de origem
+        source_copies = (
+            db.query(FileContentCopy)
+            .filter(FileContentCopy.volume_path == source)
+            .all()
+        )
+        total = len(source_copies)
+        log.info(f"[migrate-disk] {source} → {destinations}: {total} cópia(s) a processar")
+
+        dest_set = set(destinations)
+
+        # Rastreia espaço livre estimado por destino em memória para distribuição
+        dest_free: dict[str, int] = {}
+        for d in destinations:
+            try:
+                du = shutil.disk_usage(d)
+                dest_free[d] = du.free
+            except OSError:
+                dest_free[d] = 0
+
+        copied = 0
+        already_on_dest = 0
+        skipped = 0
+        failed_sha256s: set[str] = set()
+
+        # -- Fase 1: copiar arquivos ausentes nos destinos -----------------------
+        for i, src_copy in enumerate(source_copies):
+            sha256 = src_copy.sha256
+
+            # Verifica se já existe cópia em algum destino
+            existing_dest = (
+                db.query(FileContentCopy.volume_path)
+                .filter(
+                    FileContentCopy.sha256 == sha256,
+                    FileContentCopy.volume_path.in_(list(dest_set)),
+                )
+                .first()
+            )
+            if existing_dest:
+                already_on_dest += 1
+            else:
+                # Escolhe destino com mais espaço livre
+                best_dest = max(dest_free, key=lambda d: dest_free[d])
+                if dest_free[best_dest] <= 0:
+                    log.warning(f"[migrate-disk] sem espaço em destinos — pulando {sha256[:8]}…")
+                    skipped += 1
+                    failed_sha256s.add(sha256)
+                    continue
+
+                src_path = Path(src_copy.stored_at)
+                if not src_path.exists():
+                    log.warning(f"[migrate-disk] arquivo físico ausente: {src_path} — pulando")
+                    skipped += 1
+                    failed_sha256s.add(sha256)
+                    continue
+
+                dest_path = _content_path(sha256, Path(best_dest))
+                try:
+                    shutil.copy2(str(src_path), str(dest_path))
+                    if not _verify_file_sha256(dest_path, sha256):
+                        log.warning(f"[migrate-disk] SHA-256 inválido após cópia: {sha256[:8]}…")
+                        dest_path.unlink(missing_ok=True)
+                        skipped += 1
+                        failed_sha256s.add(sha256)
+                        continue
+
+                    fc_copy = FileContentCopy(
+                        sha256=sha256,
+                        stored_at=str(dest_path),
+                        volume_path=best_dest,
+                    )
+                    db.add(fc_copy)
+
+                    # Atualiza estimativa de espaço livre
+                    fc = db.get(FileContent, sha256)
+                    if fc:
+                        dest_free[best_dest] = max(0, dest_free[best_dest] - fc.size)
+
+                    copied += 1
+                except (OSError, Exception) as e:
+                    log.warning(f"[migrate-disk] falha ao copiar {sha256[:8]}…: {e}")
+                    dest_path.unlink(missing_ok=True)
+                    skipped += 1
+                    failed_sha256s.add(sha256)
+                    continue
+
+            # Commit e atualiza progresso a cada lote
+            if (i + 1) % _MIGRATE_BATCH == 0:
+                db.commit()
+                done = i + 1
+                pct = round(done / total * 100) if total else 0
+                mj = db.get(MaintenanceJob, job_id)
+                if mj:
+                    mj.summary = f"Copiando: {done} / {total} arquivos ({pct}%)"
+                    db.commit()
+                log.debug(f"[migrate-disk] lote: {done}/{total}")
+
+        db.commit()
+
+        # -- Fase 2: remover cópias do disco de origem -------------------------
+        removed_physical = 0
+        for src_copy in source_copies:
+            if src_copy.sha256 in failed_sha256s:
+                continue  # Não remove se a cópia de destino falhou
+            src_path = Path(src_copy.stored_at)
+            db.delete(src_copy)
+            try:
+                src_path.unlink(missing_ok=True)
+                removed_physical += 1
+            except OSError as e:
+                log.warning(f"[migrate-disk] falha ao remover {src_path}: {e}")
+
+        # Atualiza FileContent.stored_at que ainda apontam para o volume de origem
+        stale_fcs = (
+            db.query(FileContent)
+            .filter(FileContent.stored_at.like(f"{source}%"))
+            .all()
+        )
+        for fc in stale_fcs:
+            # Busca uma cópia válida em outro volume
+            alt = (
+                db.query(FileContentCopy)
+                .filter(
+                    FileContentCopy.sha256 == fc.sha256,
+                    FileContentCopy.volume_path != source,
+                )
+                .first()
+            )
+            if alt:
+                fc.stored_at = alt.stored_at
+
+        db.commit()
+
+        summary = (
+            f"{copied} copiado(s), {already_on_dest} já existiam no destino, "
+            f"{skipped} pulado(s) — {removed_physical} arquivo(s) removidos de {source}"
+        )
+        log.info(f"[migrate-disk] concluído — {summary}")
+
+        mj = db.get(MaintenanceJob, job_id)
+        if mj:
+            mj.status = "done"
+            mj.finished_at = datetime.now()
+            mj.summary = summary
+            db.commit()
+
+    except Exception:
+        log.exception("[migrate-disk] erro inesperado")
+        try:
+            mj = db.get(MaintenanceJob, job_id)
+            if mj:
+                mj.status = "failed"
+                mj.finished_at = datetime.now()
+                db.commit()
+        except Exception:
+            pass
+        raise
     finally:
         db.close()
 
@@ -2171,3 +2366,143 @@ def cleanup_by_date(
         "scheduled": len(version_ids),
         "per_label": [{"label": k, "count": cnt} for k, cnt in per_label.items()],
     }
+
+
+# -- Migração de disco ---------------------------------------------------------
+def _migrate_disk_preview_data(
+    source: str,
+    destinations: list[str],
+    db: Session,
+) -> MigrateDiskPreviewResponse:
+    """Calcula o preview de migração sem iniciar nenhuma operação."""
+    volume_strs = [str(v) for v in STORAGE_VOLUMES]
+    if source not in volume_strs:
+        raise HTTPException(status_code=400, detail=f"Volume de origem inválido: {source}")
+    invalid = [d for d in destinations if d not in volume_strs]
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Volume(s) de destino inválido(s): {invalid}")
+    if source in destinations:
+        raise HTTPException(status_code=400, detail="Origem e destino não podem ser o mesmo volume")
+    if not destinations:
+        raise HTTPException(status_code=400, detail="Selecione pelo menos um volume de destino")
+
+    dest_set = set(destinations)
+
+    # Todos os sha256 que estão no volume de origem
+    source_shas_rows = (
+        db.query(FileContentCopy.sha256)
+        .filter(FileContentCopy.volume_path == source)
+        .all()
+    )
+    source_shas = {r.sha256 for r in source_shas_rows}
+
+    if not source_shas:
+        dest_infos = []
+        for d in destinations:
+            try:
+                du = shutil.disk_usage(d)
+                dest_infos.append(MigrateDiskDestInfo(path=d, free_bytes=du.free, capacity_bytes=du.total))
+            except OSError:
+                dest_infos.append(MigrateDiskDestInfo(path=d, free_bytes=0, capacity_bytes=0))
+        return MigrateDiskPreviewResponse(
+            source=source,
+            files_to_copy=0,
+            bytes_to_copy=0,
+            files_already_on_dest=0,
+            destinations=dest_infos,
+            can_proceed=True,
+            reason=None,
+        )
+
+    # sha256s que já têm cópia em algum destino
+    already_rows = (
+        db.query(FileContentCopy.sha256)
+        .filter(
+            FileContentCopy.sha256.in_(list(source_shas)),
+            FileContentCopy.volume_path.in_(list(dest_set)),
+        )
+        .distinct()
+        .all()
+    )
+    already_shas = {r.sha256 for r in already_rows}
+    to_copy_shas = source_shas - already_shas
+
+    bytes_to_copy = 0
+    if to_copy_shas:
+        row = (
+            db.query(func.coalesce(func.sum(FileContent.size), 0))
+            .filter(FileContent.sha256.in_(list(to_copy_shas)))
+            .scalar()
+        )
+        bytes_to_copy = int(row)
+
+    dest_infos = []
+    total_free = 0
+    for d in destinations:
+        try:
+            du = shutil.disk_usage(d)
+            dest_infos.append(MigrateDiskDestInfo(path=d, free_bytes=du.free, capacity_bytes=du.total))
+            total_free += du.free
+        except OSError:
+            dest_infos.append(MigrateDiskDestInfo(path=d, free_bytes=0, capacity_bytes=0))
+
+    can_proceed = total_free >= bytes_to_copy
+    reason = None if can_proceed else (
+        f"Espaço insuficiente nos destinos: "
+        f"necessário {round(bytes_to_copy/1024**3, 2)} GB, "
+        f"disponível {round(total_free/1024**3, 2)} GB"
+    )
+
+    return MigrateDiskPreviewResponse(
+        source=source,
+        files_to_copy=len(to_copy_shas),
+        bytes_to_copy=bytes_to_copy,
+        files_already_on_dest=len(already_shas),
+        destinations=dest_infos,
+        can_proceed=can_proceed,
+        reason=reason,
+    )
+
+
+@app.get(
+    "/maintenance/migrate-disk/preview",
+    response_model=MigrateDiskPreviewResponse,
+    dependencies=[Depends(require_api_key)],
+)
+def migrate_disk_preview(
+    source: str,
+    destinations: list[str] = Query(default=[]),
+    db: Session = Depends(get_db),
+):
+    log.info(f"[migrate-disk/preview] source={source} destinations={destinations}")
+    return _migrate_disk_preview_data(source, destinations, db)
+
+
+@app.post(
+    "/maintenance/migrate-disk",
+    dependencies=[Depends(require_api_key)],
+)
+def migrate_disk(
+    req: MigrateDiskRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    log.info(f"[migrate-disk] source={req.source} destinations={req.destinations}")
+    preview = _migrate_disk_preview_data(req.source, req.destinations, db)
+    if not preview.can_proceed:
+        raise HTTPException(status_code=400, detail=preview.reason)
+
+    dest_str = ", ".join(req.destinations)
+    mj = MaintenanceJob(
+        job_type="disk-migration",
+        status="running",
+        summary=f"{req.source} → {dest_str}",
+    )
+    db.add(mj)
+    db.commit()
+    db.refresh(mj)
+    job_id = mj.id
+
+    background_tasks.add_task(_bg_migrate_disk, req.source, req.destinations, job_id)
+    log.info(f"[migrate-disk] job #{job_id} agendado")
+    return {"scheduled": True, "job_id": job_id}
