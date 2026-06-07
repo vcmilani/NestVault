@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
-import asyncio, os, hashlib, secrets, base64, shutil, logging, time
+import asyncio, os, hashlib, secrets, base64, shutil, logging, time, threading
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -61,6 +61,8 @@ _volumes_with_free_space = storage.volumes_with_free_space
 _ssd_cache_write_dir     = storage.ssd_cache_write_dir
 _ssd_content_path        = storage.ssd_content_path
 
+
+_ssd_move_lock = threading.Lock()
 
 _reclaimable_cache: dict = {"value": 0, "ts": 0.0}
 _RECLAIMABLE_TTL = 60.0
@@ -142,6 +144,9 @@ def _cleanup_stale_running_states():
 
 
 def _bg_process_ssd_pending_moves():
+    if not _ssd_move_lock.acquire(blocking=False):
+        log.debug("[ssd-cache] worker já em execução — ignorando chamada duplicada")
+        return
     db = SessionLocal()
     job = MaintenanceJob(job_type="ssd-cache-move", status="running")
     db.add(job)
@@ -165,10 +170,14 @@ def _bg_process_ssd_pending_moves():
     finally:
         db.commit()
         db.close()
+        _ssd_move_lock.release()
 
 
 def _resume_ssd_pending_moves():
     if not storage.SSD_CACHE_ENABLED or not storage.SSD_CACHE_DIR:
+        return
+    if not _ssd_move_lock.acquire(blocking=False):
+        log.debug("[ssd-cache] worker já em execução — recovery ignorada")
         return
     db = SessionLocal()
     try:
@@ -200,6 +209,20 @@ def _resume_ssd_pending_moves():
     finally:
         db.commit()
         db.close()
+        _ssd_move_lock.release()
+
+
+async def _ssd_space_monitor():
+    while True:
+        await asyncio.sleep(30)
+        if not storage.SSD_CACHE_ENABLED or not storage.SSD_CACHE_DIR:
+            continue
+        db = SessionLocal()
+        try:
+            if db.query(SsdCachePendingMove).count() > 0 and storage.ssd_cache_write_dir(db) is None:
+                asyncio.get_running_loop().run_in_executor(None, _bg_process_ssd_pending_moves)
+        finally:
+            db.close()
 
 
 async def lifespan(_: FastAPI):
@@ -212,7 +235,8 @@ async def lifespan(_: FastAPI):
         log.info("Criptografia: desabilitada")
     asyncio.get_running_loop().run_in_executor(None, _backfill_content_copies)
     asyncio.get_running_loop().run_in_executor(None, _resume_ssd_pending_moves)
-    monitor = asyncio.create_task(_volume_health_monitor())
+    monitor     = asyncio.create_task(_volume_health_monitor())
+    ssd_monitor = asyncio.create_task(_ssd_space_monitor())
     sched.scheduler.start()
     sched.reload_jobs_from_db()
     sched.schedule_daily_digest()
@@ -223,6 +247,7 @@ async def lifespan(_: FastAPI):
     log.info(f"Auth: {'habilitada' if AUTH_ENABLED else 'desabilitada'}")
     yield
     monitor.cancel()
+    ssd_monitor.cancel()
     sched.scheduler.shutdown(wait=False)
 
 
@@ -1765,6 +1790,7 @@ def finish_version(label: str, version_key: str, req: VersionFinish, background_
     log.info(f"[versao] {label}/{version_key} → {req.status}")
     if req.status == "done":
         background_tasks.add_task(_bg_auto_cleanup)
+        background_tasks.add_task(_bg_process_ssd_pending_moves)
     return _version_stats(v, db)
 
 
@@ -1994,9 +2020,7 @@ async def upload_file(
                     dest.unlink(missing_ok=True)
                     fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
                 else:
-                    if use_ssd:
-                        background_tasks.add_task(_bg_process_ssd_pending_moves)
-                    else:
+                    if not use_ssd:
                         _ensure_replicas(sha256, dest, db)
         except Exception:
             tmp_path.unlink(missing_ok=True)
