@@ -6,6 +6,7 @@ volume selection, replication, and encryption logic without
 creating a circular import.
 """
 import os, shutil, logging, asyncio, threading, hashlib
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -335,6 +336,26 @@ def _file_sha256_raw(path: Path) -> str:
     return h.hexdigest()
 
 
+def _mark_versions_failed_for_sha256(sha256: str, db) -> None:
+    from database import VersionFile, BackupVersion
+    version_ids = [
+        r.version_id for r in
+        db.query(VersionFile.version_id)
+        .filter(VersionFile.sha256 == sha256)
+        .distinct()
+        .all()
+    ]
+    if not version_ids:
+        return
+    for v in db.query(BackupVersion).filter(BackupVersion.id.in_(version_ids)).all():
+        v.status = "failed"
+        v.finished_at = datetime.now()
+        log.error(
+            f"[ssd-cache] {v.backup_label}/{v.version_key} marcada como failed "
+            f"— arquivo {sha256[:8]}… não pôde ser movido para HDD após 5 tentativas"
+        )
+
+
 def process_ssd_pending_moves(db) -> int:
     """Move up to 10 pending SSD-cached files to their HDD destination. Returns count moved."""
     from database import SsdCachePendingMove, FileContent, FileContentCopy
@@ -364,6 +385,9 @@ def process_ssd_pending_moves(db) -> int:
                 dest_path.unlink(missing_ok=True)
                 move.retry_count += 1
                 log.warning(f"[ssd-cache] {move.sha256[:8]}… cópia corrompida no HDD — retry {move.retry_count}")
+                if move.retry_count >= 5:
+                    log.error(f"[ssd-cache] {move.sha256[:8]}… atingiu 5 retries (hash mismatch) — permanece no SSD")
+                    _mark_versions_failed_for_sha256(move.sha256, db)
                 db.commit()
                 continue
             fc = db.query(FileContent).filter(FileContent.sha256 == move.sha256).first()
@@ -392,5 +416,6 @@ def process_ssd_pending_moves(db) -> int:
             log.warning(f"[ssd-cache] Erro ao mover {move.sha256[:8]}…: {e} — retry {move.retry_count}")
             if move.retry_count >= 5:
                 log.error(f"[ssd-cache] {move.sha256[:8]}… atingiu 5 retries — permanece no SSD")
+                _mark_versions_failed_for_sha256(move.sha256, db)
             db.commit()
     return completed
