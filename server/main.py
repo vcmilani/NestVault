@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
-import asyncio, os, hashlib, secrets, base64, shutil, logging
+import asyncio, os, hashlib, secrets, base64, shutil, logging, time
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -60,6 +60,48 @@ _volume_health_monitor   = storage.volume_health_monitor
 _volumes_with_free_space = storage.volumes_with_free_space
 _ssd_cache_write_dir     = storage.ssd_cache_write_dir
 _ssd_content_path        = storage.ssd_content_path
+
+
+_reclaimable_cache: dict = {"value": 0, "ts": 0.0}
+_RECLAIMABLE_TTL = 60.0
+
+
+def _get_reclaimable_bytes(db: Session) -> int:
+    now = time.monotonic()
+    if now - _reclaimable_cache["ts"] < _RECLAIMABLE_TTL:
+        return _reclaimable_cache["value"]
+    latest_ts_sq = (
+        db.query(BackupVersion.backup_label, func.max(BackupVersion.created_at).label("latest_ts"))
+        .filter(BackupVersion.status == "done")
+        .group_by(BackupVersion.backup_label)
+        .subquery()
+    )
+    keeper_ids = [
+        row.id for row in (
+            db.query(BackupVersion.id)
+            .join(latest_ts_sq,
+                  (BackupVersion.backup_label == latest_ts_sq.c.backup_label) &
+                  (BackupVersion.created_at   == latest_ts_sq.c.latest_ts))
+            .all()
+        )
+    ]
+    if keeper_ids:
+        kept_sq = (
+            db.query(VersionFile.sha256.label("sha256"))
+            .filter(VersionFile.version_id.in_(keeper_ids))
+            .distinct()
+            .subquery()
+        )
+        result = (
+            db.query(func.coalesce(func.sum(FileContent.size), 0))
+            .outerjoin(kept_sq, FileContent.sha256 == kept_sq.c.sha256)
+            .filter(kept_sq.c.sha256.is_(None))
+            .scalar()
+        ) or 0
+    else:
+        result = db.query(func.coalesce(func.sum(FileContent.size), 0)).scalar() or 0
+    _reclaimable_cache.update({"value": int(result), "ts": now})
+    return int(result)
 
 
 def _pick_volume() -> Path:
@@ -1186,59 +1228,36 @@ def get_activity(db: Session = Depends(get_db)):
     usage_total = sum(u.total for u in usages)
     usage_used  = sum(u.used  for u in usages)
     usage_free  = sum(u.free  for u in usages)
-    latest_ts_sq = (
-        db.query(BackupVersion.backup_label, func.max(BackupVersion.created_at).label("latest_ts"))
-        .filter(BackupVersion.status == "done")
-        .group_by(BackupVersion.backup_label)
-        .subquery()
-    )
-    keeper_ids = [
-        row.id for row in (
-            db.query(BackupVersion.id)
-            .join(latest_ts_sq,
-                  (BackupVersion.backup_label == latest_ts_sq.c.backup_label) &
-                  (BackupVersion.created_at   == latest_ts_sq.c.latest_ts))
-            .all()
-        )
-    ]
-    if keeper_ids:
-        kept_sq = (
-            db.query(VersionFile.sha256.label("sha256"))
-            .filter(VersionFile.version_id.in_(keeper_ids))
-            .distinct()
-            .subquery()
-        )
-        reclaimable = (
-            db.query(func.coalesce(func.sum(FileContent.size), 0))
-            .outerjoin(kept_sq, FileContent.sha256 == kept_sq.c.sha256)
-            .filter(kept_sq.c.sha256.is_(None))
-            .scalar()
-        ) or 0
-    else:
-        reclaimable = db.query(func.coalesce(func.sum(FileContent.size), 0)).scalar() or 0
     storage_obj = StorageInfoResponse(
         total_bytes=usage_total, used_bytes=usage_used,
-        free_bytes=usage_free, reclaimable_bytes=int(reclaimable),
+        free_bytes=usage_free, reclaimable_bytes=_get_reclaimable_bytes(db),
     )
 
-    # 4. Disks (mesma lógica do storage_disks())
+    # 4. Disks — 1 query GROUP BY em vez de 2 queries por volume
+    _vol_paths = [str(v) for v in STORAGE_VOLUMES]
+    _disk_rows = (
+        db.query(
+            FileContentCopy.volume_path,
+            func.count(FileContentCopy.id).label("cnt"),
+            func.coalesce(func.sum(FileContent.size), 0).label("bytes"),
+        )
+        .join(FileContent, FileContent.sha256 == FileContentCopy.sha256)
+        .filter(FileContentCopy.volume_path.in_(_vol_paths))
+        .group_by(FileContentCopy.volume_path)
+        .all()
+    )
+    _disk_stats = {r.volume_path: (r.cnt, int(r.bytes)) for r in _disk_rows}
     disks_list = []
     for vol in STORAGE_VOLUMES:
         usage = _safe_disk_usage(vol)
-        status = "degraded" if usage is None else "ok"
-        cf = db.query(func.count(FileContentCopy.id)).filter(FileContentCopy.volume_path == str(vol)).scalar() or 0
-        cb = (
-            db.query(func.coalesce(func.sum(FileContent.size), 0))
-            .join(FileContentCopy, FileContentCopy.sha256 == FileContent.sha256)
-            .filter(FileContentCopy.volume_path == str(vol))
-            .scalar()
-        ) or 0
+        files, bytes_ = _disk_stats.get(str(vol), (0, 0))
         disks_list.append(DiskVolumeInfo(
             path=str(vol),
             total_bytes=usage.total if usage else 0,
             used_bytes=usage.used  if usage else 0,
             free_bytes=usage.free  if usage else 0,
-            content_files=cf, content_bytes=int(cb), status=status,
+            content_files=files, content_bytes=bytes_,
+            status="degraded" if usage is None else "ok",
         ))
 
     # 5. Versões recentes (últimas 24h, status finalizado)
@@ -1268,24 +1287,25 @@ def get_activity(db: Session = Depends(get_db)):
             .all()
         ):
             rstats[row.version_id] = (row.fc, int(row.sz))
-    # Calcula diffs das versões done vs. predecessor done do mesmo label.
-    # Usa estratégia bulk (N queries de 1 linha + 1 query IN) para ser eficiente com polling
-    # frequente. A versão por-chamada está em _version_diff() em daily_digest.py — adequada
-    # para o digest, que processa poucas versões de uma só vez e roda raramente.
+    # Calcula diffs: busca todos os predecessores com 1 query bulk em vez de N queries.
     done_vs = [v for v in recent_vs if v.status == "done"]
     prev_id_map: dict[int, Optional[int]] = {}
-    for v in done_vs:
-        prev = (
-            db.query(BackupVersion.id)
-            .filter(
-                BackupVersion.backup_label == v.backup_label,
-                BackupVersion.version_key < v.version_key,
-                BackupVersion.status == "done",
-            )
-            .order_by(BackupVersion.version_key.desc())
-            .first()
+    if done_vs:
+        from collections import defaultdict
+        done_labels = {v.backup_label for v in done_vs}
+        all_done_rows = (
+            db.query(BackupVersion.id, BackupVersion.backup_label, BackupVersion.version_key)
+            .filter(BackupVersion.backup_label.in_(done_labels), BackupVersion.status == "done")
+            .order_by(BackupVersion.backup_label, BackupVersion.version_key)
+            .all()
         )
-        prev_id_map[v.id] = prev.id if prev else None
+        by_label: dict[str, list] = defaultdict(list)
+        for row in all_done_rows:
+            by_label[row.backup_label].append(row)
+        for v in done_vs:
+            rows = by_label.get(v.backup_label, [])
+            idx = next((i for i, r in enumerate(rows) if r.id == v.id), None)
+            prev_id_map[v.id] = rows[idx - 1].id if idx is not None and idx > 0 else None
 
     all_diff_ids = set(prev_id_map.keys()) | {pid for pid in prev_id_map.values() if pid}
     files_by_vid: dict[int, dict[str, str]] = {}
@@ -1399,48 +1419,11 @@ def storage_info(db: Session = Depends(get_db)):
     usage_used  = sum(u.used  for u in usages)
     usage_free  = sum(u.free  for u in usages)
 
-    # Keeper = versão "done" mais recente de cada label — 1 query via subquery com MAX(created_at)
-    latest_ts_sq = (
-        db.query(
-            BackupVersion.backup_label,
-            func.max(BackupVersion.created_at).label("latest_ts"),
-        )
-        .filter(BackupVersion.status == "done")
-        .group_by(BackupVersion.backup_label)
-        .subquery()
-    )
-    keeper_ids: list[int] = [
-        row.id for row in (
-            db.query(BackupVersion.id)
-            .join(latest_ts_sq,
-                  (BackupVersion.backup_label == latest_ts_sq.c.backup_label) &
-                  (BackupVersion.created_at   == latest_ts_sq.c.latest_ts))
-            .all()
-        )
-    ]
-
-    if keeper_ids:
-        # LEFT JOIN anti-join: mais eficiente que NOT IN para conjuntos grandes
-        kept_sq = (
-            db.query(VersionFile.sha256.label("sha256"))
-            .filter(VersionFile.version_id.in_(keeper_ids))
-            .distinct()
-            .subquery()
-        )
-        reclaimable = (
-            db.query(func.coalesce(func.sum(FileContent.size), 0))
-            .outerjoin(kept_sq, FileContent.sha256 == kept_sq.c.sha256)
-            .filter(kept_sq.c.sha256.is_(None))
-            .scalar()
-        ) or 0
-    else:
-        reclaimable = db.query(func.coalesce(func.sum(FileContent.size), 0)).scalar() or 0
-
     return StorageInfoResponse(
         total_bytes=usage_total,
         used_bytes=usage_used,
         free_bytes=usage_free,
-        reclaimable_bytes=int(reclaimable),
+        reclaimable_bytes=_get_reclaimable_bytes(db),
     )
 
 
