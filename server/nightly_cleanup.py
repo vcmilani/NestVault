@@ -6,6 +6,7 @@ from pathlib import Path
 
 from database import SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob
 from sqlalchemy import select
+from cache_state import invalidate_activity
 
 log = logging.getLogger("backup-server")
 
@@ -216,6 +217,7 @@ def run_nightly_cleanup() -> None:
         )
         db.add(mj)
         db.commit()
+        invalidate_activity()
 
     except Exception:
         log.exception("[nightly-cleanup] Erro durante limpeza noturna")
@@ -228,6 +230,7 @@ def run_nightly_cleanup() -> None:
             )
             db.add(mj)
             db.commit()
+            invalidate_activity()
         except Exception:
             pass
         raise

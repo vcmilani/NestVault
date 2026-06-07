@@ -301,7 +301,7 @@
 
   function _interval(data) {
     const hasMaintRunning = (data.maintenance_jobs || []).some(j => j.status === 'running');
-    return (data.running_versions.length + data.running_jobs.length > 0 || hasMaintRunning) ? 5000 : 15000;
+    return (data.running_versions.length + data.running_jobs.length > 0 || hasMaintRunning) ? 2000 : 15000;
   }
 
   async function poll() {

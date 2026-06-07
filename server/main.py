@@ -28,6 +28,7 @@ import storage
 from auth import require_api_key, API_KEY, AUTH_ENABLED
 from cloud.router import router as cloud_router
 import scheduler as sched
+from cache_state import _activity_cache, _ACTIVITY_TTL_ACTIVE, _ACTIVITY_TTL_IDLE, invalidate_activity
 
 logging.basicConfig(
     level=logging.INFO,
@@ -169,6 +170,7 @@ def _bg_process_ssd_pending_moves():
         job.summary = str(e)
     finally:
         db.commit()
+        invalidate_activity()
         db.close()
         _ssd_move_lock.release()
 
@@ -208,6 +210,7 @@ def _resume_ssd_pending_moves():
             job.summary = str(e)
     finally:
         db.commit()
+        invalidate_activity()
         db.close()
         _ssd_move_lock.release()
 
@@ -864,6 +867,7 @@ def _bg_cleanup_orphan_contents() -> None:
             )
             db.add(mj)
             db.commit()
+            invalidate_activity()
         else:
             log.info("[bg-cleanup] nenhuma limpeza necessária, não havia arquivos órfãos")
     finally:
@@ -885,6 +889,7 @@ def _bg_auto_cleanup() -> None:
             )
             db.add(mj)
             db.commit()
+            invalidate_activity()
     finally:
         db.close()
 
@@ -941,12 +946,14 @@ def _bg_cleanup_by_date(version_ids: list[int], scope: str) -> None:
             mj.finished_at = datetime.now()
             mj.summary = f"{total} versão(ões) removidas, {orphan_total} arquivo(s) liberados ({round(bytes_total/1024/1024, 1)} MB)"
             db.commit()
+            invalidate_activity()
         except Exception:
             mj = db.get(MaintenanceJob, mj_id)
             if mj:
                 mj.status = "failed"
                 mj.finished_at = datetime.now()
                 db.commit()
+                invalidate_activity()
             raise
     finally:
         db.close()
@@ -1113,6 +1120,7 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
             mj.finished_at = datetime.now()
             mj.summary = summary
             db.commit()
+            invalidate_activity()
 
     except Exception:
         log.exception("[migrate-disk] erro inesperado")
@@ -1122,6 +1130,7 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
                 mj.status = "failed"
                 mj.finished_at = datetime.now()
                 db.commit()
+                invalidate_activity()
         except Exception:
             pass
         raise
@@ -1173,6 +1182,19 @@ def activity_page():
 @app.get("/api/activity", response_model=ActivityResponse, dependencies=[Depends(require_api_key)])
 def get_activity(db: Session = Depends(get_db)):
     from datetime import timedelta
+
+    # Serve do cache quando não está dirty e o TTL não expirou
+    _now = time.monotonic()
+    _cached = _activity_cache["data"]
+    if _cached is not None and not _activity_cache["dirty"]:
+        _is_active = (
+            _cached.running_versions or
+            _cached.running_jobs or
+            any(j.status == "running" for j in _cached.maintenance_jobs)
+        )
+        _ttl = _ACTIVITY_TTL_ACTIVE if _is_active else _ACTIVITY_TTL_IDLE
+        if _now - _activity_cache["ts"] < _ttl:
+            return _cached.model_copy(update={"server_time": datetime.now().isoformat()})
 
     # 1. Versões de backup em execução
     running_vs = (
@@ -1420,7 +1442,7 @@ def get_activity(db: Session = Depends(get_db)):
         for m in maint_rows
     ]
 
-    return ActivityResponse(
+    _response = ActivityResponse(
         running_versions=running_version_infos,
         running_jobs=running_job_infos,
         storage=storage_obj,
@@ -1430,6 +1452,8 @@ def get_activity(db: Session = Depends(get_db)):
         maintenance_jobs=maintenance_job_infos,
         server_time=datetime.now().isoformat(),
     )
+    _activity_cache.update({"data": _response, "dirty": False, "ts": _now})
+    return _response
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -1709,6 +1733,7 @@ def delete_backup(label: str, background_tasks: BackgroundTasks, db: Session = D
     )
     db.delete(b)
     db.commit()
+    invalidate_activity()
     log.info(f"[delete] Label [{label}] excluído — limpeza de órfãos em background")
     background_tasks.add_task(_bg_cleanup_orphan_contents)
     return BackupDeletedResponse(status="deleted", label=label)
@@ -1732,6 +1757,7 @@ def create_version(label: str, req: VersionCreate, db: Session = Depends(get_db)
         log.info(f"[versao] {label}: {updated} versão(ões) running → incomplete")
     v = BackupVersion(backup_label=label, version_key=req.version_key)
     db.add(v); db.commit(); db.refresh(v)
+    invalidate_activity()
     log.info(f"[versao] {label}/{req.version_key} criada")
     return VersionCreatedResponse(created=True, version=_version_stats(v, db))
 
@@ -1787,6 +1813,7 @@ def finish_version(label: str, version_key: str, req: VersionFinish, background_
     v.status = req.status
     v.finished_at = datetime.now()
     db.commit()
+    invalidate_activity()
     log.info(f"[versao] {label}/{version_key} → {req.status}")
     if req.status == "done":
         background_tasks.add_task(_bg_auto_cleanup)
@@ -1840,6 +1867,7 @@ def delete_version(label: str, version_key: str, background_tasks: BackgroundTas
     v = _get_version_or_404(label, version_key, db)
     db.delete(v)
     db.commit()
+    invalidate_activity()
     log.info(f"[delete] Versão {label}/{version_key} excluída — limpeza em background")
     background_tasks.add_task(_bg_cleanup_orphan_contents)
     return VersionDeletedResponse(
