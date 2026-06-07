@@ -552,8 +552,6 @@
   async function init() {
     const resp = await fetch('/health');
     if (!resp.ok) { showError('Servidor indisponível'); return; }
-    const test = await fetch('/api/activity', {headers: H()});
-    if (test.status === 401) { showLogin(); return; }
     _startTick();
     poll();
   }
