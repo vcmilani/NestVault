@@ -101,12 +101,27 @@ def _cleanup_stale_running_states():
 
 def _bg_process_ssd_pending_moves():
     db = SessionLocal()
+    job = MaintenanceJob(job_type="ssd-cache-move", status="running")
+    db.add(job)
+    db.commit()
+    db.refresh(job)
     try:
-        while storage.process_ssd_pending_moves(db):
-            pass
+        total = 0
+        while True:
+            done = storage.process_ssd_pending_moves(db)
+            total += done
+            if done == 0:
+                break
+        job.status = "done"
+        job.finished_at = datetime.now()
+        job.summary = f"{total} arquivo(s) movidos SSD → HDD"
     except Exception as e:
         log.error(f"[ssd-cache] Erro no worker de move: {e}")
+        job.status = "error"
+        job.finished_at = datetime.now()
+        job.summary = str(e)
     finally:
+        db.commit()
         db.close()
 
 
@@ -119,16 +134,29 @@ def _resume_ssd_pending_moves():
         if not count:
             return
         log.info(f"[ssd-cache] {count} move(s) pendentes encontrados — retomando")
+        job = MaintenanceJob(job_type="ssd-cache-move", status="running",
+                             summary=f"Recovery: {count} pendente(s)")
+        db.add(job)
+        db.commit()
+        db.refresh(job)
         total = 0
         while True:
             done = storage.process_ssd_pending_moves(db)
             total += done
             if done == 0:
                 break
+        job.status = "done"
+        job.finished_at = datetime.now()
+        job.summary = f"Recovery: {total} arquivo(s) movidos SSD → HDD"
         log.info(f"[ssd-cache] recovery concluída — {total} arquivo(s) movidos para HDD")
     except Exception as e:
         log.error(f"[ssd-cache] Erro na recovery de moves pendentes: {e}")
+        if 'job' in locals():
+            job.status = "error"
+            job.finished_at = datetime.now()
+            job.summary = str(e)
     finally:
+        db.commit()
         db.close()
 
 
