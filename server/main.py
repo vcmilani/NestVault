@@ -28,7 +28,7 @@ import storage
 from auth import require_api_key, API_KEY, AUTH_ENABLED
 from cloud.router import router as cloud_router
 import scheduler as sched
-from cache_state import _activity_cache, _ACTIVITY_TTL_ACTIVE, _ACTIVITY_TTL_IDLE, invalidate_activity
+from cache_state import _activity_cache, _ACTIVITY_TTL_ACTIVE, _ACTIVITY_TTL_IDLE, _activity_wake, invalidate_activity
 
 logging.basicConfig(
     level=logging.INFO,
@@ -238,8 +238,9 @@ async def lifespan(_: FastAPI):
         log.info("Criptografia: desabilitada")
     asyncio.get_running_loop().run_in_executor(None, _backfill_content_copies)
     asyncio.get_running_loop().run_in_executor(None, _resume_ssd_pending_moves)
-    monitor     = asyncio.create_task(_volume_health_monitor())
-    ssd_monitor = asyncio.create_task(_ssd_space_monitor())
+    monitor         = asyncio.create_task(_volume_health_monitor())
+    ssd_monitor     = asyncio.create_task(_ssd_space_monitor())
+    activity_refresh = asyncio.create_task(_activity_refresh_loop())
     sched.scheduler.start()
     sched.reload_jobs_from_db()
     sched.schedule_daily_digest()
@@ -251,6 +252,7 @@ async def lifespan(_: FastAPI):
     yield
     monitor.cancel()
     ssd_monitor.cancel()
+    activity_refresh.cancel()
     sched.scheduler.shutdown(wait=False)
 
 
@@ -1179,22 +1181,10 @@ def activity_page():
     return HTMLResponse(page.read_text(encoding="utf-8"))
 
 
-@app.get("/api/activity", response_model=ActivityResponse, dependencies=[Depends(require_api_key)])
-def get_activity(db: Session = Depends(get_db)):
+def _build_activity_data(db: Session) -> "ActivityResponse":
+    """Executa todas as queries de DB e retorna um ActivityResponse. Chamado apenas pelo background refresh task."""
     from datetime import timedelta
-
-    # Serve do cache quando não está dirty e o TTL não expirou
-    _now = time.monotonic()
-    _cached = _activity_cache["data"]
-    if _cached is not None and not _activity_cache["dirty"]:
-        _is_active = (
-            _cached.running_versions or
-            _cached.running_jobs or
-            any(j.status == "running" for j in _cached.maintenance_jobs)
-        )
-        _ttl = _ACTIVITY_TTL_ACTIVE if _is_active else _ACTIVITY_TTL_IDLE
-        if _now - _activity_cache["ts"] < _ttl:
-            return _cached.model_copy(update={"server_time": datetime.now().isoformat()})
+    from collections import defaultdict
 
     # 1. Versões de backup em execução
     running_vs = (
@@ -1219,7 +1209,6 @@ def get_activity(db: Session = Depends(get_db)):
         ):
             stats_map[row.version_id] = (row.fc, int(row.sz))
 
-    # Última versão concluída por label (referência para os cards de running)
     prev_stats: dict[str, tuple[int, int]] = {}
     for label in {v.backup_label for v in running_vs}:
         last_done = (
@@ -1270,7 +1259,7 @@ def get_activity(db: Session = Depends(get_db)):
         for j, c in running_job_rows
     ]
 
-    # 3. Storage (mesma lógica do storage_info())
+    # 3. Storage
     usages = [u for u in (_safe_disk_usage(v) for v in STORAGE_VOLUMES) if u]
     usage_total = sum(u.total for u in usages)
     usage_used  = sum(u.used  for u in usages)
@@ -1334,11 +1323,10 @@ def get_activity(db: Session = Depends(get_db)):
             .all()
         ):
             rstats[row.version_id] = (row.fc, int(row.sz))
-    # Calcula diffs: busca todos os predecessores com 1 query bulk em vez de N queries.
+
     done_vs = [v for v in recent_vs if v.status == "done"]
     prev_id_map: dict[int, Optional[int]] = {}
     if done_vs:
-        from collections import defaultdict
         done_labels = {v.backup_label for v in done_vs}
         all_done_rows = (
             db.query(BackupVersion.id, BackupVersion.backup_label, BackupVersion.version_key)
@@ -1442,7 +1430,7 @@ def get_activity(db: Session = Depends(get_db)):
         for m in maint_rows
     ]
 
-    _response = ActivityResponse(
+    return ActivityResponse(
         running_versions=running_version_infos,
         running_jobs=running_job_infos,
         storage=storage_obj,
@@ -1452,8 +1440,42 @@ def get_activity(db: Session = Depends(get_db)):
         maintenance_jobs=maintenance_job_infos,
         server_time=datetime.now().isoformat(),
     )
-    _activity_cache.update({"data": _response, "dirty": False, "ts": _now})
-    return _response
+
+
+async def _activity_refresh_loop() -> None:
+    """Background task que mantém o cache de activity sempre fresco, sem bloquear o request path."""
+    loop = asyncio.get_running_loop()
+    while True:
+        try:
+            def _do_refresh():
+                db = SessionLocal()
+                try:
+                    return _build_activity_data(db)
+                finally:
+                    db.close()
+            data = await loop.run_in_executor(None, _do_refresh)
+            _activity_cache.update({"data": data, "dirty": False, "ts": time.monotonic()})
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("[activity-cache] Erro ao atualizar cache")
+
+        cached = _activity_cache.get("data")
+        is_active = bool(cached and (
+            cached.running_versions or cached.running_jobs or
+            any(j.status == "running" for j in cached.maintenance_jobs)
+        ))
+        ttl = _ACTIVITY_TTL_ACTIVE if is_active else _ACTIVITY_TTL_IDLE
+        await loop.run_in_executor(None, lambda: _activity_wake.wait(timeout=ttl))
+        _activity_wake.clear()
+
+
+@app.get("/api/activity", response_model=ActivityResponse, dependencies=[Depends(require_api_key)])
+def get_activity():
+    cached = _activity_cache["data"]
+    if cached is None:
+        raise HTTPException(status_code=503, detail="Inicializando — aguarde")
+    return cached.model_copy(update={"server_time": datetime.now().isoformat()})
 
 
 @app.get("/health", response_model=HealthResponse)
