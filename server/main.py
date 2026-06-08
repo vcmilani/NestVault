@@ -1459,6 +1459,8 @@ async def _activity_refresh_loop() -> None:
             raise
         except Exception:
             log.exception("[activity-cache] Erro ao atualizar cache")
+            await asyncio.sleep(_ACTIVITY_TTL_ACTIVE)  # retry rápido em vez de usar TTL de dados antigos
+            continue
 
         cached = _activity_cache.get("data")
         is_active = bool(cached and (
@@ -1471,10 +1473,13 @@ async def _activity_refresh_loop() -> None:
 
 
 @app.get("/api/activity", response_model=ActivityResponse, dependencies=[Depends(require_api_key)])
-def get_activity():
+def get_activity(db: Session = Depends(get_db)):
     cached = _activity_cache["data"]
     if cached is None:
-        raise HTTPException(status_code=503, detail="Inicializando — aguarde")
+        # Cold start: background task ainda não completou o primeiro refresh
+        data = _build_activity_data(db)
+        _activity_cache.update({"data": data, "dirty": False, "ts": time.monotonic()})
+        return data
     return cached.model_copy(update={"server_time": datetime.now().isoformat()})
 
 
