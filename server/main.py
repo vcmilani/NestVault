@@ -385,7 +385,7 @@ class FileInfo(BaseModel):
     original_path: str
     sha256: str
     size: int
-    mtime: float
+    mtime: Optional[float] = None
     created_at: str
 
 class CleanupResponse(BaseModel):
