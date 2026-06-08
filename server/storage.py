@@ -386,8 +386,12 @@ def process_ssd_pending_moves(db) -> int:
                 move.retry_count += 1
                 log.warning(f"[ssd-cache] {move.sha256[:8]}… cópia corrompida no HDD — retry {move.retry_count}")
                 if move.retry_count >= 5:
-                    log.error(f"[ssd-cache] {move.sha256[:8]}… atingiu 5 retries (hash mismatch) — permanece no SSD")
-                    _mark_versions_failed_for_sha256(move.sha256, db)
+                    log.error(f"[ssd-cache] {move.sha256[:8]}… atingiu 5 retries (hash mismatch) — abandonando move")
+                    try:
+                        _mark_versions_failed_for_sha256(move.sha256, db)
+                    except Exception as _ex:
+                        log.error(f"[ssd-cache] erro ao marcar versões como failed: {_ex}")
+                    db.delete(move)
                 db.commit()
                 continue
             fc = db.query(FileContent).filter(FileContent.sha256 == move.sha256).first()
@@ -415,7 +419,11 @@ def process_ssd_pending_moves(db) -> int:
             move.retry_count += 1
             log.warning(f"[ssd-cache] Erro ao mover {move.sha256[:8]}…: {e} — retry {move.retry_count}")
             if move.retry_count >= 5:
-                log.error(f"[ssd-cache] {move.sha256[:8]}… atingiu 5 retries — permanece no SSD")
-                _mark_versions_failed_for_sha256(move.sha256, db)
+                log.error(f"[ssd-cache] {move.sha256[:8]}… atingiu 5 retries — abandonando move")
+                try:
+                    _mark_versions_failed_for_sha256(move.sha256, db)
+                except Exception as _ex:
+                    log.error(f"[ssd-cache] erro ao marcar versões como failed: {_ex}")
+                db.delete(move)
             db.commit()
     return completed
