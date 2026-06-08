@@ -4,8 +4,8 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from database import SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob
-from sqlalchemy import select
+from database import SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob, engine
+from sqlalchemy import select, text
 from cache_state import invalidate_activity
 
 log = logging.getLogger("backup-server")
@@ -236,3 +236,15 @@ def run_nightly_cleanup() -> None:
         raise
     finally:
         db.close()
+
+    # VACUUM fora de transação para compactar o arquivo SQLite.
+    # O SQLite só libera espaço em disco com VACUUM — deletar linhas apenas
+    # marca páginas como livres na freelist, sem encolher o arquivo.
+    try:
+        raw = engine.raw_connection()
+        raw.isolation_level = None  # autocommit — VACUUM não pode rodar dentro de transação
+        raw.execute("VACUUM")
+        raw.close()
+        log.info("[nightly-cleanup] VACUUM concluído — espaço em disco liberado")
+    except Exception:
+        log.warning("[nightly-cleanup] Falha ao executar VACUUM (não crítico)")
