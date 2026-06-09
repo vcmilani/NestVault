@@ -138,7 +138,18 @@ def _cleanup_stale_running_states():
             v.finished_at = datetime.now()
             log.warning(f"[startup] Versão {v.backup_label}/{v.version_key} estava running — marcada como incomplete")
 
-        if stale_jobs or stale_versions:
+        stale_maint = (
+            db.query(MaintenanceJob)
+            .filter(MaintenanceJob.status == "running")
+            .all()
+        )
+        for m in stale_maint:
+            m.status      = "error"
+            m.finished_at = datetime.now()
+            m.summary     = (m.summary or "") + " [interrompido pelo reinício do servidor]"
+            log.warning(f"[startup] MaintenanceJob {m.id} ({m.job_type}) estava running — marcado como error")
+
+        if stale_jobs or stale_versions or stale_maint:
             db.commit()
     finally:
         db.close()
