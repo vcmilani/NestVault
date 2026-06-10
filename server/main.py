@@ -28,7 +28,7 @@ import storage
 from auth import require_api_key, API_KEY, AUTH_ENABLED
 from cloud.router import router as cloud_router
 import scheduler as sched
-from cache_state import _activity_cache, _ACTIVITY_TTL_ACTIVE, _ACTIVITY_TTL_IDLE, _activity_wake, _historical_stale, invalidate_activity
+from cache_state import _activity_wake, invalidate_activity
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,10 +69,10 @@ _reclaimable_cache: dict = {"value": 0, "ts": 0.0}
 _RECLAIMABLE_TTL = 60.0
 
 # Cache para dados históricos (recent_versions com diffs, recent_jobs, maintenance_jobs).
-# Esses dados mudam raramente durante um backup ativo — são atualizados a cada 30s ou
-# imediatamente quando invalidate_activity() é chamado (via _historical_stale).
+# Só atualizado quando invalidate_activity() é chamado (fim de backup/job/manutenção).
+# Fallback de 5 min para não ficar preso caso alguma invalidação seja perdida.
 _historical_cache: dict = {"data": None, "ts": 0.0}
-_HISTORICAL_TTL = 30.0
+_HISTORICAL_FALLBACK_TTL = 300.0
 
 
 def _get_reclaimable_bytes(db: Session) -> int:
@@ -1207,10 +1207,9 @@ def activity_page():
     return HTMLResponse(page.read_text(encoding="utf-8"))
 
 
-def _build_activity_data(db: Session) -> "ActivityResponse":
-    """Executa todas as queries de DB e retorna um ActivityResponse. Chamado apenas pelo background refresh task."""
-    from datetime import timedelta
-    from collections import defaultdict
+def _build_fast_data(db: Session) -> tuple:
+    """Queries leves para dados em tempo real: versões/jobs em execução, storage e discos.
+    Chamado inline a cada request — retorna (running_version_infos, running_job_infos, storage_obj, disks_list)."""
 
     # 1. Versões de backup em execução
     running_vs = (
@@ -1322,207 +1321,202 @@ def _build_activity_data(db: Session) -> "ActivityResponse":
             status="degraded" if usage is None else "ok",
         ))
 
-    # 5-7. Dados históricos: recent_versions (com diffs), recent_jobs, maintenance_jobs.
-    # Essas queries são custosas (carregam todos os VersionFiles para calcular diffs) e
-    # mudam raramente durante um backup ativo. São cacheadas por _HISTORICAL_TTL segundos
-    # e invalidadas imediatamente quando invalidate_activity() é chamado.
-    _now_hist = time.monotonic()
-    _hist = _historical_cache["data"]
-    if _hist is None or _historical_stale["v"] or (_now_hist - _historical_cache["ts"]) >= _HISTORICAL_TTL:
-        cutoff = datetime.now() - timedelta(hours=24)
+    return running_version_infos, running_job_infos, storage_obj, disks_list
 
-        # 5. Versões recentes (últimas 24h, status finalizado)
-        recent_vs = (
-            db.query(BackupVersion)
-            .filter(
-                BackupVersion.status.in_(["done", "failed", "incomplete"]),
-                BackupVersion.finished_at >= cutoff,
-            )
-            .order_by(BackupVersion.finished_at.desc())
-            .limit(30)
-            .all()
+
+def _build_historical_data(db: Session) -> tuple:
+    """Queries pesadas: versões recentes com diffs, jobs e manutenções concluídos.
+    Só chamado quando invalidate_activity() acorda o loop histórico.
+    Retorna (recent_version_infos, recent_job_infos, maintenance_job_infos)."""
+    from datetime import timedelta
+    from collections import defaultdict
+
+    cutoff = datetime.now() - timedelta(hours=24)
+
+    # 5. Versões recentes (últimas 24h, status finalizado)
+    recent_vs = (
+        db.query(BackupVersion)
+        .filter(
+            BackupVersion.status.in_(["done", "failed", "incomplete"]),
+            BackupVersion.finished_at >= cutoff,
         )
-        rstats: dict[int, tuple[int, int]] = {}
-        if recent_vs:
-            rvids = [v.id for v in recent_vs]
-            for row in (
-                db.query(
-                    VersionFile.version_id,
-                    func.count(VersionFile.id).label("fc"),
-                    func.coalesce(func.sum(FileContent.size), 0).label("sz"),
-                )
-                .outerjoin(FileContent, FileContent.sha256 == VersionFile.sha256)
-                .filter(VersionFile.version_id.in_(rvids))
-                .group_by(VersionFile.version_id)
-                .all()
-            ):
-                rstats[row.version_id] = (row.fc, int(row.sz))
-
-        done_vs = [v for v in recent_vs if v.status == "done"]
-        prev_id_map: dict[int, Optional[int]] = {}
-        if done_vs:
-            done_labels = {v.backup_label for v in done_vs}
-            all_done_rows = (
-                db.query(BackupVersion.id, BackupVersion.backup_label, BackupVersion.version_key)
-                .filter(BackupVersion.backup_label.in_(done_labels), BackupVersion.status == "done")
-                .order_by(BackupVersion.backup_label, BackupVersion.version_key)
-                .all()
-            )
-            by_label: dict[str, list] = defaultdict(list)
-            for row in all_done_rows:
-                by_label[row.backup_label].append(row)
-            for v in done_vs:
-                rows = by_label.get(v.backup_label, [])
-                idx = next((i for i, r in enumerate(rows) if r.id == v.id), None)
-                prev_id_map[v.id] = rows[idx - 1].id if idx is not None and idx > 0 else None
-
-        all_diff_ids = set(prev_id_map.keys()) | {pid for pid in prev_id_map.values() if pid}
-        files_by_vid: dict[int, dict[str, str]] = {}
-        if all_diff_ids:
-            for row in (
-                db.query(VersionFile.version_id, VersionFile.original_path, VersionFile.sha256)
-                .filter(VersionFile.version_id.in_(all_diff_ids))
-                .all()
-            ):
-                files_by_vid.setdefault(row.version_id, {})[row.original_path] = row.sha256
-
-        diff_map: dict[int, dict] = {}
-        for v in done_vs:
-            cur = files_by_vid.get(v.id, {})
-            prev_id = prev_id_map.get(v.id)
-            if prev_id is None:
-                diff_map[v.id] = {"added": len(cur), "modified": 0, "removed": 0}
-            else:
-                prv = files_by_vid.get(prev_id, {})
-                diff_map[v.id] = {
-                    "added":    sum(1 for p in cur if p not in prv),
-                    "modified": sum(1 for p, h in cur.items() if p in prv and prv[p] != h),
-                    "removed":  sum(1 for p in prv if p not in cur),
-                }
-
-        recent_version_infos = []
-        for v in recent_vs:
-            fc, sz = rstats.get(v.id, (0, 0))
-            duration = None
-            if v.finished_at and v.created_at:
-                duration = round((v.finished_at - v.created_at).total_seconds(), 1)
-            d = diff_map.get(v.id)
-            recent_version_infos.append(RecentVersionInfo(
-                backup_label=v.backup_label, version_key=v.version_key,
-                status=v.status, created_at=str(v.created_at),
-                finished_at=str(v.finished_at) if v.finished_at else None,
-                duration_seconds=duration, file_count=fc, total_size_bytes=sz,
-                absorbed_count=v.absorbed_count or 0,
-                diff_added=d["added"] if d else None,
-                diff_modified=d["modified"] if d else None,
-                diff_removed=d["removed"] if d else None,
-            ))
-
-        # 6. Jobs cloud recentes (não rodando, últimos 10)
-        recent_job_rows = (
-            db.query(CloudBackupJob, CloudCredential)
-            .join(CloudCredential, CloudCredential.id == CloudBackupJob.credential_id)
-            .filter(
-                CloudBackupJob.last_run_at.isnot(None),
-                CloudBackupJob.last_run_status != "running",
-            )
-            .order_by(CloudBackupJob.last_run_at.desc())
-            .limit(10)
-            .all()
-        )
-        recent_job_infos = [
-            RecentJobInfo(
-                id=j.id, provider=c.provider, email=c.email,
-                folder_name=j.folder_name, target_label=j.target_label,
-                last_run_at=str(j.last_run_at),
-                last_run_status=j.last_run_status or "unknown",
-                last_run_message=j.last_run_message,
-            )
-            for j, c in recent_job_rows
-        ]
-
-        # 7. Maintenance jobs (em execução + últimas 24h)
-        maint_rows = (
-            db.query(MaintenanceJob)
-            .filter(
-                (MaintenanceJob.status == "running") |
-                (MaintenanceJob.started_at >= cutoff)
-            )
-            .order_by(MaintenanceJob.started_at.desc())
-            .limit(20)
-            .all()
-        )
-        maintenance_job_infos = [
-            MaintenanceJobInfo(
-                id=m.id,
-                job_type=m.job_type,
-                status=m.status,
-                started_at=str(m.started_at),
-                finished_at=str(m.finished_at) if m.finished_at else None,
-                summary=m.summary,
-            )
-            for m in maint_rows
-        ]
-
-        _historical_cache.update({
-            "data": (recent_version_infos, recent_job_infos, maintenance_job_infos),
-            "ts": _now_hist,
-        })
-        _historical_stale["v"] = False
-    else:
-        recent_version_infos, recent_job_infos, maintenance_job_infos = _hist
-
-    return ActivityResponse(
-        running_versions=running_version_infos,
-        running_jobs=running_job_infos,
-        storage=storage_obj,
-        disks=disks_list,
-        recent_versions=recent_version_infos,
-        recent_jobs=recent_job_infos,
-        maintenance_jobs=maintenance_job_infos,
-        server_time=datetime.now().isoformat(),
+        .order_by(BackupVersion.finished_at.desc())
+        .limit(30)
+        .all()
     )
+    rstats: dict[int, tuple[int, int]] = {}
+    if recent_vs:
+        rvids = [v.id for v in recent_vs]
+        for row in (
+            db.query(
+                VersionFile.version_id,
+                func.count(VersionFile.id).label("fc"),
+                func.coalesce(func.sum(FileContent.size), 0).label("sz"),
+            )
+            .outerjoin(FileContent, FileContent.sha256 == VersionFile.sha256)
+            .filter(VersionFile.version_id.in_(rvids))
+            .group_by(VersionFile.version_id)
+            .all()
+        ):
+            rstats[row.version_id] = (row.fc, int(row.sz))
+
+    done_vs = [v for v in recent_vs if v.status == "done"]
+    prev_id_map: dict[int, Optional[int]] = {}
+    if done_vs:
+        done_labels = {v.backup_label for v in done_vs}
+        all_done_rows = (
+            db.query(BackupVersion.id, BackupVersion.backup_label, BackupVersion.version_key)
+            .filter(BackupVersion.backup_label.in_(done_labels), BackupVersion.status == "done")
+            .order_by(BackupVersion.backup_label, BackupVersion.version_key)
+            .all()
+        )
+        by_label: dict[str, list] = defaultdict(list)
+        for row in all_done_rows:
+            by_label[row.backup_label].append(row)
+        for v in done_vs:
+            rows = by_label.get(v.backup_label, [])
+            idx = next((i for i, r in enumerate(rows) if r.id == v.id), None)
+            prev_id_map[v.id] = rows[idx - 1].id if idx is not None and idx > 0 else None
+
+    all_diff_ids = set(prev_id_map.keys()) | {pid for pid in prev_id_map.values() if pid}
+    files_by_vid: dict[int, dict[str, str]] = {}
+    if all_diff_ids:
+        for row in (
+            db.query(VersionFile.version_id, VersionFile.original_path, VersionFile.sha256)
+            .filter(VersionFile.version_id.in_(all_diff_ids))
+            .all()
+        ):
+            files_by_vid.setdefault(row.version_id, {})[row.original_path] = row.sha256
+
+    diff_map: dict[int, dict] = {}
+    for v in done_vs:
+        cur = files_by_vid.get(v.id, {})
+        prev_id = prev_id_map.get(v.id)
+        if prev_id is None:
+            diff_map[v.id] = {"added": len(cur), "modified": 0, "removed": 0}
+        else:
+            prv = files_by_vid.get(prev_id, {})
+            diff_map[v.id] = {
+                "added":    sum(1 for p in cur if p not in prv),
+                "modified": sum(1 for p, h in cur.items() if p in prv and prv[p] != h),
+                "removed":  sum(1 for p in prv if p not in cur),
+            }
+
+    recent_version_infos = []
+    for v in recent_vs:
+        fc, sz = rstats.get(v.id, (0, 0))
+        duration = None
+        if v.finished_at and v.created_at:
+            duration = round((v.finished_at - v.created_at).total_seconds(), 1)
+        d = diff_map.get(v.id)
+        recent_version_infos.append(RecentVersionInfo(
+            backup_label=v.backup_label, version_key=v.version_key,
+            status=v.status, created_at=str(v.created_at),
+            finished_at=str(v.finished_at) if v.finished_at else None,
+            duration_seconds=duration, file_count=fc, total_size_bytes=sz,
+            absorbed_count=v.absorbed_count or 0,
+            diff_added=d["added"] if d else None,
+            diff_modified=d["modified"] if d else None,
+            diff_removed=d["removed"] if d else None,
+        ))
+
+    # 6. Jobs cloud recentes (não rodando, últimos 10)
+    recent_job_rows = (
+        db.query(CloudBackupJob, CloudCredential)
+        .join(CloudCredential, CloudCredential.id == CloudBackupJob.credential_id)
+        .filter(
+            CloudBackupJob.last_run_at.isnot(None),
+            CloudBackupJob.last_run_status != "running",
+        )
+        .order_by(CloudBackupJob.last_run_at.desc())
+        .limit(10)
+        .all()
+    )
+    recent_job_infos = [
+        RecentJobInfo(
+            id=j.id, provider=c.provider, email=c.email,
+            folder_name=j.folder_name, target_label=j.target_label,
+            last_run_at=str(j.last_run_at),
+            last_run_status=j.last_run_status or "unknown",
+            last_run_message=j.last_run_message,
+        )
+        for j, c in recent_job_rows
+    ]
+
+    # 7. Maintenance jobs (em execução + últimas 24h)
+    maint_rows = (
+        db.query(MaintenanceJob)
+        .filter(
+            (MaintenanceJob.status == "running") |
+            (MaintenanceJob.started_at >= cutoff)
+        )
+        .order_by(MaintenanceJob.started_at.desc())
+        .limit(20)
+        .all()
+    )
+    maintenance_job_infos = [
+        MaintenanceJobInfo(
+            id=m.id,
+            job_type=m.job_type,
+            status=m.status,
+            started_at=str(m.started_at),
+            finished_at=str(m.finished_at) if m.finished_at else None,
+            summary=m.summary,
+        )
+        for m in maint_rows
+    ]
+
+    return recent_version_infos, recent_job_infos, maintenance_job_infos
 
 
 async def _activity_refresh_loop() -> None:
-    """Background task que mantém o cache de activity sempre fresco, sem bloquear o request path."""
+    """Recalcula o bloco histórico (recent_versions com diffs, recent_jobs, maint_jobs)
+    apenas quando invalidate_activity() acorda o loop — normalmente ao fim de um backup/job.
+    Fallback de 5 min para não ficar preso caso alguma invalidação seja perdida."""
     loop = asyncio.get_running_loop()
     while True:
+        await loop.run_in_executor(None, lambda: _activity_wake.wait(timeout=_HISTORICAL_FALLBACK_TTL))
+        _activity_wake.clear()
+
         try:
-            def _do_refresh():
+            def _do_hist():
                 db = SessionLocal()
                 try:
-                    return _build_activity_data(db)
+                    return _build_historical_data(db)
                 finally:
                     db.close()
-            data = await loop.run_in_executor(None, _do_refresh)
-            _activity_cache.update({"data": data, "dirty": False, "ts": time.monotonic()})
+            result = await loop.run_in_executor(None, _do_hist)
+            _historical_cache.update({"data": result, "ts": time.monotonic()})
+            log.debug("[activity-hist] cache histórico atualizado")
         except asyncio.CancelledError:
             raise
         except Exception:
-            log.exception("[activity-cache] Erro ao atualizar cache")
-            await asyncio.sleep(_ACTIVITY_TTL_ACTIVE)  # retry rápido em vez de usar TTL de dados antigos
-            continue
-
-        cached = _activity_cache.get("data")
-        is_active = bool(cached and (
-            cached.running_versions or cached.running_jobs or
-            any(j.status == "running" for j in cached.maintenance_jobs)
-        ))
-        ttl = _ACTIVITY_TTL_ACTIVE if is_active else _ACTIVITY_TTL_IDLE
-        await loop.run_in_executor(None, lambda: _activity_wake.wait(timeout=ttl))
-        _activity_wake.clear()
+            log.exception("[activity-hist] Erro ao atualizar cache histórico")
 
 
 @app.get("/api/activity", response_model=ActivityResponse, dependencies=[Depends(require_api_key)])
 def get_activity(db: Session = Depends(get_db)):
-    cached = _activity_cache["data"]
-    if cached is None:
-        # Cold start: background task ainda não completou o primeiro refresh
-        data = _build_activity_data(db)
-        _activity_cache.update({"data": data, "dirty": False, "ts": time.monotonic()})
-        return data
-    return cached.model_copy(update={"server_time": datetime.now().isoformat()})
+    running_versions, running_jobs, storage_obj, disks = _build_fast_data(db)
+
+    hist = _historical_cache["data"]
+    if hist is None:
+        # Cold start: bloco histórico ainda não foi calculado — faz inline uma vez
+        recent_versions, recent_jobs, maint_jobs = _build_historical_data(db)
+        _historical_cache.update({"data": (recent_versions, recent_jobs, maint_jobs),
+                                   "ts": time.monotonic()})
+    else:
+        recent_versions, recent_jobs, maint_jobs = hist
+
+    return ActivityResponse(
+        running_versions=running_versions,
+        running_jobs=running_jobs,
+        storage=storage_obj,
+        disks=disks,
+        recent_versions=recent_versions,
+        recent_jobs=recent_jobs,
+        maintenance_jobs=maint_jobs,
+        server_time=datetime.now().isoformat(),
+    )
 
 
 @app.get("/health", response_model=HealthResponse)
