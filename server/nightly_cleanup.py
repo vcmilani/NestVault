@@ -113,9 +113,16 @@ def _versions_to_keep(done_versions: list[BackupVersion], now: datetime) -> set[
     return keep
 
 
-def validate_latest_versions_integrity(db) -> dict:
+def validate_latest_versions_integrity(db, log_fn=None) -> dict:
     """Verifica se todos os arquivos das últimas versões 'done' existem no disco.
-    Remove registros de arquivos ausentes e invalida versões afetadas."""
+    Remove registros de arquivos ausentes e invalida versões afetadas.
+    log_fn(msg) é chamado em cada evento relevante para reportar progresso em tempo real."""
+
+    def _log(msg: str) -> None:
+        log.info(msg)
+        if log_fn:
+            log_fn(msg)
+
     max_ts_sq = (
         db.query(
             BackupVersion.backup_label,
@@ -135,6 +142,9 @@ def validate_latest_versions_integrity(db) -> dict:
         )
         .all()
     )
+
+    total = len(latest_versions)
+    _log(f"[integrity] {total} label(s) para verificar")
 
     checked = 0
     invalidated = 0
@@ -156,6 +166,7 @@ def validate_latest_versions_integrity(db) -> dict:
 
     for version in latest_versions:
         checked += 1
+        _log(f"[integrity] ({checked}/{total}) verificando {version.backup_label}/{version.version_key}...")
         sha256s = [
             r[0]
             for r in db.query(VersionFile.sha256)
@@ -165,6 +176,7 @@ def validate_latest_versions_integrity(db) -> dict:
         ]
         missing = [s for s in sha256s if not _exists(s)]
         if not missing:
+            _log(f"[integrity] ({checked}/{total}) {version.backup_label}/{version.version_key} — OK ({len(sha256s)} arquivo(s))")
             continue
 
         for sha256 in missing:
@@ -172,18 +184,19 @@ def validate_latest_versions_integrity(db) -> dict:
             db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).delete(synchronize_session=False)
             db.query(FileContent).filter(FileContent.sha256 == sha256).delete(synchronize_session=False)
             files_removed += 1
-            log.error(f"[integrity] {sha256[:8]}… removido do banco (arquivo ausente no disco)")
+            _log(f"[integrity] {sha256[:8]}… removido do banco (arquivo ausente no disco)")
 
         version.status = "failed"
         version.finished_at = datetime.utcnow()
         db.commit()
-        log.error(
+        _log(
             f"[integrity] versão {version.backup_label}/{version.version_key} "
             f"invalidada — {len(missing)} arquivo(s) ausentes"
         )
         invalidated += 1
         labels.append(version.backup_label)
 
+    _log(f"[integrity] concluído: {checked} verificadas, {invalidated} invalidadas, {files_removed} arquivo(s) removidos")
     return {"checked": checked, "invalidated": invalidated, "files_removed": files_removed, "labels": labels}
 
 

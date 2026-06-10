@@ -2323,12 +2323,60 @@ def reconcile_replication(db: Session = Depends(get_db)):
     )
 
 
-@app.post("/maintenance/validate-integrity", response_model=ValidateIntegrityResponse, dependencies=[Depends(require_api_key)])
-def validate_integrity(db: Session = Depends(get_db)):
-    """Verifica se os arquivos das últimas versões done existem no disco; invalida e limpa registros ausentes."""
+def _bg_validate_integrity(job_id: int) -> None:
     from nightly_cleanup import validate_latest_versions_integrity
-    result = validate_latest_versions_integrity(db)
-    return ValidateIntegrityResponse(**result)
+    db = SessionLocal()
+    log_lines: list[str] = []
+
+    def _progress(msg: str) -> None:
+        log_lines.append(msg)
+        mj = db.get(MaintenanceJob, job_id)
+        if mj:
+            mj.summary = "\n".join(log_lines[-30:])
+            db.commit()
+        invalidate_activity()
+
+    try:
+        result = validate_latest_versions_integrity(db, log_fn=_progress)
+        mj = db.get(MaintenanceJob, job_id)
+        if mj:
+            mj.status = "done"
+            mj.finished_at = datetime.now()
+            parts = [f"{result['checked']} versão(ões) verificada(s)"]
+            if result["invalidated"]:
+                parts.append(f"{result['invalidated']} invalidada(s): {', '.join(result['labels'])}")
+            else:
+                parts.append("nenhuma invalidada")
+            if result["files_removed"]:
+                parts.append(f"{result['files_removed']} arquivo(s) removido(s)")
+            mj.summary = " — ".join(parts)
+            db.commit()
+    except Exception as e:
+        log.exception("[validate-integrity] erro no background")
+        mj = db.get(MaintenanceJob, job_id)
+        if mj:
+            mj.status = "error"
+            mj.finished_at = datetime.now()
+            mj.summary = f"Erro: {e}"
+            db.commit()
+    finally:
+        invalidate_activity()
+        db.close()
+
+
+@app.post("/maintenance/validate-integrity", dependencies=[Depends(require_api_key)])
+def validate_integrity(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Verifica se os arquivos das últimas versões done existem no disco; invalida e limpa registros ausentes."""
+    mj = MaintenanceJob(
+        job_type="validate-integrity",
+        status="running",
+        summary="Iniciando verificação de integridade...",
+    )
+    db.add(mj)
+    db.commit()
+    db.refresh(mj)
+    background_tasks.add_task(_bg_validate_integrity, mj.id)
+    return {"scheduled": True, "job_id": mj.id}
 
 
 @app.post("/maintenance/encrypt-existing", response_model=EncryptExistingResponse, dependencies=[Depends(require_api_key)])
