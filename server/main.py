@@ -428,6 +428,12 @@ class EncryptExistingResponse(BaseModel):
     bytes_processed: int
     skipped: int
 
+class ValidateIntegrityResponse(BaseModel):
+    checked: int
+    invalidated: int
+    files_removed: int
+    labels: list[str]
+
 class MigrateDiskRequest(BaseModel):
     source: str
     destinations: list[str]
@@ -2298,6 +2304,14 @@ def reconcile_replication(db: Session = Depends(get_db)):
         cleaned=cleaned,
         target_copies=_target_replicas(),
     )
+
+
+@app.post("/maintenance/validate-integrity", response_model=ValidateIntegrityResponse, dependencies=[Depends(require_api_key)])
+def validate_integrity(db: Session = Depends(get_db)):
+    """Verifica se os arquivos das últimas versões done existem no disco; invalida e limpa registros ausentes."""
+    from nightly_cleanup import validate_latest_versions_integrity
+    result = validate_latest_versions_integrity(db)
+    return ValidateIntegrityResponse(**result)
 
 
 @app.post("/maintenance/encrypt-existing", response_model=EncryptExistingResponse, dependencies=[Depends(require_api_key)])

@@ -410,6 +410,25 @@
       </div>
     </div>
 
+    <!-- Validação de Integridade -->
+    <div class="op-card risk-medium" style="animation-delay:.45s">
+      <div class="op-header">
+        <div class="op-title-wrap">
+          <span class="op-icon">✓</span>
+          <div>
+            <div class="op-name">Validação de Integridade</div>
+            <div class="op-endpoint">POST /maintenance/validate-integrity</div>
+          </div>
+        </div>
+        <span class="risk-badge medium">Médio risco</span>
+      </div>
+      <div class="op-desc">Verifica se todos os arquivos das últimas versões <em>done</em> existem fisicamente no disco. Versões com arquivos ausentes são marcadas como <em>failed</em> e seus registros removidos do banco — permitindo que o backup reenvie os arquivos na próxima execução.</div>
+      <div class="op-footer">
+        <button class="run-btn" id="btn-integrity" onclick="runOp('integrity')">▶ Verificar</button>
+        <div class="op-result" id="result-integrity"></div>
+      </div>
+    </div>
+
   </div>
 </main>
 
@@ -454,6 +473,7 @@ const OPS = {
   orphans:    {endpoint: '/maintenance/cleanup-orphans',       confirm: false},
   rereplicate:{endpoint: '/maintenance/rereplicate',           confirm: false},
   reconcile:  {endpoint: '/maintenance/reconcile-replication', confirm: false},
+  integrity:  {endpoint: '/maintenance/validate-integrity',    confirm: false},
   encrypt:    {endpoint: '/maintenance/encrypt-existing',      confirm: true,
                confirmMsg: 'Esta operação cifrará permanentemente todos os arquivos não cifrados.\n\nEssa ação é IRREVERSÍVEL. Deseja continuar?',
                confirmWord: 'CIFRAR'},
@@ -467,6 +487,11 @@ function fmtBytes(b) {
 }
 
 function fmtResult(key, data) {
+  if (key === 'integrity') {
+    const parts = [`${data.checked} versão(ões) verificadas`, `${data.invalidated} invalidada(s)`];
+    if (data.files_removed) parts.push(`${data.files_removed} arquivo(s) removido(s)`);
+    return parts.join(' · ');
+  }
   const lines = [];
   if ('files_removed'   in data) lines.push(`${data.files_removed} arquivo(s) removido(s)`);
   if ('bytes_freed'     in data) lines.push(`${fmtBytes(data.bytes_freed)} liberado(s)`);

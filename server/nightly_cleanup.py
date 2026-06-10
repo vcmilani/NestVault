@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from database import SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob, engine
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from cache_state import invalidate_activity
 
 log = logging.getLogger("backup-server")
@@ -113,6 +113,80 @@ def _versions_to_keep(done_versions: list[BackupVersion], now: datetime) -> set[
     return keep
 
 
+def validate_latest_versions_integrity(db) -> dict:
+    """Verifica se todos os arquivos das últimas versões 'done' existem no disco.
+    Remove registros de arquivos ausentes e invalida versões afetadas."""
+    max_ts_sq = (
+        db.query(
+            BackupVersion.backup_label,
+            func.max(BackupVersion.created_at).label("max_ts"),
+        )
+        .filter(BackupVersion.status == "done")
+        .group_by(BackupVersion.backup_label)
+        .subquery()
+    )
+    latest_versions = (
+        db.query(BackupVersion)
+        .join(
+            max_ts_sq,
+            (BackupVersion.backup_label == max_ts_sq.c.backup_label)
+            & (BackupVersion.created_at == max_ts_sq.c.max_ts)
+            & (BackupVersion.status == "done"),
+        )
+        .all()
+    )
+
+    checked = 0
+    invalidated = 0
+    files_removed = 0
+    labels: list[str] = []
+    exists_cache: dict[str, bool] = {}
+
+    def _exists(sha256: str) -> bool:
+        if sha256 in exists_cache:
+            return exists_cache[sha256]
+        fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+        if fc and Path(fc.stored_at).exists():
+            exists_cache[sha256] = True
+            return True
+        copies = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).all()
+        found = any(Path(c.stored_at).exists() for c in copies)
+        exists_cache[sha256] = found
+        return found
+
+    for version in latest_versions:
+        checked += 1
+        sha256s = [
+            r[0]
+            for r in db.query(VersionFile.sha256)
+            .filter(VersionFile.version_id == version.id)
+            .distinct()
+            .all()
+        ]
+        missing = [s for s in sha256s if not _exists(s)]
+        if not missing:
+            continue
+
+        for sha256 in missing:
+            db.query(VersionFile).filter(VersionFile.sha256 == sha256).delete(synchronize_session=False)
+            db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).delete(synchronize_session=False)
+            db.query(FileContent).filter(FileContent.sha256 == sha256).delete(synchronize_session=False)
+            files_removed += 1
+            log.error(f"[integrity] {sha256[:8]}… removido do banco (arquivo ausente no disco)")
+
+        version.status = "failed"
+        version.finished_at = datetime.utcnow()
+        db.commit()
+        log.error(
+            f"[integrity] versão {version.backup_label}/{version.version_key} "
+            f"invalidada — {len(missing)} arquivo(s) ausentes"
+        )
+        invalidated += 1
+        labels.append(version.backup_label)
+
+    return {"checked": checked, "invalidated": invalidated, "files_removed": files_removed, "labels": labels}
+
+
 def run_nightly_cleanup() -> None:
     """Executa a limpeza noturna de versões conforme política de retenção."""
     db = SessionLocal()
@@ -188,6 +262,18 @@ def run_nightly_cleanup() -> None:
         # Limpeza de conteúdos órfãos após todas as exclusões
         orphans_removed, bytes_freed = _cleanup_orphan_contents(db)
 
+        # Validação de integridade das últimas versões done
+        integrity = validate_latest_versions_integrity(db)
+        if integrity["invalidated"]:
+            _integrity_note = (
+                f"; integridade: {integrity['invalidated']}/{integrity['checked']} "
+                f"versões invalidadas, {integrity['files_removed']} arquivo(s) removido(s)"
+            )
+        elif integrity["checked"] > 0:
+            _integrity_note = f"; integridade: {integrity['checked']} versões OK"
+        else:
+            _integrity_note = ""
+
         summary_parts = []
         if total_stale:
             summary_parts.append(f"{total_stale} stale (failed/incomplete)")
@@ -203,10 +289,11 @@ def run_nightly_cleanup() -> None:
                 f"{total_removed} versão(ões) removida(s) em {labels_touched} label(s)"
                 + (f": {', '.join(summary_parts)}" if summary_parts else "")
                 + (f"; {orphans_removed} arquivo(s) de storage liberado(s) ({round(bytes_freed/1024/1024, 1)} MB)" if orphans_removed else "")
+                + _integrity_note
             )
             log.info(f"[nightly-cleanup] {summary}")
         else:
-            summary = "Nenhuma versão removida — política de retenção satisfeita"
+            summary = "Nenhuma versão removida — política de retenção satisfeita" + _integrity_note
             log.info(f"[nightly-cleanup] {summary}")
 
         mj = MaintenanceJob(
