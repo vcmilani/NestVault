@@ -488,6 +488,7 @@ function fmtBytes(b) {
 
 function fmtResult(key, data) {
   if (key === 'integrity') {
+    if (data.scheduled) return 'Verificação iniciada — acompanhe nas atividades em execução';
     const parts = [`${data.checked} versão(ões) verificadas`, `${data.invalidated} invalidada(s)`];
     if (data.files_removed) parts.push(`${data.files_removed} arquivo(s) removido(s)`);
     return parts.join(' · ');
