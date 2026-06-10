@@ -392,7 +392,7 @@
           <span class="pulse-dot"></span>${esc(JOB_TYPE_LABELS[m.job_type] || m.job_type)}
         </div>
         <div class="running-card-meta">
-          ${m.summary ? `<div class="running-card-row">Info: <span>${esc(m.summary)}</span></div>` : ''}
+          ${m.summary ? `<div class="running-card-row">Info: <span>${esc(m.summary.split('\n').filter(Boolean).pop())}</span></div>` : ''}
           <div class="running-card-row">Iniciado há: <span>${elapsed(m.started_at)}</span></div>
         </div>
       </div>`).join('');

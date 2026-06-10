@@ -179,22 +179,39 @@ def validate_latest_versions_integrity(db, log_fn=None) -> dict:
             _log(f"[integrity] ({checked}/{total}) {version.backup_label}/{version.version_key} — OK ({len(sha256s)} arquivo(s))")
             continue
 
+        # Coleta todas as versões que referenciam os arquivos ausentes ANTES de deletar
+        affected_ids: set[int] = set()
         for sha256 in missing:
+            ids = [
+                r[0] for r in db.query(VersionFile.version_id)
+                .filter(VersionFile.sha256 == sha256)
+                .distinct()
+                .all()
+            ]
+            affected_ids.update(ids)
             db.query(VersionFile).filter(VersionFile.sha256 == sha256).delete(synchronize_session=False)
             db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).delete(synchronize_session=False)
             db.query(FileContent).filter(FileContent.sha256 == sha256).delete(synchronize_session=False)
             files_removed += 1
             _log(f"[integrity] {sha256[:8]}… removido do banco (arquivo ausente no disco)")
 
-        version.status = "failed"
-        version.finished_at = datetime.utcnow()
-        db.commit()
-        _log(
-            f"[integrity] versão {version.backup_label}/{version.version_key} "
-            f"invalidada — {len(missing)} arquivo(s) ausentes"
+        # Invalida todas as versões afetadas (não só a latest)
+        affected_versions = (
+            db.query(BackupVersion)
+            .filter(BackupVersion.id.in_(affected_ids), BackupVersion.status == "done")
+            .all()
         )
-        invalidated += 1
-        labels.append(version.backup_label)
+        for av in affected_versions:
+            av.status = "failed"
+            av.finished_at = datetime.utcnow()
+            invalidated += 1
+            if av.backup_label not in labels:
+                labels.append(av.backup_label)
+            _log(
+                f"[integrity] versão {av.backup_label}/{av.version_key} "
+                f"invalidada — arquivo(s) ausente(s) no disco"
+            )
+        db.commit()
 
     _log(f"[integrity] concluído: {checked} verificadas, {invalidated} invalidadas, {files_removed} arquivo(s) removidos")
     return {"checked": checked, "invalidated": invalidated, "files_removed": files_removed, "labels": labels}
