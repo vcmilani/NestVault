@@ -465,79 +465,85 @@ def process_ssd_pending_moves(db) -> int:
         if move is None:
             continue  # processed by concurrent worker
         ssd_path = Path(move.ssd_path)
-        dest_path = Path(move.dest_path)
-        dest_volume = Path(move.dest_volume)
         if not ssd_path.exists():
             log.warning(f"[ssd-cache] {move.sha256[:8]}… arquivo ausente no SSD — removendo registro")
             db.delete(move)
             db.commit()
             continue
-        try:
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
-            ssd_hash = _file_sha256_raw(ssd_path)
-            shutil.copy2(str(ssd_path), str(dest_path))
-            hdd_hash = _file_sha256_raw(dest_path)
-            if ssd_hash != hdd_hash:
+        _redirected = False
+        while True:
+            dest_path = Path(move.dest_path)
+            dest_volume = Path(move.dest_volume)
+            try:
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                ssd_hash = _file_sha256_raw(ssd_path)
+                shutil.copy2(str(ssd_path), str(dest_path))
+                hdd_hash = _file_sha256_raw(dest_path)
+                if ssd_hash != hdd_hash:
+                    dest_path.unlink(missing_ok=True)
+                    move.retry_count += 1
+                    log.warning(f"[ssd-cache] {move.sha256[:8]}… cópia corrompida no HDD — retry {move.retry_count}")
+                    if move.retry_count >= 5:
+                        log.error(f"[ssd-cache] {move.sha256[:8]}… atingiu 5 retries (hash mismatch) — abandonando move")
+                        try:
+                            _mark_versions_failed_for_sha256(move.sha256, db)
+                        except Exception as _ex:
+                            log.error(f"[ssd-cache] erro ao marcar versões como failed: {_ex}")
+                        db.delete(move)
+                    db.commit()
+                    break
+                fc = db.query(FileContent).filter(FileContent.sha256 == move.sha256).first()
+                if fc:
+                    fc.stored_at = str(dest_path)
+                ssd_copy = (db.query(FileContentCopy)
+                            .filter(FileContentCopy.sha256 == move.sha256,
+                                    FileContentCopy.stored_at == move.ssd_path)
+                            .first())
+                if ssd_copy:
+                    db.delete(ssd_copy)
+                db.add(FileContentCopy(sha256=move.sha256, stored_at=str(dest_path), volume_path=str(dest_volume)))
+                db.flush()
+                ensure_replicas(move.sha256, dest_path, db)
+                db.delete(move)
+                db.commit()
+                ssd_path.unlink(missing_ok=True)
+                completed += 1
+                log.info(f"[ssd-cache] {move.sha256[:8]}… movido SSD → {dest_path}")
+                break
+            except IntegrityError:
+                db.rollback()
                 dest_path.unlink(missing_ok=True)
+                log.debug(f"[ssd-cache] {move.sha256[:8]}… já processado por worker concorrente — OK")
+                break
+            except OSError as e:
+                dest_path.unlink(missing_ok=True)
+                if e.errno == errno.ENOSPC and not _redirected:
+                    try:
+                        new_vol = pick_volume()
+                    except RuntimeError:
+                        new_vol = None
+                    if new_vol and str(new_vol) != move.dest_volume:
+                        new_dest = content_path(sha256, new_vol)
+                        old_vol_name = Path(move.dest_volume).name
+                        move.dest_volume = str(new_vol)
+                        move.dest_path = str(new_dest)
+                        move.retry_count = 0
+                        db.commit()
+                        _redirected = True
+                        log.warning(
+                            f"[ssd-cache] {sha256[:8]}… disco cheio em {old_vol_name} "
+                            f"— redirecionado para {new_vol.name}, retentando"
+                        )
+                        continue  # retry imediato com novo destino
                 move.retry_count += 1
-                log.warning(f"[ssd-cache] {move.sha256[:8]}… cópia corrompida no HDD — retry {move.retry_count}")
+                log.warning(f"[ssd-cache] Erro ao mover {move.sha256[:8]}…: {e} — retry {move.retry_count}")
                 if move.retry_count >= 5:
-                    log.error(f"[ssd-cache] {move.sha256[:8]}… atingiu 5 retries (hash mismatch) — abandonando move")
+                    log.error(f"[ssd-cache] {move.sha256[:8]}… atingiu 5 retries — abandonando move")
                     try:
                         _mark_versions_failed_for_sha256(move.sha256, db)
                     except Exception as _ex:
                         log.error(f"[ssd-cache] erro ao marcar versões como failed: {_ex}")
                     db.delete(move)
                 db.commit()
-                continue
-            fc = db.query(FileContent).filter(FileContent.sha256 == move.sha256).first()
-            if fc:
-                fc.stored_at = str(dest_path)
-            ssd_copy = (db.query(FileContentCopy)
-                        .filter(FileContentCopy.sha256 == move.sha256,
-                                FileContentCopy.stored_at == move.ssd_path)
-                        .first())
-            if ssd_copy:
-                db.delete(ssd_copy)
-            db.add(FileContentCopy(sha256=move.sha256, stored_at=str(dest_path), volume_path=str(dest_volume)))
-            db.flush()
-            ensure_replicas(move.sha256, dest_path, db)
-            db.delete(move)
-            db.commit()
-            ssd_path.unlink(missing_ok=True)
-            completed += 1
-            log.info(f"[ssd-cache] {move.sha256[:8]}… movido SSD → {dest_path}")
-        except IntegrityError:
-            db.rollback()
-            dest_path.unlink(missing_ok=True)
-            log.debug(f"[ssd-cache] {move.sha256[:8]}… já processado por worker concorrente — OK")
-        except OSError as e:
-            dest_path.unlink(missing_ok=True)
-            if e.errno == errno.ENOSPC:
-                try:
-                    new_vol = pick_volume()
-                except RuntimeError:
-                    new_vol = None
-                if new_vol and str(new_vol) != move.dest_volume:
-                    new_dest = content_path(sha256, new_vol)
-                    old_vol_name = Path(move.dest_volume).name
-                    move.dest_volume = str(new_vol)
-                    move.dest_path = str(new_dest)
-                    move.retry_count = 0
-                    db.commit()
-                    log.warning(
-                        f"[ssd-cache] {sha256[:8]}… disco cheio em {old_vol_name} "
-                        f"— redirecionado para {new_vol.name}"
-                    )
-                    continue
-            move.retry_count += 1
-            log.warning(f"[ssd-cache] Erro ao mover {move.sha256[:8]}…: {e} — retry {move.retry_count}")
-            if move.retry_count >= 5:
-                log.error(f"[ssd-cache] {move.sha256[:8]}… atingiu 5 retries — abandonando move")
-                try:
-                    _mark_versions_failed_for_sha256(move.sha256, db)
-                except Exception as _ex:
-                    log.error(f"[ssd-cache] erro ao marcar versões como failed: {_ex}")
-                db.delete(move)
-            db.commit()
+                break
     return completed
