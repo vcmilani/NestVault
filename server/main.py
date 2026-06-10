@@ -188,19 +188,20 @@ def _bg_process_ssd_pending_moves():
 
 
 def _resume_ssd_pending_moves():
-    if not storage.SSD_CACHE_ENABLED or not storage.SSD_CACHE_DIR:
+    if not storage.SSD_CACHE_DIR:
         return
     if not _ssd_move_lock.acquire(blocking=False):
         log.debug("[ssd-cache] worker já em execução — recovery ignorada")
         return
     db = SessionLocal()
     try:
+        recovered = storage.recover_stuck_ssd_files(db)
         count = db.query(SsdCachePendingMove).count()
         if not count:
             return
         log.info(f"[ssd-cache] {count} move(s) pendentes encontrados — retomando")
-        job = MaintenanceJob(job_type="ssd-cache-move", status="running",
-                             summary=f"Recovery: {count} pendente(s)")
+        summary_prefix = f"Recovery: {count} pendente(s)" + (f", {recovered} recuperado(s) do SSD" if recovered else "")
+        job = MaintenanceJob(job_type="ssd-cache-move", status="running", summary=summary_prefix)
         db.add(job)
         db.commit()
         db.refresh(job)

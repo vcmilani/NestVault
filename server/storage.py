@@ -356,6 +356,62 @@ def _mark_versions_failed_for_sha256(sha256: str, db) -> None:
         )
 
 
+def recover_stuck_ssd_files(db) -> int:
+    """Cria SsdCachePendingMove para arquivos presos no SSD sem move pendente e sem cópia HDD.
+    Chamado no startup para recuperar de uploads interrompidos."""
+    if not SSD_CACHE_DIR:
+        return 0
+    from database import FileContent, FileContentCopy, SsdCachePendingMove
+    stuck = (
+        db.query(FileContentCopy)
+        .filter(FileContentCopy.volume_path == str(SSD_CACHE_DIR))
+        .outerjoin(SsdCachePendingMove, SsdCachePendingMove.sha256 == FileContentCopy.sha256)
+        .filter(SsdCachePendingMove.sha256.is_(None))
+        .all()
+    )
+    created = 0
+    for ssd_copy in stuck:
+        sha256 = ssd_copy.sha256
+        if not Path(ssd_copy.stored_at).exists():
+            continue  # arquivo ausente — reconcile_orphaned_ssd_copies trata
+        # Se já existe cópia HDD, reconcile cuida do cleanup do SSD
+        hdd_copy = (
+            db.query(FileContentCopy)
+            .filter(FileContentCopy.sha256 == sha256,
+                    FileContentCopy.volume_path != str(SSD_CACHE_DIR))
+            .first()
+        )
+        if hdd_copy:
+            continue
+        fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+        if fc and fc.stored_at != ssd_copy.stored_at and Path(fc.stored_at).exists():
+            continue  # FileContent já aponta para HDD
+        # Sem cópia HDD — criar move pendente
+        try:
+            dest_volume = pick_volume()
+        except RuntimeError:
+            log.error(f"[ssd-cache] recover: {sha256[:8]}… nenhum volume HDD disponível")
+            continue
+        dest_path = content_path(sha256, dest_volume)
+        db.merge(SsdCachePendingMove(
+            sha256=sha256,
+            ssd_path=str(ssd_copy.stored_at),
+            dest_volume=str(dest_volume),
+            dest_path=str(dest_path),
+        ))
+        try:
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            log.warning(f"[ssd-cache] recover: {sha256[:8]}… erro ao criar move pendente: {e}")
+            continue
+        log.info(f"[ssd-cache] recover: {sha256[:8]}… move pendente criado → {dest_path}")
+        created += 1
+    if created:
+        log.info(f"[ssd-cache] recover: {created} arquivo(s) preso(s) no SSD recuperado(s)")
+    return created
+
+
 def reconcile_orphaned_ssd_copies(db) -> int:
     """Corrige FileContentCopy SSD sem SsdCachePendingMove correspondente (órfãos).
     Retorna quantidade de registros corrigidos."""
