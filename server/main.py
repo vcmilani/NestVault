@@ -171,6 +171,7 @@ def _bg_process_ssd_pending_moves():
             total += done
             if done == 0:
                 break
+        storage.reconcile_orphaned_ssd_copies(db)
         job.status = "done"
         job.finished_at = datetime.now()
         job.summary = f"{total} arquivo(s) movidos SSD → HDD"
@@ -209,6 +210,7 @@ def _resume_ssd_pending_moves():
             total += done
             if done == 0:
                 break
+        storage.reconcile_orphaned_ssd_copies(db)
         job.status = "done"
         job.finished_at = datetime.now()
         job.summary = f"Recovery: {total} arquivo(s) movidos SSD → HDD"
@@ -2176,10 +2178,13 @@ def download_file(file_id: int, db: Session = Depends(get_db)):
               .filter(~FileContentCopy.volume_path.in_([str(v) for v in _degraded_volumes]))
               .all())
 
+    log.info(f"[download] ativando {row.original_path!r} (file_id={file_id}) — sha256={row.sha256[:8]}…, {len(copies)} cópia(s)")
+
     for copy in copies:
         p = Path(copy.stored_at)
         try:
             if p.exists():
+                log.info(f"[download] {row.sha256[:8]}… encontrado no disco em {p}")
                 if is_encrypted:
                     return StreamingResponse(
                         crypto.decrypt_chunks(p, storage.encryption_key),
@@ -2187,7 +2192,10 @@ def download_file(file_id: int, db: Session = Depends(get_db)):
                         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
                     )
                 return FileResponse(p, filename=filename)
-        except OSError:
+            else:
+                log.error(f"[download] {row.sha256[:8]}… ausente no disco em {p}")
+        except OSError as exc:
+            log.error(f"[download] {row.sha256[:8]}… erro ao acessar {p}: {exc}")
             continue
 
     # 503 apenas se há cópias em volumes degraded (recuperáveis); 410 se o dado sumiu mesmo
@@ -2196,6 +2204,7 @@ def download_file(file_id: int, db: Session = Depends(get_db)):
         FileContentCopy.sha256 == row.sha256,
         FileContentCopy.volume_path.in_(degraded_str),
     ).count()
+    log.error(f"[download] {row.sha256[:8]}… nenhuma cópia válida encontrada no disco para file_id={file_id}")
     raise HTTPException(503 if has_degraded else 410,
                         "Arquivo em volume degraded" if has_degraded else "Conteudo fisico nao encontrado")
 

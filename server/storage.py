@@ -356,6 +356,46 @@ def _mark_versions_failed_for_sha256(sha256: str, db) -> None:
         )
 
 
+def reconcile_orphaned_ssd_copies(db) -> int:
+    """Corrige FileContentCopy SSD sem SsdCachePendingMove correspondente (órfãos).
+    Retorna quantidade de registros corrigidos."""
+    if not SSD_CACHE_ENABLED or not SSD_CACHE_DIR:
+        return 0
+    from database import FileContent, FileContentCopy, SsdCachePendingMove
+    orphans = (
+        db.query(FileContentCopy)
+        .filter(FileContentCopy.volume_path == str(SSD_CACHE_DIR))
+        .outerjoin(SsdCachePendingMove, SsdCachePendingMove.sha256 == FileContentCopy.sha256)
+        .filter(SsdCachePendingMove.sha256.is_(None))
+        .all()
+    )
+    fixed = 0
+    for ssd_copy in orphans:
+        sha256 = ssd_copy.sha256
+        fallback = (
+            db.query(FileContentCopy)
+            .filter(FileContentCopy.sha256 == sha256,
+                    FileContentCopy.volume_path != str(SSD_CACHE_DIR))
+            .first()
+        )
+        fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+        if fallback:
+            if fc and fc.stored_at == ssd_copy.stored_at:
+                fc.stored_at = fallback.stored_at
+            db.delete(ssd_copy)
+            db.commit()
+            log.info(f"[ssd-cache] reconciliação: {sha256[:8]}… órfão SSD removido → {fallback.stored_at}")
+            fixed += 1
+        elif not Path(ssd_copy.stored_at).exists():
+            db.delete(ssd_copy)
+            db.commit()
+            log.error(f"[ssd-cache] reconciliação: {sha256[:8]}… FileContentCopy SSD órfã removida (arquivo não existe)")
+            fixed += 1
+        else:
+            log.warning(f"[ssd-cache] reconciliação: {sha256[:8]}… arquivo no SSD sem cópia HDD e sem move pendente")
+    return fixed
+
+
 def process_ssd_pending_moves(db) -> int:
     """Move up to 10 pending SSD-cached files to their HDD destination. Returns count moved."""
     from database import SsdCachePendingMove, FileContent, FileContentCopy
