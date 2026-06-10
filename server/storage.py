@@ -5,7 +5,7 @@ Extracted from main.py so that the cloud backup module can reuse
 volume selection, replication, and encryption logic without
 creating a circular import.
 """
-import os, shutil, logging, asyncio, threading, hashlib
+import os, errno, shutil, logging, asyncio, threading, hashlib
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -512,6 +512,24 @@ def process_ssd_pending_moves(db) -> int:
             dest_path.unlink(missing_ok=True)
             log.debug(f"[ssd-cache] {move.sha256[:8]}… já processado por worker concorrente — OK")
         except OSError as e:
+            dest_path.unlink(missing_ok=True)
+            if e.errno == errno.ENOSPC:
+                try:
+                    new_vol = pick_volume()
+                except RuntimeError:
+                    new_vol = None
+                if new_vol and str(new_vol) != move.dest_volume:
+                    new_dest = content_path(sha256, new_vol)
+                    old_vol_name = Path(move.dest_volume).name
+                    move.dest_volume = str(new_vol)
+                    move.dest_path = str(new_dest)
+                    move.retry_count = 0
+                    db.commit()
+                    log.warning(
+                        f"[ssd-cache] {sha256[:8]}… disco cheio em {old_vol_name} "
+                        f"— redirecionado para {new_vol.name}"
+                    )
+                    continue
             move.retry_count += 1
             log.warning(f"[ssd-cache] Erro ao mover {move.sha256[:8]}…: {e} — retry {move.retry_count}")
             if move.retry_count >= 5:
