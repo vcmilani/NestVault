@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v5.1.0`
+# 🗄️ NestVault  `v6.0.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -6,6 +6,12 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v6.0.0** — SSD cache tier para backup local: quando `SSD_CACHE_ENABLED=true`, uploads são gravados primeiro no SSD (via `SSD_CACHE_DIR`), o servidor responde ao cliente imediatamente, e a movimentação para o disco lento ocorre de forma assíncrona em background. Se o SSD atingir o limite configurado em `SSD_CACHE_MAX_GB`, o upload recai silenciosamente para o HDD sem interrupção. Moves pendentes sobrevivem a reinicializações do servidor (persistidos em `ssd_cache_pending_moves` no banco). Ganho especialmente relevante em redes 2.5 GbE, onde o HDD se torna o gargalo claro (100–150 MB/s vs. 312 MB/s de rede). Desabilitado por padrão — zero impacto para configurações sem SSD cache.
+>
+> **v5.3.0** — refinamento da política de retenção noturna: a faixa "guardar tudo" foi reduzida de 30 dias para 24 horas; entre 1 dia e 30 dias passa a ser guardada 1 versão `done` por dia (a mais recente de cada dia calendário). As demais faixas permanecem iguais: 30–180 dias → 1 por semana; acima de 180 dias → 1 por mês.
+>
+> **v5.2.0** — limpeza noturna automática com política de retenção progressiva: versões `failed`/`incomplete` com mais de 1 semana são removidas se houver versão `done` mais recente; dentro de 1 mês todas as versões eram preservadas; entre 1 e 6 meses é guardada 1 versão `done` por semana; acima de 6 meses, 1 versão `done` por mês. A rotina roda automaticamente à meia-noite e pode ser acionada manualmente via `POST /maintenance/nightly-cleanup`. O resultado de cada execução fica registrado no histórico de manutenção da tela de atividade.
+>
 > **v5.1.0** — opção de reconectar conta cloud: quando um refresh token é revogado ou expira, os jobs de backup ficam marcados com `reauth_required`. A nova coluna "Status" na aba de contas do dashboard exibe `⚠ TOKEN REVOGADO` e apresenta o botão `↺ Reconectar`, que reabre o fluxo OAuth reutilizando a credencial existente — todos os jobs associados são preservados. Ao concluir, os tokens são atualizados e o status `reauth_required` dos jobs é limpo automaticamente. Corrigido: OneDrive agora lança `TokenRevokedError` em caso de `invalid_grant`, fazendo o runner marcar o job como `reauth_required` em vez de `error`.
 >
 > **v5.0** — limpeza de versões por data: nova opção na tela de manutenção para remover permanentemente versões criadas antes de uma data escolhida. Suporta escopo global (todos os labels) ou por label específico via dropdown. Exibe preview detalhado por label antes de executar, mostrando quantas versões cada backup perderá. A versão `done` mais recente de cada label é **sempre preservada** — mesmo que seja anterior à data de corte. Versões em status `running` nunca são removidas. Dois novos endpoints: `GET /maintenance/cleanup-by-date/preview` (preview sem efeito colateral) e `POST /maintenance/cleanup-by-date` (execução). Prompt interativo de API Key no cliente Python: ao receber erro 401 (chave ausente ou inválida), o cliente solicita a chave via terminal (`getpass`) e retenta automaticamente a operação sem necessidade de reiniciar o comando.
@@ -336,6 +342,12 @@ export BASE_URL="http://192.168.1.100:8000"
 # Threshold mínimo de espaço livre (GB) antes de usar o próximo disco da lista (padrão: 10)
 export STORAGE_FALLBACK_THRESHOLD_GB=10
 
+# SSD cache tier (opcional — padrão desabilitado)
+# Uploads são gravados no SSD primeiro; movidos para HDD em background
+export SSD_CACHE_ENABLED=true
+export SSD_CACHE_DIR="/tmp/nestvault_ssd_cache"   # diretório no SSD
+export SSD_CACHE_MAX_GB=20                         # limite de staging no SSD (padrão: 20 GB)
+
 # Daily digest via Telegram (opcional — omitir desabilita o envio)
 export TELEGRAM_BOT_TOKEN="123456789:ABCdef..."   # token gerado pelo @BotFather
 export TELEGRAM_CHAT_ID="987654321"               # seu chat_id (veja abaixo como obter)
@@ -375,6 +387,18 @@ Sem essas variáveis o servidor funciona normalmente — apenas o cloud backup f
 
 Sem `TELEGRAM_BOT_TOKEN` e `TELEGRAM_CHAT_ID` o digest é gerado internamente mas não enviado. Sem variável de IA o servidor envia um resumo estruturado com os dados brutos do banco.
 
+#### Configuração SSD Cache
+
+| Variável | Obrigatório | Padrão | Descrição |
+|---|:-:|---|---|
+| `SSD_CACHE_ENABLED` | | `false` | Habilita o cache tier no SSD |
+| `SSD_CACHE_DIR` | ✓ se enabled | — | Caminho de um diretório **no SSD** para staging de uploads |
+| `SSD_CACHE_MAX_GB` | | `20.0` | Limite máximo de uso do SSD pela fila pendente (GB) |
+
+Quando habilitado, uploads são escritos no SSD e o servidor responde ao cliente imediatamente; a movimentação para o HDD ocorre em background. Se o SSD atingir o limite ou tiver menos de 2 GB livres, o upload recai silenciosamente para o HDD. Moves pendentes sobrevivem a reinicializações (persistidos em `ssd_cache_pending_moves` no banco).
+
+> **Não use MicroSD como `SSD_CACHE_DIR`.** Write sequencial de cartões rápidos (~130 MB/s) é marginalmente melhor que HDD, mas sofrem throttling térmico sob carga e têm endurance muito inferior a um SSD real. O benefício é nulo e o desgaste é alto.
+
 `STORAGE_DIRS` e `STORAGE_DIR` são mutuamente compatíveis: se apenas `STORAGE_DIR` estiver definido, o servidor opera normalmente com um único volume. Se `STORAGE_DIRS` estiver definido, ele tem precedência e pode listar quantos pontos de montagem forem necessários.
 
 ### 3. Iniciar o servidor
@@ -407,6 +431,10 @@ Environment="REPLICATION_FACTOR=2"
 # Environment="GDRIVE_CLIENT_SECRET=<secret>"
 # Environment="ONEDRIVE_CLIENT_ID=<id>"
 # Environment="BASE_URL=http://192.168.1.100:8000"
+# SSD cache — omitir se não houver SSD interno ou ganho não for necessário
+# Environment="SSD_CACHE_ENABLED=true"
+# Environment="SSD_CACHE_DIR=/tmp/nestvault_ssd_cache"
+# Environment="SSD_CACHE_MAX_GB=20"
 ExecStart=/home/pi/backup_system/server/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
 Restart=always
 

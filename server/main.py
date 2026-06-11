@@ -1,5 +1,5 @@
 """
-NestVault  v5.0
+NestVault  v6.0.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -9,12 +9,12 @@ Otimizacoes de performance:
 - Limpeza de arquivos ao deletar label/versao feita em background (nao bloqueia o cliente)
 """
 
-from fastapi import FastAPI, Request, HTTPException, Depends, Header, BackgroundTasks
+from fastapi import FastAPI, Request, HTTPException, Depends, Header, BackgroundTasks, Query
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
-import asyncio, os, hashlib, secrets, base64, shutil, logging
+import asyncio, os, hashlib, secrets, base64, shutil, logging, time, threading
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -22,12 +22,13 @@ from sqlalchemy import func, select, insert, literal
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
-from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, CloudBackupJob, CloudCredential, MaintenanceJob
+from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, CloudBackupJob, CloudCredential, MaintenanceJob, SsdCachePendingMove
 import crypto
 import storage
 from auth import require_api_key, API_KEY, AUTH_ENABLED
 from cloud.router import router as cloud_router
 import scheduler as sched
+from cache_state import _activity_wake, invalidate_activity
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,7 +52,6 @@ _degraded_volumes        = storage._degraded_volumes
 _safe_disk_usage         = storage.safe_disk_usage
 _healthy_volumes         = storage.healthy_volumes
 _target_replicas         = storage.target_replicas
-_content_path            = storage.content_path
 _ensure_replicas         = storage.ensure_replicas
 _rereplicate_to_volume   = storage.rereplicate_to_volume
 _rereplicate_all         = storage.rereplicate_all
@@ -59,6 +59,58 @@ _cleanup_excess_copies   = storage.cleanup_excess_copies
 _backfill_content_copies = storage.backfill_content_copies
 _volume_health_monitor   = storage.volume_health_monitor
 _volumes_with_free_space = storage.volumes_with_free_space
+_ssd_cache_write_dir     = storage.ssd_cache_write_dir
+_ssd_content_path        = storage.ssd_content_path
+
+
+_ssd_move_lock = threading.Lock()
+
+_reclaimable_cache: dict = {"value": 0, "ts": 0.0}
+_RECLAIMABLE_TTL = 60.0
+
+# Cache para dados históricos (recent_versions com diffs, recent_jobs, maintenance_jobs).
+# Só atualizado quando invalidate_activity() é chamado (fim de backup/job/manutenção).
+# Fallback de 5 min para não ficar preso caso alguma invalidação seja perdida.
+_historical_cache: dict = {"data": None, "ts": 0.0}
+_HISTORICAL_FALLBACK_TTL = 300.0
+
+
+def _get_reclaimable_bytes(db: Session) -> int:
+    now = time.monotonic()
+    if now - _reclaimable_cache["ts"] < _RECLAIMABLE_TTL:
+        return _reclaimable_cache["value"]
+    latest_ts_sq = (
+        db.query(BackupVersion.backup_label, func.max(BackupVersion.created_at).label("latest_ts"))
+        .filter(BackupVersion.status == "done")
+        .group_by(BackupVersion.backup_label)
+        .subquery()
+    )
+    keeper_ids = [
+        row.id for row in (
+            db.query(BackupVersion.id)
+            .join(latest_ts_sq,
+                  (BackupVersion.backup_label == latest_ts_sq.c.backup_label) &
+                  (BackupVersion.created_at   == latest_ts_sq.c.latest_ts))
+            .all()
+        )
+    ]
+    if keeper_ids:
+        kept_sq = (
+            db.query(VersionFile.sha256.label("sha256"))
+            .filter(VersionFile.version_id.in_(keeper_ids))
+            .distinct()
+            .subquery()
+        )
+        result = (
+            db.query(func.coalesce(func.sum(FileContent.size), 0))
+            .outerjoin(kept_sq, FileContent.sha256 == kept_sq.c.sha256)
+            .filter(kept_sq.c.sha256.is_(None))
+            .scalar()
+        ) or 0
+    else:
+        result = db.query(func.coalesce(func.sum(FileContent.size), 0)).scalar() or 0
+    _reclaimable_cache.update({"value": int(result), "ts": now})
+    return int(result)
 
 
 def _pick_volume() -> Path:
@@ -92,10 +144,108 @@ def _cleanup_stale_running_states():
             v.finished_at = datetime.now()
             log.warning(f"[startup] Versão {v.backup_label}/{v.version_key} estava running — marcada como incomplete")
 
-        if stale_jobs or stale_versions:
+        stale_maint = (
+            db.query(MaintenanceJob)
+            .filter(MaintenanceJob.status == "running")
+            .all()
+        )
+        for m in stale_maint:
+            m.status      = "error"
+            m.finished_at = datetime.now()
+            m.summary     = (m.summary or "") + " [interrompido pelo reinício do servidor]"
+            log.warning(f"[startup] MaintenanceJob {m.id} ({m.job_type}) estava running — marcado como error")
+
+        if stale_jobs or stale_versions or stale_maint:
             db.commit()
     finally:
         db.close()
+
+
+def _bg_process_ssd_pending_moves():
+    if not _ssd_move_lock.acquire(blocking=False):
+        log.debug("[ssd-cache] worker já em execução — ignorando chamada duplicada")
+        return
+    db = SessionLocal()
+    job = MaintenanceJob(job_type="ssd-cache-move", status="running")
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    try:
+        total = 0
+        while True:
+            done = storage.process_ssd_pending_moves(db)
+            total += done
+            if done == 0:
+                break
+        storage.reconcile_orphaned_ssd_copies(db)
+        job.status = "done"
+        job.finished_at = datetime.now()
+        job.summary = f"{total} arquivo(s) movidos SSD → HDD"
+    except Exception as e:
+        log.error(f"[ssd-cache] Erro no worker de move: {e}")
+        job.status = "error"
+        job.finished_at = datetime.now()
+        job.summary = str(e)
+    finally:
+        db.commit()
+        invalidate_activity()
+        db.close()
+        _ssd_move_lock.release()
+
+
+def _resume_ssd_pending_moves():
+    if not storage.SSD_CACHE_DIR:
+        return
+    if not _ssd_move_lock.acquire(blocking=False):
+        log.debug("[ssd-cache] worker já em execução — recovery ignorada")
+        return
+    db = SessionLocal()
+    try:
+        recovered = storage.recover_stuck_ssd_files(db)
+        count = db.query(SsdCachePendingMove).count()
+        if not count:
+            return
+        log.info(f"[ssd-cache] {count} move(s) pendentes encontrados — retomando")
+        summary_prefix = f"Recovery: {count} pendente(s)" + (f", {recovered} recuperado(s) do SSD" if recovered else "")
+        job = MaintenanceJob(job_type="ssd-cache-move", status="running", summary=summary_prefix)
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        total = 0
+        while True:
+            done = storage.process_ssd_pending_moves(db)
+            total += done
+            if done == 0:
+                break
+        storage.reconcile_orphaned_ssd_copies(db)
+        job.status = "done"
+        job.finished_at = datetime.now()
+        job.summary = f"Recovery: {total} arquivo(s) movidos SSD → HDD"
+        log.info(f"[ssd-cache] recovery concluída — {total} arquivo(s) movidos para HDD")
+    except Exception as e:
+        log.error(f"[ssd-cache] Erro na recovery de moves pendentes: {e}")
+        if 'job' in locals():
+            job.status = "error"
+            job.finished_at = datetime.now()
+            job.summary = str(e)
+    finally:
+        db.commit()
+        invalidate_activity()
+        db.close()
+        _ssd_move_lock.release()
+
+
+async def _ssd_space_monitor():
+    while True:
+        await asyncio.sleep(30)
+        if not storage.SSD_CACHE_ENABLED or not storage.SSD_CACHE_DIR:
+            continue
+        db = SessionLocal()
+        try:
+            if db.query(SsdCachePendingMove).count() > 0 and storage.ssd_cache_write_dir(db) is None:
+                asyncio.get_running_loop().run_in_executor(None, _bg_process_ssd_pending_moves)
+        finally:
+            db.close()
 
 
 async def lifespan(_: FastAPI):
@@ -107,18 +257,26 @@ async def lifespan(_: FastAPI):
     else:
         log.info("Criptografia: desabilitada")
     asyncio.get_running_loop().run_in_executor(None, _backfill_content_copies)
-    monitor = asyncio.create_task(_volume_health_monitor())
+    asyncio.get_running_loop().run_in_executor(None, _resume_ssd_pending_moves)
+    monitor         = asyncio.create_task(_volume_health_monitor())
+    ssd_monitor     = asyncio.create_task(_ssd_space_monitor())
+    activity_refresh = asyncio.create_task(_activity_refresh_loop())
     sched.scheduler.start()
     sched.reload_jobs_from_db()
     sched.schedule_daily_digest()
+    sched.schedule_nightly_cleanup()
     log.info(f"Servidor iniciado — {len(STORAGE_VOLUMES)} volume(s): {[str(v) for v in STORAGE_VOLUMES]}")
+    if storage.SSD_CACHE_ENABLED and storage.SSD_CACHE_DIR:
+        log.info(f"SSD cache: habilitado — {storage.SSD_CACHE_DIR} (max {storage.SSD_CACHE_MAX_GB} GB)")
     log.info(f"Auth: {'habilitada' if AUTH_ENABLED else 'desabilitada'}")
     yield
     monitor.cancel()
+    ssd_monitor.cancel()
+    activity_refresh.cancel()
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="5.1.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="6.0.0", lifespan=lifespan)
 app.include_router(cloud_router)
 
 if STATIC_DIR.exists():
@@ -249,7 +407,7 @@ class FileInfo(BaseModel):
     original_path: str
     sha256: str
     size: int
-    mtime: float
+    mtime: Optional[float] = None
     created_at: str
 
 class CleanupResponse(BaseModel):
@@ -277,6 +435,30 @@ class EncryptExistingResponse(BaseModel):
     bytes_processed: int
     skipped: int
 
+class ValidateIntegrityResponse(BaseModel):
+    checked: int
+    invalidated: int
+    files_removed: int
+    labels: list[str]
+
+class MigrateDiskRequest(BaseModel):
+    source: str
+    destinations: list[str]
+
+class MigrateDiskDestInfo(BaseModel):
+    path: str
+    free_bytes: int
+    capacity_bytes: int
+
+class MigrateDiskPreviewResponse(BaseModel):
+    source: str
+    files_to_copy: int
+    bytes_to_copy: int
+    files_already_on_dest: int
+    destinations: list[MigrateDiskDestInfo]
+    can_proceed: bool
+    reason: Optional[str]
+
 class StorageInfoResponse(BaseModel):
     total_bytes: int
     used_bytes: int
@@ -291,6 +473,7 @@ class DiskVolumeInfo(BaseModel):
     content_files: int
     content_bytes: int
     status: Literal["ok", "degraded"]
+    is_cache: bool = False
 
 class BackupDiskEntry(BaseModel):
     volume_path: str
@@ -347,6 +530,9 @@ class RecentVersionInfo(BaseModel):
     file_count: int
     total_size_bytes: int
     absorbed_count: int = 0
+    diff_added: Optional[int] = None
+    diff_modified: Optional[int] = None
+    diff_removed: Optional[int] = None
 
 class RecentJobInfo(BaseModel):
     id: int
@@ -709,6 +895,7 @@ def _bg_cleanup_orphan_contents() -> None:
             )
             db.add(mj)
             db.commit()
+            invalidate_activity()
         else:
             log.info("[bg-cleanup] nenhuma limpeza necessária, não havia arquivos órfãos")
     finally:
@@ -730,6 +917,7 @@ def _bg_auto_cleanup() -> None:
             )
             db.add(mj)
             db.commit()
+            invalidate_activity()
     finally:
         db.close()
 
@@ -786,13 +974,194 @@ def _bg_cleanup_by_date(version_ids: list[int], scope: str) -> None:
             mj.finished_at = datetime.now()
             mj.summary = f"{total} versão(ões) removidas, {orphan_total} arquivo(s) liberados ({round(bytes_total/1024/1024, 1)} MB)"
             db.commit()
+            invalidate_activity()
         except Exception:
             mj = db.get(MaintenanceJob, mj_id)
             if mj:
                 mj.status = "failed"
                 mj.finished_at = datetime.now()
                 db.commit()
+                invalidate_activity()
             raise
+    finally:
+        db.close()
+
+
+_MIGRATE_BATCH = 50
+
+def _verify_file_sha256(path: Path, expected: str) -> bool:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest() == expected
+
+
+def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
+    """Background task: copia conteúdo de um volume de origem para destinos e remove a origem."""
+    db = SessionLocal()
+    try:
+        mj = db.get(MaintenanceJob, job_id)
+
+        # Carrega todas as cópias que estão no volume de origem
+        source_copies = (
+            db.query(FileContentCopy)
+            .filter(FileContentCopy.volume_path == source)
+            .all()
+        )
+        total = len(source_copies)
+        log.info(f"[migrate-disk] {source} → {destinations}: {total} cópia(s) a processar")
+
+        dest_set = set(destinations)
+
+        # Rastreia espaço livre estimado por destino em memória para distribuição
+        dest_free: dict[str, int] = {}
+        for d in destinations:
+            try:
+                du = shutil.disk_usage(d)
+                dest_free[d] = du.free
+            except OSError:
+                dest_free[d] = 0
+
+        copied = 0
+        already_on_dest = 0
+        skipped = 0
+        failed_sha256s: set[str] = set()
+
+        # -- Fase 1: copiar arquivos ausentes nos destinos -----------------------
+        for i, src_copy in enumerate(source_copies):
+            sha256 = src_copy.sha256
+
+            # Verifica se já existe cópia em algum destino
+            existing_dest = (
+                db.query(FileContentCopy.volume_path)
+                .filter(
+                    FileContentCopy.sha256 == sha256,
+                    FileContentCopy.volume_path.in_(list(dest_set)),
+                )
+                .first()
+            )
+            if existing_dest:
+                already_on_dest += 1
+            else:
+                # Escolhe destino com mais espaço livre
+                best_dest = max(dest_free, key=lambda d: dest_free[d])
+                if dest_free[best_dest] <= 0:
+                    log.warning(f"[migrate-disk] sem espaço em destinos — pulando {sha256[:8]}…")
+                    skipped += 1
+                    failed_sha256s.add(sha256)
+                    continue
+
+                src_path = Path(src_copy.stored_at)
+                if not src_path.exists():
+                    log.warning(f"[migrate-disk] arquivo físico ausente: {src_path} — pulando")
+                    skipped += 1
+                    failed_sha256s.add(sha256)
+                    continue
+
+                dest_path = _content_path(sha256, Path(best_dest))
+                try:
+                    shutil.copy2(str(src_path), str(dest_path))
+                    if not _verify_file_sha256(dest_path, sha256):
+                        log.warning(f"[migrate-disk] SHA-256 inválido após cópia: {sha256[:8]}…")
+                        dest_path.unlink(missing_ok=True)
+                        skipped += 1
+                        failed_sha256s.add(sha256)
+                        continue
+
+                    fc_copy = FileContentCopy(
+                        sha256=sha256,
+                        stored_at=str(dest_path),
+                        volume_path=best_dest,
+                    )
+                    db.add(fc_copy)
+
+                    # Atualiza estimativa de espaço livre
+                    fc = db.get(FileContent, sha256)
+                    if fc:
+                        dest_free[best_dest] = max(0, dest_free[best_dest] - fc.size)
+
+                    copied += 1
+                except (OSError, Exception) as e:
+                    log.warning(f"[migrate-disk] falha ao copiar {sha256[:8]}…: {e}")
+                    dest_path.unlink(missing_ok=True)
+                    skipped += 1
+                    failed_sha256s.add(sha256)
+                    continue
+
+            # Commit e atualiza progresso a cada lote
+            if (i + 1) % _MIGRATE_BATCH == 0:
+                db.commit()
+                done = i + 1
+                pct = round(done / total * 100) if total else 0
+                mj = db.get(MaintenanceJob, job_id)
+                if mj:
+                    mj.summary = f"Copiando: {done} / {total} arquivos ({pct}%)"
+                    db.commit()
+                log.debug(f"[migrate-disk] lote: {done}/{total}")
+
+        db.commit()
+
+        # -- Fase 2: remover cópias do disco de origem -------------------------
+        removed_physical = 0
+        for src_copy in source_copies:
+            if src_copy.sha256 in failed_sha256s:
+                continue  # Não remove se a cópia de destino falhou
+            src_path = Path(src_copy.stored_at)
+            db.delete(src_copy)
+            try:
+                src_path.unlink(missing_ok=True)
+                removed_physical += 1
+            except OSError as e:
+                log.warning(f"[migrate-disk] falha ao remover {src_path}: {e}")
+
+        # Atualiza FileContent.stored_at que ainda apontam para o volume de origem
+        stale_fcs = (
+            db.query(FileContent)
+            .filter(FileContent.stored_at.like(f"{source}%"))
+            .all()
+        )
+        for fc in stale_fcs:
+            # Busca uma cópia válida em outro volume
+            alt = (
+                db.query(FileContentCopy)
+                .filter(
+                    FileContentCopy.sha256 == fc.sha256,
+                    FileContentCopy.volume_path != source,
+                )
+                .first()
+            )
+            if alt:
+                fc.stored_at = alt.stored_at
+
+        db.commit()
+
+        summary = (
+            f"{copied} copiado(s), {already_on_dest} já existiam no destino, "
+            f"{skipped} pulado(s) — {removed_physical} arquivo(s) removidos de {source}"
+        )
+        log.info(f"[migrate-disk] concluído — {summary}")
+
+        mj = db.get(MaintenanceJob, job_id)
+        if mj:
+            mj.status = "done"
+            mj.finished_at = datetime.now()
+            mj.summary = summary
+            db.commit()
+            invalidate_activity()
+
+    except Exception:
+        log.exception("[migrate-disk] erro inesperado")
+        try:
+            mj = db.get(MaintenanceJob, job_id)
+            if mj:
+                mj.status = "failed"
+                mj.finished_at = datetime.now()
+                db.commit()
+                invalidate_activity()
+        except Exception:
+            pass
+        raise
     finally:
         db.close()
 
@@ -838,9 +1207,9 @@ def activity_page():
     return HTMLResponse(page.read_text(encoding="utf-8"))
 
 
-@app.get("/api/activity", response_model=ActivityResponse, dependencies=[Depends(require_api_key)])
-def get_activity(db: Session = Depends(get_db)):
-    from datetime import timedelta
+def _build_fast_data(db: Session) -> tuple:
+    """Queries leves para dados em tempo real: versões/jobs em execução, storage e discos.
+    Chamado inline a cada request — retorna (running_version_infos, running_job_infos, storage_obj, disks_list)."""
 
     # 1. Versões de backup em execução
     running_vs = (
@@ -865,7 +1234,6 @@ def get_activity(db: Session = Depends(get_db)):
         ):
             stats_map[row.version_id] = (row.fc, int(row.sz))
 
-    # Última versão concluída por label (referência para os cards de running)
     prev_stats: dict[str, tuple[int, int]] = {}
     for label in {v.backup_label for v in running_vs}:
         last_done = (
@@ -916,68 +1284,56 @@ def get_activity(db: Session = Depends(get_db)):
         for j, c in running_job_rows
     ]
 
-    # 3. Storage (mesma lógica do storage_info())
+    # 3. Storage
     usages = [u for u in (_safe_disk_usage(v) for v in STORAGE_VOLUMES) if u]
     usage_total = sum(u.total for u in usages)
     usage_used  = sum(u.used  for u in usages)
     usage_free  = sum(u.free  for u in usages)
-    latest_ts_sq = (
-        db.query(BackupVersion.backup_label, func.max(BackupVersion.created_at).label("latest_ts"))
-        .filter(BackupVersion.status == "done")
-        .group_by(BackupVersion.backup_label)
-        .subquery()
-    )
-    keeper_ids = [
-        row.id for row in (
-            db.query(BackupVersion.id)
-            .join(latest_ts_sq,
-                  (BackupVersion.backup_label == latest_ts_sq.c.backup_label) &
-                  (BackupVersion.created_at   == latest_ts_sq.c.latest_ts))
-            .all()
-        )
-    ]
-    if keeper_ids:
-        kept_sq = (
-            db.query(VersionFile.sha256.label("sha256"))
-            .filter(VersionFile.version_id.in_(keeper_ids))
-            .distinct()
-            .subquery()
-        )
-        reclaimable = (
-            db.query(func.coalesce(func.sum(FileContent.size), 0))
-            .outerjoin(kept_sq, FileContent.sha256 == kept_sq.c.sha256)
-            .filter(kept_sq.c.sha256.is_(None))
-            .scalar()
-        ) or 0
-    else:
-        reclaimable = db.query(func.coalesce(func.sum(FileContent.size), 0)).scalar() or 0
     storage_obj = StorageInfoResponse(
         total_bytes=usage_total, used_bytes=usage_used,
-        free_bytes=usage_free, reclaimable_bytes=int(reclaimable),
+        free_bytes=usage_free, reclaimable_bytes=_get_reclaimable_bytes(db),
     )
 
-    # 4. Disks (mesma lógica do storage_disks())
+    # 4. Disks — 1 query GROUP BY em vez de 2 queries por volume
+    _vol_paths = [str(v) for v in STORAGE_VOLUMES]
+    _disk_rows = (
+        db.query(
+            FileContentCopy.volume_path,
+            func.count(FileContentCopy.id).label("cnt"),
+            func.coalesce(func.sum(FileContent.size), 0).label("bytes"),
+        )
+        .join(FileContent, FileContent.sha256 == FileContentCopy.sha256)
+        .filter(FileContentCopy.volume_path.in_(_vol_paths))
+        .group_by(FileContentCopy.volume_path)
+        .all()
+    )
+    _disk_stats = {r.volume_path: (r.cnt, int(r.bytes)) for r in _disk_rows}
     disks_list = []
     for vol in STORAGE_VOLUMES:
         usage = _safe_disk_usage(vol)
-        status = "degraded" if usage is None else "ok"
-        cf = db.query(func.count(FileContentCopy.id)).filter(FileContentCopy.volume_path == str(vol)).scalar() or 0
-        cb = (
-            db.query(func.coalesce(func.sum(FileContent.size), 0))
-            .join(FileContentCopy, FileContentCopy.sha256 == FileContent.sha256)
-            .filter(FileContentCopy.volume_path == str(vol))
-            .scalar()
-        ) or 0
+        files, bytes_ = _disk_stats.get(str(vol), (0, 0))
         disks_list.append(DiskVolumeInfo(
             path=str(vol),
             total_bytes=usage.total if usage else 0,
             used_bytes=usage.used  if usage else 0,
             free_bytes=usage.free  if usage else 0,
-            content_files=cf, content_bytes=int(cb), status=status,
+            content_files=files, content_bytes=bytes_,
+            status="degraded" if usage is None else "ok",
         ))
 
-    # 5. Versões recentes (últimas 24h, status finalizado)
+    return running_version_infos, running_job_infos, storage_obj, disks_list
+
+
+def _build_historical_data(db: Session) -> tuple:
+    """Queries pesadas: versões recentes com diffs, jobs e manutenções concluídos.
+    Só chamado quando invalidate_activity() acorda o loop histórico.
+    Retorna (recent_version_infos, recent_job_infos, maintenance_job_infos)."""
+    from datetime import timedelta
+    from collections import defaultdict
+
     cutoff = datetime.now() - timedelta(hours=24)
+
+    # 5. Versões recentes (últimas 24h, status finalizado)
     recent_vs = (
         db.query(BackupVersion)
         .filter(
@@ -1003,18 +1359,65 @@ def get_activity(db: Session = Depends(get_db)):
             .all()
         ):
             rstats[row.version_id] = (row.fc, int(row.sz))
+
+    done_vs = [v for v in recent_vs if v.status == "done"]
+    prev_id_map: dict[int, Optional[int]] = {}
+    if done_vs:
+        done_labels = {v.backup_label for v in done_vs}
+        all_done_rows = (
+            db.query(BackupVersion.id, BackupVersion.backup_label, BackupVersion.version_key)
+            .filter(BackupVersion.backup_label.in_(done_labels), BackupVersion.status == "done")
+            .order_by(BackupVersion.backup_label, BackupVersion.version_key)
+            .all()
+        )
+        by_label: dict[str, list] = defaultdict(list)
+        for row in all_done_rows:
+            by_label[row.backup_label].append(row)
+        for v in done_vs:
+            rows = by_label.get(v.backup_label, [])
+            idx = next((i for i, r in enumerate(rows) if r.id == v.id), None)
+            prev_id_map[v.id] = rows[idx - 1].id if idx is not None and idx > 0 else None
+
+    all_diff_ids = set(prev_id_map.keys()) | {pid for pid in prev_id_map.values() if pid}
+    files_by_vid: dict[int, dict[str, str]] = {}
+    if all_diff_ids:
+        for row in (
+            db.query(VersionFile.version_id, VersionFile.original_path, VersionFile.sha256)
+            .filter(VersionFile.version_id.in_(all_diff_ids))
+            .all()
+        ):
+            files_by_vid.setdefault(row.version_id, {})[row.original_path] = row.sha256
+
+    diff_map: dict[int, dict] = {}
+    for v in done_vs:
+        cur = files_by_vid.get(v.id, {})
+        prev_id = prev_id_map.get(v.id)
+        if prev_id is None:
+            diff_map[v.id] = {"added": len(cur), "modified": 0, "removed": 0}
+        else:
+            prv = files_by_vid.get(prev_id, {})
+            diff_map[v.id] = {
+                "added":    sum(1 for p in cur if p not in prv),
+                "modified": sum(1 for p, h in cur.items() if p in prv and prv[p] != h),
+                "removed":  sum(1 for p in prv if p not in cur),
+            }
+
     recent_version_infos = []
     for v in recent_vs:
         fc, sz = rstats.get(v.id, (0, 0))
         duration = None
         if v.finished_at and v.created_at:
             duration = round((v.finished_at - v.created_at).total_seconds(), 1)
+        d = diff_map.get(v.id)
         recent_version_infos.append(RecentVersionInfo(
             backup_label=v.backup_label, version_key=v.version_key,
             status=v.status, created_at=str(v.created_at),
             finished_at=str(v.finished_at) if v.finished_at else None,
             duration_seconds=duration, file_count=fc, total_size_bytes=sz,
             absorbed_count=v.absorbed_count or 0,
+            diff_added=d["added"] if d else None,
+            diff_modified=d["modified"] if d else None,
+            diff_removed=d["removed"] if d else None,
         ))
 
     # 6. Jobs cloud recentes (não rodando, últimos 10)
@@ -1063,14 +1466,55 @@ def get_activity(db: Session = Depends(get_db)):
         for m in maint_rows
     ]
 
+    return recent_version_infos, recent_job_infos, maintenance_job_infos
+
+
+async def _activity_refresh_loop() -> None:
+    """Recalcula o bloco histórico (recent_versions com diffs, recent_jobs, maint_jobs)
+    apenas quando invalidate_activity() acorda o loop — normalmente ao fim de um backup/job.
+    Fallback de 5 min para não ficar preso caso alguma invalidação seja perdida."""
+    loop = asyncio.get_running_loop()
+    while True:
+        await loop.run_in_executor(None, lambda: _activity_wake.wait(timeout=_HISTORICAL_FALLBACK_TTL))
+        _activity_wake.clear()
+
+        try:
+            def _do_hist():
+                db = SessionLocal()
+                try:
+                    return _build_historical_data(db)
+                finally:
+                    db.close()
+            result = await loop.run_in_executor(None, _do_hist)
+            _historical_cache.update({"data": result, "ts": time.monotonic()})
+            log.debug("[activity-hist] cache histórico atualizado")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("[activity-hist] Erro ao atualizar cache histórico")
+
+
+@app.get("/api/activity", response_model=ActivityResponse, dependencies=[Depends(require_api_key)])
+def get_activity(db: Session = Depends(get_db)):
+    running_versions, running_jobs, storage_obj, disks = _build_fast_data(db)
+
+    hist = _historical_cache["data"]
+    if hist is None:
+        # Cold start: bloco histórico ainda não foi calculado — faz inline uma vez
+        recent_versions, recent_jobs, maint_jobs = _build_historical_data(db)
+        _historical_cache.update({"data": (recent_versions, recent_jobs, maint_jobs),
+                                   "ts": time.monotonic()})
+    else:
+        recent_versions, recent_jobs, maint_jobs = hist
+
     return ActivityResponse(
-        running_versions=running_version_infos,
-        running_jobs=running_job_infos,
+        running_versions=running_versions,
+        running_jobs=running_jobs,
         storage=storage_obj,
-        disks=disks_list,
-        recent_versions=recent_version_infos,
-        recent_jobs=recent_job_infos,
-        maintenance_jobs=maintenance_job_infos,
+        disks=disks,
+        recent_versions=recent_versions,
+        recent_jobs=recent_jobs,
+        maintenance_jobs=maint_jobs,
         server_time=datetime.now().isoformat(),
     )
 
@@ -1087,48 +1531,11 @@ def storage_info(db: Session = Depends(get_db)):
     usage_used  = sum(u.used  for u in usages)
     usage_free  = sum(u.free  for u in usages)
 
-    # Keeper = versão "done" mais recente de cada label — 1 query via subquery com MAX(created_at)
-    latest_ts_sq = (
-        db.query(
-            BackupVersion.backup_label,
-            func.max(BackupVersion.created_at).label("latest_ts"),
-        )
-        .filter(BackupVersion.status == "done")
-        .group_by(BackupVersion.backup_label)
-        .subquery()
-    )
-    keeper_ids: list[int] = [
-        row.id for row in (
-            db.query(BackupVersion.id)
-            .join(latest_ts_sq,
-                  (BackupVersion.backup_label == latest_ts_sq.c.backup_label) &
-                  (BackupVersion.created_at   == latest_ts_sq.c.latest_ts))
-            .all()
-        )
-    ]
-
-    if keeper_ids:
-        # LEFT JOIN anti-join: mais eficiente que NOT IN para conjuntos grandes
-        kept_sq = (
-            db.query(VersionFile.sha256.label("sha256"))
-            .filter(VersionFile.version_id.in_(keeper_ids))
-            .distinct()
-            .subquery()
-        )
-        reclaimable = (
-            db.query(func.coalesce(func.sum(FileContent.size), 0))
-            .outerjoin(kept_sq, FileContent.sha256 == kept_sq.c.sha256)
-            .filter(kept_sq.c.sha256.is_(None))
-            .scalar()
-        ) or 0
-    else:
-        reclaimable = db.query(func.coalesce(func.sum(FileContent.size), 0)).scalar() or 0
-
     return StorageInfoResponse(
         total_bytes=usage_total,
         used_bytes=usage_used,
         free_bytes=usage_free,
-        reclaimable_bytes=int(reclaimable),
+        reclaimable_bytes=_get_reclaimable_bytes(db),
     )
 
 
@@ -1158,6 +1565,19 @@ def storage_disks(db: Session = Depends(get_db)):
             content_files=files,
             content_bytes=bytes_,
             status="degraded" if usage is None else "ok",
+        ))
+    if storage.SSD_CACHE_ENABLED and storage.SSD_CACHE_DIR:
+        usage = _safe_disk_usage(storage.SSD_CACHE_DIR)
+        files, bytes_ = vol_stats.get(str(storage.SSD_CACHE_DIR), (0, 0))
+        result.append(DiskVolumeInfo(
+            path=str(storage.SSD_CACHE_DIR),
+            total_bytes=usage.total if usage else 0,
+            used_bytes=usage.used  if usage else 0,
+            free_bytes=usage.free  if usage else 0,
+            content_files=files,
+            content_bytes=bytes_,
+            status="degraded" if usage is None else "ok",
+            is_cache=True,
         ))
     return result
 
@@ -1376,6 +1796,7 @@ def delete_backup(label: str, background_tasks: BackgroundTasks, db: Session = D
     )
     db.delete(b)
     db.commit()
+    invalidate_activity()
     log.info(f"[delete] Label [{label}] excluído — limpeza de órfãos em background")
     background_tasks.add_task(_bg_cleanup_orphan_contents)
     return BackupDeletedResponse(status="deleted", label=label)
@@ -1399,6 +1820,7 @@ def create_version(label: str, req: VersionCreate, db: Session = Depends(get_db)
         log.info(f"[versao] {label}: {updated} versão(ões) running → incomplete")
     v = BackupVersion(backup_label=label, version_key=req.version_key)
     db.add(v); db.commit(); db.refresh(v)
+    invalidate_activity()
     log.info(f"[versao] {label}/{req.version_key} criada")
     return VersionCreatedResponse(created=True, version=_version_stats(v, db))
 
@@ -1454,9 +1876,11 @@ def finish_version(label: str, version_key: str, req: VersionFinish, background_
     v.status = req.status
     v.finished_at = datetime.now()
     db.commit()
+    invalidate_activity()
     log.info(f"[versao] {label}/{version_key} → {req.status}")
     if req.status == "done":
         background_tasks.add_task(_bg_auto_cleanup)
+        background_tasks.add_task(_bg_process_ssd_pending_moves)
     return _version_stats(v, db)
 
 
@@ -1506,6 +1930,7 @@ def delete_version(label: str, version_key: str, background_tasks: BackgroundTas
     v = _get_version_or_404(label, version_key, db)
     db.delete(v)
     db.commit()
+    invalidate_activity()
     log.info(f"[delete] Versão {label}/{version_key} excluída — limpeza em background")
     background_tasks.add_task(_bg_cleanup_orphan_contents)
     return VersionDeletedResponse(
@@ -1586,6 +2011,7 @@ def check_batch(req: CheckBatchRequest, db: Session = Depends(get_db)):
 @app.post("/upload", response_model=UploadResponse, dependencies=[Depends(require_api_key)])
 async def upload_file(
     request: Request,
+    background_tasks: BackgroundTasks,
     backup_label:   str           = Header(..., alias="X-Backup-Label"),
     version_key:    str           = Header(..., alias="X-Version-Key"),
     original_path:  str           = Header(..., alias="X-Original-Path"),
@@ -1617,9 +2043,11 @@ async def upload_file(
             _ensure_replicas(sha256, Path(first_copy.stored_at), db)
         log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — registrada sha256={sha256[:8]}…")
     else:
-        # Escolhe volume com mais espaço livre; tmp e conteúdo vão pro mesmo disco
-        volume = _pick_volume()
-        sha256, size, tmp_path = await _stream_request_to_disk(request, volume)
+        # Escolhe volume HDD de destino final; decide se usa SSD como staging
+        volume    = _pick_volume()
+        ssd_dir   = _ssd_cache_write_dir(db)
+        write_dir = ssd_dir if ssd_dir else volume
+        sha256, size, tmp_path = await _stream_request_to_disk(request, write_dir)
 
         try:
             fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
@@ -1644,7 +2072,8 @@ async def upload_file(
                     tmp_path.unlink(missing_ok=True)
 
             if not fc:
-                dest = _content_path(sha256, volume)
+                use_ssd = ssd_dir is not None
+                dest = _ssd_content_path(sha256) if use_ssd else _content_path(sha256, volume)
                 shutil.move(str(tmp_path), str(dest))
                 if ENCRYPTION_ENABLED:
                     log.info(f"[upload] cifrando {original_path!r} ({size / 1024 / 1024:.2f} MB) — sha256={sha256[:8]}…")
@@ -1656,6 +2085,7 @@ async def upload_file(
                         log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — nova cifrada sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
                     except Exception:
                         tmp_enc.unlink(missing_ok=True)
+                        dest.unlink(missing_ok=True)
                         raise
                 else:
                     log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — nova sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
@@ -1663,7 +2093,17 @@ async def upload_file(
                                  encrypted=ENCRYPTION_ENABLED)
                 try:
                     db.add(fc)
-                    db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(volume)))
+                    if use_ssd:
+                        db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(ssd_dir)))
+                        hdd_dest = volume / "_content" / sha256[:2] / sha256
+                        db.add(SsdCachePendingMove(
+                            sha256=sha256,
+                            ssd_path=str(dest),
+                            dest_volume=str(volume),
+                            dest_path=str(hdd_dest),
+                        ))
+                    else:
+                        db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(volume)))
                     db.flush()
                 except IntegrityError:
                     # Upload concorrente do mesmo sha256 venceu — usar o registro já criado
@@ -1671,7 +2111,8 @@ async def upload_file(
                     dest.unlink(missing_ok=True)
                     fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
                 else:
-                    _ensure_replicas(sha256, dest, db)
+                    if not use_ssd:
+                        _ensure_replicas(sha256, dest, db)
         except Exception:
             tmp_path.unlink(missing_ok=True)
             raise
@@ -1760,10 +2201,13 @@ def download_file(file_id: int, db: Session = Depends(get_db)):
               .filter(~FileContentCopy.volume_path.in_([str(v) for v in _degraded_volumes]))
               .all())
 
+    log.info(f"[download] ativando {row.original_path!r} (file_id={file_id}) — sha256={row.sha256[:8]}…, {len(copies)} cópia(s)")
+
     for copy in copies:
         p = Path(copy.stored_at)
         try:
             if p.exists():
+                log.info(f"[download] {row.sha256[:8]}… encontrado no disco em {p}")
                 if is_encrypted:
                     return StreamingResponse(
                         crypto.decrypt_chunks(p, storage.encryption_key),
@@ -1771,7 +2215,10 @@ def download_file(file_id: int, db: Session = Depends(get_db)):
                         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
                     )
                 return FileResponse(p, filename=filename)
-        except OSError:
+            else:
+                log.error(f"[download] {row.sha256[:8]}… ausente no disco em {p}")
+        except OSError as exc:
+            log.error(f"[download] {row.sha256[:8]}… erro ao acessar {p}: {exc}")
             continue
 
     # 503 apenas se há cópias em volumes degraded (recuperáveis); 410 se o dado sumiu mesmo
@@ -1780,6 +2227,7 @@ def download_file(file_id: int, db: Session = Depends(get_db)):
         FileContentCopy.sha256 == row.sha256,
         FileContentCopy.volume_path.in_(degraded_str),
     ).count()
+    log.error(f"[download] {row.sha256[:8]}… nenhuma cópia válida encontrada no disco para file_id={file_id}")
     raise HTTPException(503 if has_degraded else 410,
                         "Arquivo em volume degraded" if has_degraded else "Conteudo fisico nao encontrado")
 
@@ -1836,6 +2284,18 @@ def compare_versions(label: str, v1: str, v2: str, db: Session = Depends(get_db)
 
 
 # -- Maintenance --------------------------------------------------------------
+def _bg_run_nightly_cleanup() -> None:
+    from nightly_cleanup import run_nightly_cleanup
+    run_nightly_cleanup()
+
+
+@app.post("/maintenance/nightly-cleanup", dependencies=[Depends(require_api_key)])
+def force_nightly_cleanup(background_tasks: BackgroundTasks):
+    """Executa manualmente a rotina de limpeza noturna em background."""
+    background_tasks.add_task(_bg_run_nightly_cleanup)
+    return {"status": "started"}
+
+
 @app.post("/maintenance/cleanup-orphans", response_model=OrphanCleanupResponse, dependencies=[Depends(require_api_key)])
 def force_cleanup_orphans(db: Session = Depends(get_db)):
     """Remove todos os FileContents nao referenciados por nenhuma versao ativa."""
@@ -1861,6 +2321,62 @@ def reconcile_replication(db: Session = Depends(get_db)):
         cleaned=cleaned,
         target_copies=_target_replicas(),
     )
+
+
+def _bg_validate_integrity(job_id: int) -> None:
+    from nightly_cleanup import validate_latest_versions_integrity
+    db = SessionLocal()
+    log_lines: list[str] = []
+
+    def _progress(msg: str) -> None:
+        log_lines.append(msg)
+        mj = db.get(MaintenanceJob, job_id)
+        if mj:
+            mj.summary = "\n".join(log_lines[-30:])
+            db.commit()
+        invalidate_activity()
+
+    try:
+        result = validate_latest_versions_integrity(db, log_fn=_progress)
+        mj = db.get(MaintenanceJob, job_id)
+        if mj:
+            mj.status = "done"
+            mj.finished_at = datetime.now()
+            parts = [f"{result['checked']} versão(ões) verificada(s)"]
+            if result["invalidated"]:
+                parts.append(f"{result['invalidated']} invalidada(s): {', '.join(result['labels'])}")
+            else:
+                parts.append("nenhuma invalidada")
+            if result["files_removed"]:
+                parts.append(f"{result['files_removed']} arquivo(s) removido(s)")
+            mj.summary = " — ".join(parts)
+            db.commit()
+    except Exception as e:
+        log.exception("[validate-integrity] erro no background")
+        mj = db.get(MaintenanceJob, job_id)
+        if mj:
+            mj.status = "error"
+            mj.finished_at = datetime.now()
+            mj.summary = f"Erro: {e}"
+            db.commit()
+    finally:
+        invalidate_activity()
+        db.close()
+
+
+@app.post("/maintenance/validate-integrity", dependencies=[Depends(require_api_key)])
+def validate_integrity(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Verifica se os arquivos das últimas versões done existem no disco; invalida e limpa registros ausentes."""
+    mj = MaintenanceJob(
+        job_type="validate-integrity",
+        status="running",
+        summary="Iniciando verificação de integridade...",
+    )
+    db.add(mj)
+    db.commit()
+    db.refresh(mj)
+    background_tasks.add_task(_bg_validate_integrity, mj.id)
+    return {"scheduled": True, "job_id": mj.id}
 
 
 @app.post("/maintenance/encrypt-existing", response_model=EncryptExistingResponse, dependencies=[Depends(require_api_key)])
@@ -2039,3 +2555,143 @@ def cleanup_by_date(
         "scheduled": len(version_ids),
         "per_label": [{"label": k, "count": cnt} for k, cnt in per_label.items()],
     }
+
+
+# -- Migração de disco ---------------------------------------------------------
+def _migrate_disk_preview_data(
+    source: str,
+    destinations: list[str],
+    db: Session,
+) -> MigrateDiskPreviewResponse:
+    """Calcula o preview de migração sem iniciar nenhuma operação."""
+    volume_strs = [str(v) for v in STORAGE_VOLUMES]
+    if source not in volume_strs:
+        raise HTTPException(status_code=400, detail=f"Volume de origem inválido: {source}")
+    invalid = [d for d in destinations if d not in volume_strs]
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Volume(s) de destino inválido(s): {invalid}")
+    if source in destinations:
+        raise HTTPException(status_code=400, detail="Origem e destino não podem ser o mesmo volume")
+    if not destinations:
+        raise HTTPException(status_code=400, detail="Selecione pelo menos um volume de destino")
+
+    dest_set = set(destinations)
+
+    # Todos os sha256 que estão no volume de origem
+    source_shas_rows = (
+        db.query(FileContentCopy.sha256)
+        .filter(FileContentCopy.volume_path == source)
+        .all()
+    )
+    source_shas = {r.sha256 for r in source_shas_rows}
+
+    if not source_shas:
+        dest_infos = []
+        for d in destinations:
+            try:
+                du = shutil.disk_usage(d)
+                dest_infos.append(MigrateDiskDestInfo(path=d, free_bytes=du.free, capacity_bytes=du.total))
+            except OSError:
+                dest_infos.append(MigrateDiskDestInfo(path=d, free_bytes=0, capacity_bytes=0))
+        return MigrateDiskPreviewResponse(
+            source=source,
+            files_to_copy=0,
+            bytes_to_copy=0,
+            files_already_on_dest=0,
+            destinations=dest_infos,
+            can_proceed=True,
+            reason=None,
+        )
+
+    # sha256s que já têm cópia em algum destino
+    already_rows = (
+        db.query(FileContentCopy.sha256)
+        .filter(
+            FileContentCopy.sha256.in_(list(source_shas)),
+            FileContentCopy.volume_path.in_(list(dest_set)),
+        )
+        .distinct()
+        .all()
+    )
+    already_shas = {r.sha256 for r in already_rows}
+    to_copy_shas = source_shas - already_shas
+
+    bytes_to_copy = 0
+    if to_copy_shas:
+        row = (
+            db.query(func.coalesce(func.sum(FileContent.size), 0))
+            .filter(FileContent.sha256.in_(list(to_copy_shas)))
+            .scalar()
+        )
+        bytes_to_copy = int(row)
+
+    dest_infos = []
+    total_free = 0
+    for d in destinations:
+        try:
+            du = shutil.disk_usage(d)
+            dest_infos.append(MigrateDiskDestInfo(path=d, free_bytes=du.free, capacity_bytes=du.total))
+            total_free += du.free
+        except OSError:
+            dest_infos.append(MigrateDiskDestInfo(path=d, free_bytes=0, capacity_bytes=0))
+
+    can_proceed = total_free >= bytes_to_copy
+    reason = None if can_proceed else (
+        f"Espaço insuficiente nos destinos: "
+        f"necessário {round(bytes_to_copy/1024**3, 2)} GB, "
+        f"disponível {round(total_free/1024**3, 2)} GB"
+    )
+
+    return MigrateDiskPreviewResponse(
+        source=source,
+        files_to_copy=len(to_copy_shas),
+        bytes_to_copy=bytes_to_copy,
+        files_already_on_dest=len(already_shas),
+        destinations=dest_infos,
+        can_proceed=can_proceed,
+        reason=reason,
+    )
+
+
+@app.get(
+    "/maintenance/migrate-disk/preview",
+    response_model=MigrateDiskPreviewResponse,
+    dependencies=[Depends(require_api_key)],
+)
+def migrate_disk_preview(
+    source: str,
+    destinations: list[str] = Query(default=[]),
+    db: Session = Depends(get_db),
+):
+    log.info(f"[migrate-disk/preview] source={source} destinations={destinations}")
+    return _migrate_disk_preview_data(source, destinations, db)
+
+
+@app.post(
+    "/maintenance/migrate-disk",
+    dependencies=[Depends(require_api_key)],
+)
+def migrate_disk(
+    req: MigrateDiskRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    log.info(f"[migrate-disk] source={req.source} destinations={req.destinations}")
+    preview = _migrate_disk_preview_data(req.source, req.destinations, db)
+    if not preview.can_proceed:
+        raise HTTPException(status_code=400, detail=preview.reason)
+
+    dest_str = ", ".join(req.destinations)
+    mj = MaintenanceJob(
+        job_type="disk-migration",
+        status="running",
+        summary=f"{req.source} → {dest_str}",
+    )
+    db.add(mj)
+    db.commit()
+    db.refresh(mj)
+    job_id = mj.id
+
+    background_tasks.add_task(_bg_migrate_disk, req.source, req.destinations, job_id)
+    log.info(f"[migrate-disk] job #{job_id} agendado")
+    return {"scheduled": True, "job_id": job_id}

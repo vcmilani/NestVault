@@ -23,14 +23,24 @@ jobs:
             artifact_path: client/dist/nestvault-linux-arm64
             strip: "true"
 
+          - os: macos-13
+            asset_name: nestvault-macos-x64
+            artifact_path: client/dist/nestvault-macos-x64
+            strip: "true"
+
           - os: macos-latest
-            asset_name: nestvault-macos
-            artifact_path: client/dist/nestvault-macos
+            asset_name: nestvault-macos-arm64
+            artifact_path: client/dist/nestvault-macos-arm64
             strip: "true"
 
           - os: windows-latest
             asset_name: nestvault-windows-x64
             artifact_path: client/dist/nestvault-windows-x64.exe
+            strip: "false"
+
+          - os: windows-11-arm
+            asset_name: nestvault-windows-arm64
+            artifact_path: client/dist/nestvault-windows-arm64.exe
             strip: "false"
 
     runs-on: ${{ matrix.os }}
@@ -84,8 +94,10 @@ jobs:
             |---|---|
             | Linux x64 | `nestvault-linux-x64` |
             | Linux ARM64 | `nestvault-linux-arm64` |
-            | macOS | `nestvault-macos` |
+            | macOS x64 (Intel) | `nestvault-macos-x64` |
+            | macOS ARM64 (Apple Silicon) | `nestvault-macos-arm64` |
             | Windows x64 | `nestvault-windows-x64.exe` |
+            | Windows ARM64 | `nestvault-windows-arm64.exe` |
 
             ### Como usar
 

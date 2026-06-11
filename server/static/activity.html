@@ -7,7 +7,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="NestVault">
-<link rel="icon" type="image/svg+xml" href="/static/icon_web.svg">
+<link rel="icon" type="image/png" href="/static/icon_web.png">
 <link rel="manifest" href="/static/manifest.json">
 <title>Atividade — NestVault</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
@@ -116,6 +116,9 @@
   .badge-running{background:var(--amber-dim);color:var(--amber)}
   .badge-absorb{background:color-mix(in srgb,var(--blue) 12%,var(--bg2));color:var(--blue)}
   .badge-failed{background:var(--red-dim);color:var(--red)}
+  .diff-add{color:#22c55e;font-size:.85em}
+  .diff-mod{color:#f59e0b;font-size:.85em}
+  .diff-del{color:#ef4444;font-size:.85em}
   .running-card.maintenance{border-left-color:var(--text-dim)}
 
   .loading{padding:40px;text-align:center;color:var(--text-mute);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
@@ -239,6 +242,14 @@
   };
   const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   const fmtDate = s => s ? s.replace('T',' ').slice(0,19) : '—';
+  const fmtDiff = v => {
+    if (v.diff_added == null) return '<span class="td-dim">—</span>';
+    const parts = [];
+    if (v.diff_added   > 0) parts.push(`<span class="diff-add">+${v.diff_added.toLocaleString('pt-BR')}</span>`);
+    if (v.diff_modified > 0) parts.push(`<span class="diff-mod">~${v.diff_modified.toLocaleString('pt-BR')}</span>`);
+    if (v.diff_removed  > 0) parts.push(`<span class="diff-del">-${v.diff_removed.toLocaleString('pt-BR')}</span>`);
+    return parts.length ? parts.join(' ') : '<span class="td-dim" style="font-size:.8em">sem alt.</span>';
+  };
   const fmtDuration = s => {
     if (s == null) return '—';
     if (s < 60) return s.toFixed(0)+'s';
@@ -290,7 +301,7 @@
 
   function _interval(data) {
     const hasMaintRunning = (data.maintenance_jobs || []).some(j => j.status === 'running');
-    return (data.running_versions.length + data.running_jobs.length > 0 || hasMaintRunning) ? 3000 : 10000;
+    return (data.running_versions.length + data.running_jobs.length > 0 || hasMaintRunning) ? 2000 : 5000;
   }
 
   async function poll() {
@@ -332,6 +343,8 @@
     'cleanup-by-date': 'Limpeza por data',
     'auto-cleanup':    'Limpeza automática',
     'cleanup-orphans': 'Limpeza de órfãos',
+    'disk-migration':  'Migração de Disco',
+    'ssd-cache-move':  'SSD Cache → HDD',
   };
 
   function renderRunning(versions, jobs, maintJobs) {
@@ -379,7 +392,7 @@
           <span class="pulse-dot"></span>${esc(JOB_TYPE_LABELS[m.job_type] || m.job_type)}
         </div>
         <div class="running-card-meta">
-          ${m.summary ? `<div class="running-card-row">Info: <span>${esc(m.summary)}</span></div>` : ''}
+          ${m.summary ? `<div class="running-card-row">Info: <span>${esc(m.summary.split('\n').filter(Boolean).pop())}</span></div>` : ''}
           <div class="running-card-row">Iniciado há: <span>${elapsed(m.started_at)}</span></div>
         </div>
       </div>`).join('');
@@ -454,6 +467,7 @@
         <td class="td-r td-num">${fmtSize(v.total_size_bytes)}</td>
         <td class="td-r td-dim">${v.file_count.toLocaleString('pt-BR')}</td>
         <td class="td-r td-dim td-nb">${fmtDuration(v.duration_seconds)}</td>
+        <td class="td-nb">${fmtDiff(v)}</td>
         <td class="td-dim td-nb">${fmtDate(v.finished_at)}</td>
       </tr>`).join('');
 
@@ -489,7 +503,7 @@
             <thead><tr>
               <th>Label</th><th>Versão</th><th>Status</th>
               <th class="td-r">Tamanho</th><th class="td-r">Arquivos</th>
-              <th class="td-r">Duração</th><th>Finalizado</th>
+              <th class="td-r">Duração</th><th>Alterações</th><th>Finalizado</th>
             </tr></thead>
             <tbody>${vRows}</tbody>
           </table>` : '<div class="empty-state">Nenhuma versão finalizada nas últimas 24h</div>'}
@@ -538,8 +552,6 @@
   async function init() {
     const resp = await fetch('/health');
     if (!resp.ok) { showError('Servidor indisponível'); return; }
-    const test = await fetch('/api/activity', {headers: H()});
-    if (test.status === 401) { showLogin(); return; }
     _startTick();
     poll();
   }

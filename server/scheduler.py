@@ -54,6 +54,21 @@ def schedule_daily_digest() -> None:
     log.info(f"[scheduler] Daily digest agendado para {hour:02d}:00 (hora local)")
 
 
+def schedule_nightly_cleanup() -> None:
+    """Agenda a limpeza noturna de versões à meia-noite (horário local)."""
+    from nightly_cleanup import run_nightly_cleanup
+    from datetime import datetime as _dt
+    local_tz = _dt.now().astimezone().tzinfo
+    scheduler.add_job(
+        run_nightly_cleanup,
+        CronTrigger(hour=0, minute=0, timezone=local_tz),
+        id="nightly_cleanup",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    log.info("[scheduler] Nightly cleanup agendado para 00:00 (hora local)")
+
+
 def reload_jobs_from_db() -> None:
     """Restaura todos os jobs habilitados ao iniciar o servidor."""
     from database import SessionLocal, CloudBackupJob

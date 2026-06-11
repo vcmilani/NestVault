@@ -52,7 +52,13 @@ def _fmt_bytes(n: int) -> str:
 
 
 def _version_diff(db, version: BackupVersion) -> dict:
-    """Compara a versão com a anterior do mesmo label para obter arquivos adicionados/modificados/removidos."""
+    """Compara a versão com a anterior done do mesmo label (adicionados/modificados/removidos).
+
+    Carrega os arquivos de cada versão em queries separadas — adequado para o digest,
+    que processa poucas versões de uma só vez e roda raramente.
+    Para o endpoint de atividade (polling frequente com até 30 versões), veja a lógica
+    bulk em get_activity() em main.py, que usa uma única query IN para todos os arquivos.
+    """
     prev = (
         db.query(BackupVersion)
         .filter(
@@ -218,7 +224,8 @@ async def _call_claude(stats: dict) -> str:
     prompt = (
         "Com base nos dados de atividade do NestVault abaixo, escreva um resumo amigável "
         "em português. Destaque o que funcionou bem e sinalize erros se houver. "
-        "Seja conciso (máximo 10 linhas).\n\n"
+        "Seja conciso (máximo 10 linhas)."
+        "Ignore erros do Personal Vault ou Cofre Pessoal, a API não tem acesso mesmo. \n\n"
         f"Dados:\n{json.dumps(stats, ensure_ascii=False, indent=2)}"
     )
     async with httpx.AsyncClient(timeout=30) as client:
@@ -243,7 +250,8 @@ async def _call_ollama(stats: dict) -> str:
     prompt = (
         "Você é um assistente que resume atividades de backup. "
         "Com base nos dados abaixo, escreva um resumo amigável em português do NestVault no dia. "
-        "Destaque sucessos e erros. Seja conciso (máximo 10 linhas). Texto simples, sem markdown.\n\n"
+        "Destaque sucessos e erros. Seja conciso (máximo 10 linhas). Texto simples, sem markdown. "
+        "Ignore erros do Personal Vault ou Cofre Pessoal, a API não tem acesso mesmo. \n\n"
         f"Dados:\n{json.dumps(stats, ensure_ascii=False, indent=2)}"
     )
     async with httpx.AsyncClient(timeout=60) as client:

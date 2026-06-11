@@ -16,6 +16,7 @@ from pathlib import Path
 import storage
 import crypto
 from cloud.base import TokenRevokedError
+from cache_state import invalidate_activity
 from database import (
     SessionLocal, BackupID, BackupVersion, FileContent,
     FileContentCopy, VersionFile, CloudCredential, CloudBackupJob, decrypt_token,
@@ -247,6 +248,7 @@ async def run_cloud_backup_job(job_id: int) -> None:
         job.last_run_status  = "running"
         job.last_run_message = None
         db.commit()
+        invalidate_activity()
 
         provider     = _get_provider(job.credential.provider)
         access_token = await _fresh_access_token(job.credential, db)
@@ -340,6 +342,7 @@ async def run_cloud_backup_job(job_id: int) -> None:
         job.last_run_status  = "success" if not errors else "partial"
         job.last_run_message = summary
         db.commit()
+        invalidate_activity()
         log.info(f"[cloud-runner] Job {job_id} concluído — {summary}")
 
     except TokenRevokedError as e:
@@ -357,6 +360,7 @@ async def run_cloud_backup_job(job_id: int) -> None:
                 job.last_run_status  = "reauth_required"
                 job.last_run_message = str(e)
                 db.commit()
+                invalidate_activity()
             except Exception:
                 pass
     except Exception as e:
@@ -374,6 +378,7 @@ async def run_cloud_backup_job(job_id: int) -> None:
                 job.last_run_status  = "error"
                 job.last_run_message = str(e)
                 db.commit()
+                invalidate_activity()
             except Exception:
                 pass
     finally:
