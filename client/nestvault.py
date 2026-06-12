@@ -208,6 +208,7 @@ _session.mount("http://", _adapter)
 _session.mount("https://", _adapter)
 
 _RETRY_ATTEMPTS = 3
+UPLOAD_RETRY_DELAYS = [5, 10, 20, 40, 80]  # segundos entre tentativas de upload
 
 
 def _with_retries(fn: Callable, what: str):
@@ -225,6 +226,52 @@ def _with_retries(fn: Callable, what: str):
             delay = 2 ** (attempt - 1)
             _warn(f"{what}: {e} — retentando em {delay}s ({attempt}/{_RETRY_ATTEMPTS - 1})")
             time.sleep(delay)
+
+
+def _upload_with_backoff(
+    fn: Callable,
+    what: str,
+    retry_gate: threading.Event,
+    abort_event: threading.Event,
+):
+    """Tenta fn() com até 5 retentativas (delays: 5s, 10s, 20s, 40s, 80s).
+    Enquanto retenta, limpa retry_gate para bloquear outros workers de upload.
+    Se todas as tentativas falharem, sinaliza abort_event e levanta a exceção."""
+    if abort_event.is_set():
+        return
+    retry_gate.wait()
+    if abort_event.is_set():
+        return
+
+    try:
+        fn()
+        return
+    except requests.RequestException as first_err:
+        retry_gate.clear()
+        _warn(f"{what}: erro no envio — bloqueando outros uploads e retentando...")
+
+    last_err = first_err
+    try:
+        for i, delay in enumerate(UPLOAD_RETRY_DELAYS, 1):
+            if abort_event.is_set():
+                raise last_err
+            _warn(f"  [{i}/{len(UPLOAD_RETRY_DELAYS)}] aguardando {delay}s...")
+            time.sleep(delay)
+            if abort_event.is_set():
+                raise last_err
+            try:
+                fn()
+                _ok(f"{what}: enviado com sucesso na tentativa {i + 1}")
+                return
+            except requests.RequestException as e:
+                last_err = e
+                _warn(f"  Tentativa {i} falhou: {e}")
+
+        _err(f"{what}: falhou após {len(UPLOAD_RETRY_DELAYS)} tentativas — abortando backup")
+        abort_event.set()
+        raise last_err
+    finally:
+        retry_gate.set()
 
 
 # -- API calls ----------------------------------------------------------------
@@ -478,7 +525,10 @@ def backup_directory(
     _kv("Arquivos", str(total))
 
     stats = {"uploaded": 0, "registered": 0, "fast": 0, "skipped": 0, "errors": 0}
-    lock  = threading.Lock()
+    lock         = threading.Lock()
+    _retry_gate  = threading.Event()
+    _retry_gate.set()
+    _abort_event = threading.Event()
     all_paths = [op for _, op in pending]
 
     use_batch = not dry_run and _server_supports_batch(server)
@@ -569,6 +619,8 @@ def backup_directory(
 
             # ----- Fase 2: uploads e registers paralelos -----
             def _do_fast(fp, op, mtime, sha256):
+                if _abort_event.is_set():
+                    return
                 try:
                     _dim(f"FAST  {op}")
                     _with_retries(lambda: register_file(server, label, version_key, op, mtime, sha256), op)
@@ -582,6 +634,8 @@ def backup_directory(
                     _update_bar()
 
             def _do_action(op, action, sha256, size, mtime, fp):
+                if _abort_event.is_set():
+                    return
                 try:
                     if action == "skip":
                         _dim(f"SKIP  {op}")
@@ -594,9 +648,13 @@ def backup_directory(
                             stats["registered"] += 1
                     else:
                         _dim(f"UP    {op}  ({fmt_size(size)})")
-                        _with_retries(lambda: upload_file(server, fp, label, version_key, op, mtime, progress), op)
-                        with lock:
-                            stats["uploaded"] += 1
+                        _upload_with_backoff(
+                            lambda: upload_file(server, fp, label, version_key, op, mtime, progress),
+                            op, _retry_gate, _abort_event,
+                        )
+                        if not _abort_event.is_set():
+                            with lock:
+                                stats["uploaded"] += 1
                 except requests.RequestException as e:
                     _err(f"{op}: {e}")
                     with lock:
@@ -619,6 +677,8 @@ def backup_directory(
         else:
             # ----- Fallback: check individual por worker -----
             def process(fp: Path, op: str):
+                if _abort_event.is_set():
+                    return
                 try:
                     stat  = fp.stat()
                     size  = stat.st_size
@@ -648,9 +708,16 @@ def backup_directory(
                     else:
                         _dim(f"UP    {op}  ({fmt_size(size)})")
                         if not dry_run:
-                            _with_retries(lambda: upload_file(server, fp, label, version_key, op, mtime, progress), op)
-                        with lock:
-                            stats["uploaded"] += 1
+                            _upload_with_backoff(
+                                lambda: upload_file(server, fp, label, version_key, op, mtime, progress),
+                                op, _retry_gate, _abort_event,
+                            )
+                            if not _abort_event.is_set():
+                                with lock:
+                                    stats["uploaded"] += 1
+                        else:
+                            with lock:
+                                stats["uploaded"] += 1
 
                 except OSError as e:
                     _warn(f"{op}: arquivo inacessível — ignorado ({e.strerror})")
