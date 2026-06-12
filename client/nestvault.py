@@ -30,7 +30,7 @@ Changelog:
 
 VERSION = "v6.0.0"
 
-import os, sys, hashlib, argparse, base64, socket, threading
+import os, sys, hashlib, argparse, base64, socket, threading, time
 from pathlib import Path
 from typing import Optional, Callable
 from datetime import datetime
@@ -201,6 +201,30 @@ class _AuthSession(requests.Session):
 
 _session = _AuthSession()
 _session.headers.update({"Connection": "keep-alive"})
+# Pool dimensionado para --workers > 10 (default do requests é 10, que descarta
+# e reabre conexões sob concorrência alta)
+_adapter = requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=32)
+_session.mount("http://", _adapter)
+_session.mount("https://", _adapter)
+
+_RETRY_ATTEMPTS = 3
+
+
+def _with_retries(fn: Callable, what: str):
+    """Executa fn com backoff exponencial (1s, 2s) para erros transientes:
+    conexão/timeout e HTTP 429/5xx. Seguro para uploads — o servidor deduplica
+    por sha256 e o registro de versão é upsert, então retentar não duplica nada."""
+    for attempt in range(1, _RETRY_ATTEMPTS + 1):
+        try:
+            return fn()
+        except requests.RequestException as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            transient = status is None or status == 429 or status >= 500
+            if not transient or attempt == _RETRY_ATTEMPTS:
+                raise
+            delay = 2 ** (attempt - 1)
+            _warn(f"{what}: {e} — retentando em {delay}s ({attempt}/{_RETRY_ATTEMPTS - 1})")
+            time.sleep(delay)
 
 
 # -- API calls ----------------------------------------------------------------
@@ -547,7 +571,7 @@ def backup_directory(
             def _do_fast(fp, op, mtime, sha256):
                 try:
                     _dim(f"FAST  {op}")
-                    register_file(server, label, version_key, op, mtime, sha256)
+                    _with_retries(lambda: register_file(server, label, version_key, op, mtime, sha256), op)
                     with lock:
                         stats["fast"] += 1
                 except requests.RequestException as e:
@@ -565,12 +589,12 @@ def backup_directory(
                             stats["skipped"] += 1
                     elif action == "register":
                         _dim(f"REG   {op}  ({fmt_size(size)})")
-                        register_file(server, label, version_key, op, mtime, sha256)
+                        _with_retries(lambda: register_file(server, label, version_key, op, mtime, sha256), op)
                         with lock:
                             stats["registered"] += 1
                     else:
                         _dim(f"UP    {op}  ({fmt_size(size)})")
-                        upload_file(server, fp, label, version_key, op, mtime, progress)
+                        _with_retries(lambda: upload_file(server, fp, label, version_key, op, mtime, progress), op)
                         with lock:
                             stats["uploaded"] += 1
                 except requests.RequestException as e:
@@ -603,13 +627,13 @@ def backup_directory(
                     if cached and cached["mtime"] == mtime and cached["size"] == size:
                         _dim(f"FAST  {op}  ({fmt_size(size)})")
                         if not dry_run:
-                            register_file(server, label, version_key, op, mtime, cached["sha256"])
+                            _with_retries(lambda: register_file(server, label, version_key, op, mtime, cached["sha256"]), op)
                         with lock:
                             stats["fast"] += 1
                         return
 
                     sha256 = sha256_file(fp)
-                    check  = check_file(server, label, version_key, op, sha256, size, mtime)
+                    check  = _with_retries(lambda: check_file(server, label, version_key, op, sha256, size, mtime), op)
 
                     if not check["needs_upload"]:
                         _dim(f"SKIP  {op}")
@@ -618,13 +642,13 @@ def backup_directory(
                     elif check.get("content_exists"):
                         _dim(f"REG   {op}  ({fmt_size(size)})")
                         if not dry_run:
-                            register_file(server, label, version_key, op, mtime, sha256)
+                            _with_retries(lambda: register_file(server, label, version_key, op, mtime, sha256), op)
                         with lock:
                             stats["registered"] += 1
                     else:
                         _dim(f"UP    {op}  ({fmt_size(size)})")
                         if not dry_run:
-                            upload_file(server, fp, label, version_key, op, mtime, progress)
+                            _with_retries(lambda: upload_file(server, fp, label, version_key, op, mtime, progress), op)
                         with lock:
                             stats["uploaded"] += 1
 

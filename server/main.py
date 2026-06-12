@@ -592,6 +592,16 @@ def _verify_stored_file(sha256: str, dest: Path, encrypted: bool) -> None:
         raise HTTPException(500, "Corrupção detectada: sha256 do disco não confere com o esperado")
 
 
+def _expected_stored_size(plain_size: int, encrypted: bool) -> int:
+    """Tamanho esperado do arquivo no disco a partir do tamanho do plaintext.
+    Cifrado: base_nonce + 20 bytes de overhead (4 de comprimento + 16 de tag GCM)
+    por chunk de 1 MB — formato definido em crypto.py."""
+    if not encrypted:
+        return plain_size
+    n_chunks = (plain_size + crypto.CHUNK_SIZE - 1) // crypto.CHUNK_SIZE
+    return crypto.NONCE_SIZE + plain_size + n_chunks * 20
+
+
 def _purge_corrupted_content(sha256: str, db: Session) -> None:
     copies = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).all()
     for copy in copies:
@@ -1284,8 +1294,9 @@ def _build_fast_data(db: Session) -> tuple:
         for j, c in running_job_rows
     ]
 
-    # 3. Storage
-    usages = [u for u in (_safe_disk_usage(v) for v in STORAGE_VOLUMES) if u]
+    # 3. Storage — um statvfs por volume, reaproveitado no bloco de disks
+    usage_map = {v: _safe_disk_usage(v) for v in STORAGE_VOLUMES}
+    usages = [u for u in usage_map.values() if u]
     usage_total = sum(u.total for u in usages)
     usage_used  = sum(u.used  for u in usages)
     usage_free  = sum(u.free  for u in usages)
@@ -1310,7 +1321,7 @@ def _build_fast_data(db: Session) -> tuple:
     _disk_stats = {r.volume_path: (r.cnt, int(r.bytes)) for r in _disk_rows}
     disks_list = []
     for vol in STORAGE_VOLUMES:
-        usage = _safe_disk_usage(vol)
+        usage = usage_map[vol]
         files, bytes_ = _disk_stats.get(str(vol), (0, 0))
         disks_list.append(DiskVolumeInfo(
             path=str(vol),
@@ -2008,6 +2019,65 @@ def check_batch(req: CheckBatchRequest, db: Session = Depends(get_db)):
 
 
 # -- Upload -------------------------------------------------------------------
+def _store_new_content(
+    sha256: str,
+    size: int,
+    tmp_path: Path,
+    volume: Path,
+    ssd_dir: Optional[Path],
+    backup_label: str,
+    version_key: str,
+    original_path: str,
+    db: Session,
+) -> FileContent:
+    """Move o tmp para o destino final, cifra/verifica e registra no banco.
+    Bloqueante (I/O + criptografia) — deve rodar via asyncio.to_thread para
+    não travar o event loop. Retorna o FileContent vencedor (o criado aqui
+    ou o de um upload concorrente que chegou primeiro)."""
+    use_ssd = ssd_dir is not None
+    dest = _ssd_content_path(sha256) if use_ssd else _content_path(sha256, volume)
+    shutil.move(str(tmp_path), str(dest))
+    if ENCRYPTION_ENABLED:
+        log.info(f"[upload] cifrando {original_path!r} ({size / 1024 / 1024:.2f} MB) — sha256={sha256[:8]}…")
+        tmp_enc = dest.parent / f"_enc_{os.urandom(4).hex()}"
+        try:
+            crypto.encrypt_stream(dest, tmp_enc, storage.encryption_key)
+            shutil.move(str(tmp_enc), str(dest))
+            _verify_stored_file(sha256, dest, encrypted=True)
+            log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — nova cifrada sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
+        except Exception:
+            tmp_enc.unlink(missing_ok=True)
+            dest.unlink(missing_ok=True)
+            raise
+    else:
+        log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — nova sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
+    fc = FileContent(sha256=sha256, stored_at=str(dest), size=size,
+                     encrypted=ENCRYPTION_ENABLED)
+    try:
+        db.add(fc)
+        if use_ssd:
+            db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(ssd_dir)))
+            hdd_dest = volume / "_content" / sha256[:2] / sha256
+            db.add(SsdCachePendingMove(
+                sha256=sha256,
+                ssd_path=str(dest),
+                dest_volume=str(volume),
+                dest_path=str(hdd_dest),
+            ))
+        else:
+            db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(volume)))
+        db.flush()
+    except IntegrityError:
+        # Upload concorrente do mesmo sha256 venceu — usar o registro já criado
+        db.rollback()
+        dest.unlink(missing_ok=True)
+        fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+    else:
+        if not use_ssd:
+            _ensure_replicas(sha256, dest, db)
+    return fc
+
+
 @app.post("/upload", response_model=UploadResponse, dependencies=[Depends(require_api_key)])
 async def upload_file(
     request: Request,
@@ -2040,7 +2110,7 @@ async def upload_file(
         sha256 = content_sha256
         first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).first()
         if first_copy:
-            _ensure_replicas(sha256, Path(first_copy.stored_at), db)
+            await asyncio.to_thread(_ensure_replicas, sha256, Path(first_copy.stored_at), db)
         log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — registrada sha256={sha256[:8]}…")
     else:
         # Escolhe volume HDD de destino final; decide se usa SSD como staging
@@ -2055,64 +2125,35 @@ async def upload_file(
                 first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).first()
                 if first_copy:
                     stored = Path(first_copy.stored_at)
-                    if not stored.exists():
+                    # Checagem leve: existência + tamanho esperado no disco. A verificação
+                    # profunda (decifrar e re-hashear) fica com o job validate-integrity.
+                    try:
+                        stored_size = stored.stat().st_size
+                    except OSError:
+                        stored_size = None
+                    if stored_size is None:
                         log.warning(f"[integrity] {sha256[:8]}… ausente no disco — purgando e re-enviando")
                         _purge_corrupted_content(sha256, db)
                         fc = None
+                    elif stored_size != _expected_stored_size(fc.size, fc.encrypted):
+                        log.warning(
+                            f"[integrity] {sha256[:8]}… tamanho no disco ({stored_size}) difere do esperado "
+                            f"({_expected_stored_size(fc.size, fc.encrypted)}) — purgando e re-enviando"
+                        )
+                        _purge_corrupted_content(sha256, db)
+                        fc = None
                     else:
-                        try:
-                            _verify_stored_file(sha256, stored, encrypted=fc.encrypted)
-                            log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — dedup sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
-                            _ensure_replicas(sha256, stored, db)
-                            tmp_path.unlink(missing_ok=True)
-                        except HTTPException:
-                            _purge_corrupted_content(sha256, db)
-                            fc = None
+                        log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — dedup sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
+                        await asyncio.to_thread(_ensure_replicas, sha256, stored, db)
+                        tmp_path.unlink(missing_ok=True)
                 else:
                     tmp_path.unlink(missing_ok=True)
 
             if not fc:
-                use_ssd = ssd_dir is not None
-                dest = _ssd_content_path(sha256) if use_ssd else _content_path(sha256, volume)
-                shutil.move(str(tmp_path), str(dest))
-                if ENCRYPTION_ENABLED:
-                    log.info(f"[upload] cifrando {original_path!r} ({size / 1024 / 1024:.2f} MB) — sha256={sha256[:8]}…")
-                    tmp_enc = dest.parent / f"_enc_{os.urandom(4).hex()}"
-                    try:
-                        crypto.encrypt_stream(dest, tmp_enc, storage.encryption_key)
-                        shutil.move(str(tmp_enc), str(dest))
-                        _verify_stored_file(sha256, dest, encrypted=True)
-                        log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — nova cifrada sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
-                    except Exception:
-                        tmp_enc.unlink(missing_ok=True)
-                        dest.unlink(missing_ok=True)
-                        raise
-                else:
-                    log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — nova sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
-                fc = FileContent(sha256=sha256, stored_at=str(dest), size=size,
-                                 encrypted=ENCRYPTION_ENABLED)
-                try:
-                    db.add(fc)
-                    if use_ssd:
-                        db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(ssd_dir)))
-                        hdd_dest = volume / "_content" / sha256[:2] / sha256
-                        db.add(SsdCachePendingMove(
-                            sha256=sha256,
-                            ssd_path=str(dest),
-                            dest_volume=str(volume),
-                            dest_path=str(hdd_dest),
-                        ))
-                    else:
-                        db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(volume)))
-                    db.flush()
-                except IntegrityError:
-                    # Upload concorrente do mesmo sha256 venceu — usar o registro já criado
-                    db.rollback()
-                    dest.unlink(missing_ok=True)
-                    fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
-                else:
-                    if not use_ssd:
-                        _ensure_replicas(sha256, dest, db)
+                fc = await asyncio.to_thread(
+                    _store_new_content, sha256, size, tmp_path, volume, ssd_dir,
+                    backup_label, version_key, original_path, db,
+                )
         except Exception:
             tmp_path.unlink(missing_ok=True)
             raise

@@ -187,13 +187,17 @@ class OneDriveProvider(CloudProvider):
         return results
 
     async def download_file_to(
-        self, access_token: str, file_id: str, dest_path: Path, chunk_size: int = 1024 * 1024
+        self, access_token: str, file_id: str, dest_path: Path,
+        chunk_size: int = 1024 * 1024, client: httpx.AsyncClient | None = None,
     ) -> tuple[str, int]:
         h = hashlib.sha256()
         size = 0
         # Graph retorna 302 para a URL de download direto
         url = f"{_GRAPH_BASE}/me/drive/items/{file_id}/content"
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=300.0)) as client:
+        owned = client is None
+        if owned:
+            client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=300.0))
+        try:
             async with client.stream(
                 "GET", url,
                 headers={"Authorization": f"Bearer {access_token}"},
@@ -205,4 +209,7 @@ class OneDriveProvider(CloudProvider):
                         h.update(chunk)
                         f.write(chunk)
                         size += len(chunk)
+        finally:
+            if owned:
+                await client.aclose()
         return h.hexdigest(), size
