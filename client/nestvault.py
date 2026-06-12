@@ -28,7 +28,7 @@ Changelog:
         reconciliação de replicação (reconcile-replication).
 """
 
-VERSION = "v6.0.0"
+VERSION = "v6.1.0"
 
 import os, sys, hashlib, argparse, base64, socket, threading, time
 from pathlib import Path
