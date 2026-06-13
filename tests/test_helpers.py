@@ -149,3 +149,60 @@ def test_pick_volume_raises_503_when_all_degraded(tmp_path):
         with pytest.raises(HTTPException) as exc_info:
             m._pick_volume()
     assert exc_info.value.status_code == 503
+
+
+# -- _expected_stored_size ----------------------------------------------------
+
+def test_expected_stored_size_plain():
+    assert m._expected_stored_size(0, encrypted=False) == 0
+    assert m._expected_stored_size(12345, encrypted=False) == 12345
+
+
+def test_expected_stored_size_encrypted():
+    import crypto
+    MB = crypto.CHUNK_SIZE
+    # 0 bytes → só o nonce
+    assert m._expected_stored_size(0, encrypted=True) == crypto.NONCE_SIZE
+    # < 1 chunk → nonce + payload + 1 overhead de chunk (4 len + 16 tag)
+    assert m._expected_stored_size(1, encrypted=True) == crypto.NONCE_SIZE + 1 + 20
+    # múltiplo exato de 1 chunk → 1 overhead
+    assert m._expected_stored_size(MB, encrypted=True) == crypto.NONCE_SIZE + MB + 20
+    # 1 byte a mais → 2 chunks de overhead
+    assert m._expected_stored_size(MB + 1, encrypted=True) == crypto.NONCE_SIZE + MB + 1 + 40
+
+
+@pytest.mark.parametrize("size", [0, 1, 1024, (1 << 20), (1 << 20) + 1, 3 * (1 << 20) + 777])
+def test_expected_stored_size_matches_real_encryption(tmp_path, size):
+    """O tamanho previsto deve bater com o arquivo realmente cifrado por crypto.encrypt_stream."""
+    import os as _os
+    import crypto
+    key = _os.urandom(32)
+    src = tmp_path / "plain"
+    dst = tmp_path / "enc"
+    src.write_bytes(_os.urandom(size))
+    crypto.encrypt_stream(src, dst, key)
+    assert dst.stat().st_size == m._expected_stored_size(size, encrypted=True)
+
+
+# -- _copy_with_sha256 --------------------------------------------------------
+
+def test_copy_with_sha256_copies_and_hashes(tmp_path):
+    import os as _os
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    data = _os.urandom(3 * (1 << 20) + 123)
+    src.write_bytes(data)
+
+    digest = storage._copy_with_sha256(src, dst)
+
+    assert dst.read_bytes() == data
+    assert digest == storage._file_sha256_raw(src) == storage._file_sha256_raw(dst)
+
+
+def test_copy_with_sha256_empty_file(tmp_path):
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    src.write_bytes(b"")
+    digest = storage._copy_with_sha256(src, dst)
+    assert dst.stat().st_size == 0
+    assert digest == storage._file_sha256_raw(src)

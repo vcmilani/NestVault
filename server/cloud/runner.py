@@ -13,6 +13,8 @@ import os, shutil, logging, asyncio
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+import httpx
+
 import storage
 import crypto
 from cloud.base import TokenRevokedError
@@ -71,6 +73,7 @@ async def _producer(
     db,
     errors: list,
     abort: asyncio.Event,
+    http_client: httpx.AsyncClient | None = None,
 ) -> None:
     """Baixa arquivos em paralelo (até _PARALLEL_DOWNLOADS simultâneos) e enfileira para processamento."""
     semaphore   = asyncio.Semaphore(_PARALLEL_DOWNLOADS)
@@ -106,7 +109,7 @@ async def _producer(
 
             try:
                 sha256, size = await provider.download_file_to(
-                    access_token, entry.file_id, tmp_path, storage.CHUNK_SIZE
+                    access_token, entry.file_id, tmp_path, storage.CHUNK_SIZE, client=http_client
                 )
                 result = (sha256, size)
                 async with token_lock:
@@ -120,7 +123,7 @@ async def _producer(
                             access_token = await _force_refresh_token(credential, db)
                             state["access_token"] = access_token
                         sha256, size = await provider.download_file_to(
-                            access_token, entry.file_id, tmp_path, storage.CHUNK_SIZE
+                            access_token, entry.file_id, tmp_path, storage.CHUNK_SIZE, client=http_client
                         )
                         result = (sha256, size)
                         async with token_lock:
@@ -147,6 +150,55 @@ async def _producer(
         await queue.put(None)
 
 
+def _register_version_file_sync(version_id: int, entry, sha256: str, db) -> None:
+    db.add(VersionFile(
+        version_id=version_id,
+        original_path=entry.path,
+        sha256=sha256,
+        mtime=entry.mtime,
+    ))
+    db.commit()
+
+
+def _process_file_sync(
+    version_id: int,
+    entry,
+    tmp_path: Path,
+    sha256: str,
+    size: int,
+    volume: Path,
+    enc_key: bytes | None,
+    db,
+) -> None:
+    """Dedup, store, encrypt, replicate e registro no banco de um arquivo baixado.
+    Bloqueante (I/O + criptografia) — roda via asyncio.to_thread para não travar
+    os downloads do producer."""
+    fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+    if fc:
+        tmp_path.unlink(missing_ok=True)
+        first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).first()
+        if first_copy:
+            storage.ensure_replicas(sha256, Path(first_copy.stored_at), db)
+    else:
+        dest = storage.content_path(sha256, volume)
+        shutil.move(str(tmp_path), str(dest))
+        if enc_key:
+            tmp_enc = dest.parent / f"_enc_{os.urandom(4).hex()}"
+            try:
+                crypto.encrypt_stream(dest, tmp_enc, enc_key)
+                shutil.move(str(tmp_enc), str(dest))
+            except Exception:
+                tmp_enc.unlink(missing_ok=True)
+                raise
+        fc = FileContent(sha256=sha256, stored_at=str(dest), size=size, encrypted=bool(enc_key))
+        db.add(fc)
+        db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(volume)))
+        db.commit()  # libera o lock antes do I/O de replicação
+        storage.ensure_replicas(sha256, dest, db)
+
+    _register_version_file_sync(version_id, entry, sha256, db)
+
+
 async def _consumer(
     queue: asyncio.Queue,
     version_id: int,
@@ -156,7 +208,6 @@ async def _consumer(
     abort: asyncio.Event,
 ) -> tuple[int, int]:
     """Processa itens da fila: dedup, store, encrypt, replicate, DB. Retorna (processed, skipped)."""
-    loop = asyncio.get_running_loop()
     processed = 0
     skipped   = 0
 
@@ -170,13 +221,7 @@ async def _consumer(
         if kind == "skip":
             _, entry, sha256 = item
             try:
-                db.add(VersionFile(
-                    version_id=version_id,
-                    original_path=entry.path,
-                    sha256=sha256,
-                    mtime=entry.mtime,
-                ))
-                db.commit()
+                await asyncio.to_thread(_register_version_file_sync, version_id, entry, sha256, db)
                 processed += 1
                 skipped   += 1
             except Exception as e:
@@ -188,42 +233,12 @@ async def _consumer(
         _, entry, tmp_path, sha256, size, volume = item
         tmp_path = Path(tmp_path)
         try:
-            fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
-            if fc:
-                tmp_path.unlink(missing_ok=True)
-                first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).first()
-                if first_copy:
-                    storage.ensure_replicas(sha256, Path(first_copy.stored_at), db)
-            else:
-                dest = storage.content_path(sha256, volume)
-                shutil.move(str(tmp_path), str(dest))
-                tmp_path = None
-                if enc_key:
-                    tmp_enc = dest.parent / f"_enc_{os.urandom(4).hex()}"
-                    try:
-                        await loop.run_in_executor(None, crypto.encrypt_stream, dest, tmp_enc, enc_key)
-                        shutil.move(str(tmp_enc), str(dest))
-                    except Exception:
-                        tmp_enc.unlink(missing_ok=True)
-                        raise
-                fc = FileContent(sha256=sha256, stored_at=str(dest), size=size, encrypted=bool(enc_key))
-                db.add(fc)
-                db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(volume)))
-                db.commit()  # libera o lock antes do I/O de replicação
-                storage.ensure_replicas(sha256, dest, db)
-
-            db.add(VersionFile(
-                version_id=version_id,
-                original_path=entry.path,
-                sha256=sha256,
-                mtime=entry.mtime,
-            ))
-            db.commit()
+            await asyncio.to_thread(
+                _process_file_sync, version_id, entry, tmp_path, sha256, size, volume, enc_key, db,
+            )
             processed += 1
-
         except Exception as e:
-            if tmp_path:
-                Path(tmp_path).unlink(missing_ok=True)
+            tmp_path.unlink(missing_ok=True)
             msg = f"{entry.path}: {e}"
             errors.append(msg)
             log.error(f"[cloud-runner] Erro ao processar {msg}")
@@ -323,10 +338,12 @@ async def run_cloud_backup_job(job_id: int) -> None:
         abort = asyncio.Event()
         queue: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_SIZE)
 
-        _, (processed, skipped) = await asyncio.gather(
-            _producer(queue, all_files, prev_files, job.credential, provider, db, errors, abort),
-            _consumer(queue, version.id, db, enc_key, errors, abort),
-        )
+        # Um único client para todos os downloads do job — reusa conexões TCP/TLS
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=300.0)) as http_client:
+            _, (processed, skipped) = await asyncio.gather(
+                _producer(queue, all_files, prev_files, job.credential, provider, db, errors, abort, http_client),
+                _consumer(queue, version.id, db, enc_key, errors, abort),
+            )
 
         version.status      = "failed" if (processed == 0 and errors) else "done"
         version.finished_at = datetime.now()

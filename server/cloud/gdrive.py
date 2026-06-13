@@ -135,12 +135,16 @@ class GoogleDriveProvider(CloudProvider):
         return results
 
     async def download_file_to(
-        self, access_token: str, file_id: str, dest_path: Path, chunk_size: int = 1024 * 1024
+        self, access_token: str, file_id: str, dest_path: Path,
+        chunk_size: int = 1024 * 1024, client: httpx.AsyncClient | None = None,
     ) -> tuple[str, int]:
         h = hashlib.sha256()
         size = 0
         url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=300.0)) as client:
+        owned = client is None
+        if owned:
+            client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=300.0))
+        try:
             async with client.stream(
                 "GET", url,
                 headers={"Authorization": f"Bearer {access_token}"},
@@ -152,4 +156,7 @@ class GoogleDriveProvider(CloudProvider):
                         h.update(chunk)
                         f.write(chunk)
                         size += len(chunk)
+        finally:
+            if owned:
+                await client.aclose()
         return h.hexdigest(), size

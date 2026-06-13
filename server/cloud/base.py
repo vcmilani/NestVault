@@ -3,6 +3,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
+
 
 class TokenRevokedError(Exception):
     """Refresh token inválido ou revogado — requer re-autenticação do usuário."""
@@ -51,9 +53,12 @@ class CloudProvider(ABC):
 
     @abstractmethod
     async def download_file_to(
-        self, access_token: str, file_id: str, dest_path: Path, chunk_size: int = 1024 * 1024
+        self, access_token: str, file_id: str, dest_path: Path,
+        chunk_size: int = 1024 * 1024, client: httpx.AsyncClient | None = None,
     ) -> tuple[str, int]:
         """Faz download do arquivo para dest_path calculando SHA-256 em single-pass.
+        Aceita um client httpx compartilhado para reusar conexões entre downloads;
+        se None, cria um client próprio para a chamada.
         Retorna: (sha256_hex, size_bytes)
         """
 

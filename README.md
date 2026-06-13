@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v6.0.0`
+# 🗄️ NestVault  `v6.1.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -6,6 +6,8 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v6.1.0** — otimizações de performance: trabalho bloqueante (criptografia, hashing, cópias) removido do event loop via `asyncio.to_thread` — o servidor permanece responsivo durante uploads grandes e jobs cloud simultâneos. Verificação de dedup passa a ser leve (tamanho esperado calculado por fórmula AES-GCM) em vez de decifrar o arquivo inteiro a cada hit; integridade profunda fica com o job `validate-integrity`. SSD cache move reduz de 3 para 2 leituras por arquivo (`_copy_with_sha256`). Cloud runner reutiliza um único `httpx.AsyncClient` por job — elimina handshake TCP/TLS por arquivo. Cliente Python ganha pool de conexões dimensionado para alta concorrência (`pool_maxsize=32`) e retry com backoff exponencial em erros transientes.
+>
 > **v6.0.0** — SSD cache tier para backup local: quando `SSD_CACHE_ENABLED=true`, uploads são gravados primeiro no SSD (via `SSD_CACHE_DIR`), o servidor responde ao cliente imediatamente, e a movimentação para o disco lento ocorre de forma assíncrona em background. Se o SSD atingir o limite configurado em `SSD_CACHE_MAX_GB`, o upload recai silenciosamente para o HDD sem interrupção. Moves pendentes sobrevivem a reinicializações do servidor (persistidos em `ssd_cache_pending_moves` no banco). Ganho especialmente relevante em redes 2.5 GbE, onde o HDD se torna o gargalo claro (100–150 MB/s vs. 312 MB/s de rede). Desabilitado por padrão — zero impacto para configurações sem SSD cache.
 >
 > **v5.3.0** — refinamento da política de retenção noturna: a faixa "guardar tudo" foi reduzida de 30 dias para 24 horas; entre 1 dia e 30 dias passa a ser guardada 1 versão `done` por dia (a mais recente de cada dia calendário). As demais faixas permanecem iguais: 30–180 dias → 1 por semana; acima de 180 dias → 1 por mês.
@@ -1015,7 +1017,7 @@ pytest tests/ --cov=server --cov-report=term-missing
 
 | Arquivo | O que cobre |
 |---|---|
-| `test_helpers.py` | `_pick_volume`, `_content_path`, `_min_disk_free_percent` (mocks de disco) |
+| `test_helpers.py` | `_pick_volume`, `_content_path`, `_min_disk_free_percent` (mocks de disco); `_expected_stored_size` (fórmula AES-GCM para plain/cifrado, matches tamanho real); `_copy_with_sha256` (hash-during-copy) |
 | `test_backups.py` | CRUD de backups e versões — criação, listagem, finalização, deleção |
 | `test_check.py` | `/check` e `/check/batch` — 3 branches: novo, conteúdo existente, já registrado |
 | `test_upload.py` | `/upload` — upload novo, deduplicação (mesmo sha256), modo register-only |
@@ -1114,6 +1116,21 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 ---
 
 ## ⚡ Otimizações
+
+### v6.1.0
+
+| Componente | Mudança |
+|---|---|
+| **`main.py` — upload novo** | `_store_new_content` (move, cifra, verifica, replica) extraída para função síncrona e chamada via `asyncio.to_thread` — event loop liberado durante uploads pesados |
+| **`main.py` — dedup** | Verificação de integridade leve: `_expected_stored_size(plain_size, encrypted)` calcula o tamanho esperado pela fórmula AES-256-GCM (`12 + plain_size + ⌈plain_size/1MB⌉ × 20`) sem decifrar o arquivo. Integridade profunda continua com o job `validate-integrity` |
+| **`main.py` — `_ensure_replicas` no dedup/register** | Chamadas a `_ensure_replicas` (I/O bloqueante entre volumes) movidas para `asyncio.to_thread` |
+| **`main.py` — `_build_fast_data`** | `_safe_disk_usage` chamado uma vez por volume em vez de duas (storage + disks) — elimina statvfs duplicado |
+| **`storage.py` — SSD cache move** | `_copy_with_sha256`: lê a origem uma única vez em chunks de 1 MB calculando hash e escrevendo o destino simultaneamente — 2 leituras em vez de 3 por move (~33% menos I/O) |
+| **`cloud/runner.py` — consumer** | `_process_file_sync` e `_register_version_file_sync` extraídas como funções síncronas; consumer chama ambas via `asyncio.to_thread` — downloads do producer não travam mais enquanto o consumer processa |
+| **`cloud/runner.py` — `httpx.AsyncClient`** | Um único cliente compartilhado por job via `async with httpx.AsyncClient(...)` em `run_cloud_backup_job` — elimina handshake TCP/TLS por arquivo baixado |
+| **`cloud/base.py`, `gdrive.py`, `onedrive.py`** | `download_file_to` aceita parâmetro opcional `client: httpx.AsyncClient \| None` — usa o cliente compartilhado do runner quando fornecido, cria um próprio se `None` (retrocompatível) |
+| **`nestvault.py` — pool HTTP** | `HTTPAdapter(pool_connections=4, pool_maxsize=32)` — pool dimensionado para `--workers` altos sem descartar conexões |
+| **`nestvault.py` — retry** | `_with_retries(fn, what)` com backoff exponencial (1 s, 2 s) aplicado em upload, register e check — tolera erros transientes (429, 5xx, falhas de rede) sem abortar o backup |
 
 ### v4.7.0
 

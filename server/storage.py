@@ -336,6 +336,18 @@ def _file_sha256_raw(path: Path) -> str:
     return h.hexdigest()
 
 
+def _copy_with_sha256(src: Path, dst: Path) -> str:
+    """Copia src → dst calculando o sha256 da origem na mesma leitura.
+    Equivale a copy2 + hash da origem, mas com uma leitura a menos."""
+    h = hashlib.sha256()
+    with open(src, "rb") as fin, open(dst, "wb") as fout:
+        while chunk := fin.read(1 << 20):
+            h.update(chunk)
+            fout.write(chunk)
+    shutil.copystat(str(src), str(dst))
+    return h.hexdigest()
+
+
 def _mark_versions_failed_for_sha256(sha256: str, db) -> None:
     from database import VersionFile, BackupVersion
     version_ids = [
@@ -476,8 +488,7 @@ def process_ssd_pending_moves(db) -> int:
             dest_volume = Path(move.dest_volume)
             try:
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
-                ssd_hash = _file_sha256_raw(ssd_path)
-                shutil.copy2(str(ssd_path), str(dest_path))
+                ssd_hash = _copy_with_sha256(ssd_path, dest_path)
                 hdd_hash = _file_sha256_raw(dest_path)
                 if ssd_hash != hdd_hash:
                     dest_path.unlink(missing_ok=True)
