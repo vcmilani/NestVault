@@ -203,7 +203,7 @@ def validate_latest_versions_integrity(db, log_fn=None) -> dict:
         )
         for av in affected_versions:
             av.status = "failed"
-            av.finished_at = datetime.utcnow()
+            av.finished_at = datetime.now()
             invalidated += 1
             if av.backup_label not in labels:
                 labels.append(av.backup_label)
