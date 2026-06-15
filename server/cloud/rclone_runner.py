@@ -50,7 +50,12 @@ async def _rclone_run(*args: str, timeout: int = 300) -> tuple[bytes, bytes, int
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError(f"rclone {args[0]} excedeu timeout de {timeout}s")
     return stdout, stderr, proc.returncode
 
 
