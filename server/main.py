@@ -1220,6 +1220,14 @@ def activity_page():
     return HTMLResponse(page.read_text(encoding="utf-8"))
 
 
+@app.get("/rclone-jobs", response_class=HTMLResponse, include_in_schema=False)
+def rclone_jobs_page():
+    page = STATIC_DIR / "rclone.html"
+    if not page.exists():
+        return HTMLResponse("<h1>Página não encontrada</h1>", status_code=404)
+    return HTMLResponse(page.read_text(encoding="utf-8"))
+
+
 def _build_fast_data(db: Session) -> tuple:
     """Queries leves para dados em tempo real: versões/jobs em execução, storage e discos.
     Chamado inline a cada request — retorna (running_version_infos, running_job_infos, storage_obj, disks_list)."""

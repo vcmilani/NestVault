@@ -365,9 +365,12 @@ export OLLAMA_MODEL="llama3"                       # modelo Ollama a usar
 
 # Horário de envio do digest em horário local (padrão: 18h)
 export DIGEST_HOUR=18
+
+# rclone backup (opcional — omitir usa ~/.config/rclone/rclone.conf)
+export RCLONE_CONFIG="/etc/rclone/rclone.conf"
 ```
 
-#### Configuração Cloud
+#### Configuração Cloud (OAuth nativo)
 
 | Variável | Obrigatório | Descrição |
 |---|:-:|---|
@@ -376,7 +379,15 @@ export DIGEST_HOUR=18
 | `ONEDRIVE_CLIENT_ID` | | Application (client) ID no Azure Portal |
 | `BASE_URL` | | URL pública do servidor para callback OAuth (padrão: `http://localhost:8000`) |
 
-Sem essas variáveis o servidor funciona normalmente — apenas o cloud backup ficará indisponível.
+Sem essas variáveis o servidor funciona normalmente — apenas o cloud backup OAuth ficará indisponível.
+
+#### Configuração rclone
+
+| Variável | Obrigatório | Padrão | Descrição |
+|---|:-:|---|---|
+| `RCLONE_CONFIG` | | `~/.config/rclone/rclone.conf` | Path do arquivo de configuração do rclone. Útil quando o servidor roda como systemd service com usuário diferente do que configurou o rclone |
+
+Sem `RCLONE_CONFIG` o NestVault usa o config padrão do usuário que executa o processo. O rclone precisa estar instalado e acessível no `PATH`.
 
 #### Configuração Daily Digest
 
