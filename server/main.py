@@ -27,6 +27,7 @@ import crypto
 import storage
 from auth import require_api_key, API_KEY, AUTH_ENABLED
 from cloud.router import router as cloud_router
+from cloud.rclone_router import router as rclone_router
 import scheduler as sched
 from cache_state import _activity_wake, invalidate_activity
 
@@ -263,6 +264,7 @@ async def lifespan(_: FastAPI):
     activity_refresh = asyncio.create_task(_activity_refresh_loop())
     sched.scheduler.start()
     sched.reload_jobs_from_db()
+    sched.reload_rclone_jobs_from_db()
     sched.schedule_daily_digest()
     sched.schedule_nightly_cleanup()
     log.info(f"Servidor iniciado — {len(STORAGE_VOLUMES)} volume(s): {[str(v) for v in STORAGE_VOLUMES]}")
@@ -278,6 +280,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="NestVault", version="6.1.0", lifespan=lifespan)
 app.include_router(cloud_router)
+app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
