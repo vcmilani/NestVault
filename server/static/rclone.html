@@ -64,6 +64,7 @@
   .small-btn.btn-run:hover{border-color:var(--green);color:var(--green)}
   .small-btn.btn-run.is-running{border-color:var(--amber-dim);color:var(--amber);pointer-events:none}
   .small-btn.btn-danger:hover{border-color:var(--red);color:var(--red)}
+  .small-btn.btn-cancel:hover{border-color:var(--amber);color:var(--amber)}
   .spin{display:inline-block;animation:spin .8s linear infinite}
 
   .empty{padding:32px;text-align:center;color:var(--text-mute);font-size:11px}
@@ -357,7 +358,7 @@
     const isRunning = j.last_run_status === 'running';
     const runBtn = isRunning
       ? `<button class="small-btn btn-run is-running" disabled><span class="spin">⟳</span> Running</button>
-         <button class="small-btn btn-danger" onclick="cancelJob(${j.id})" title="Forçar cancelamento">✕</button>`
+         <button class="small-btn btn-cancel" onclick="cancelJob(${j.id})" title="Forçar cancelamento">⏹</button>`
       : `<button class="small-btn btn-run" onclick="runJob(${j.id})">▶ Run</button>`;
     return `<tr>
       <td>${esc(j.display_name)}${enabledBadge}</td>
