@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +31,15 @@ log = logging.getLogger("backup-server")
 
 _PARALLEL_DOWNLOADS = 3
 _QUEUE_SIZE = 6
+
+
+def _fmt_size(n: int) -> str:
+    """Formata bytes em string legível (ex: 12.3 MB)."""
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(n) < 1024:
+            return f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} PB"
 
 
 @dataclass
@@ -77,14 +87,24 @@ async def browse_remote(remote_name: str, remote_path: str = "") -> list[dict]:
     return [{"name": item["Name"], "path": item["Path"]} for item in items]
 
 
-async def list_files_recursive(remote_name: str, remote_path: str) -> list[RcloneFileEntry]:
+async def list_files_recursive(
+    remote_name: str, remote_path: str, *, retries: int = 3
+) -> list[RcloneFileEntry]:
     """Lista todos os arquivos recursivamente em remote_name:remote_path."""
     src = f"{remote_name}:{remote_path}" if remote_path else f"{remote_name}:"
-    stdout, stderr, rc = await _rclone_run(
-        "lsjson", "--recursive", src, timeout=3600
-    )
-    if rc != 0:
-        raise RuntimeError(f"rclone lsjson falhou ({rc}): {stderr.decode().strip()}")
+    for attempt in range(1, retries + 1):
+        stdout, stderr, rc = await _rclone_run("lsjson", "--recursive", src, timeout=3600)
+        if rc == 0:
+            break
+        err_msg = stderr.decode().strip()
+        if attempt < retries:
+            log.warning(
+                f"[rclone] lsjson falhou (tentativa {attempt}/{retries}): {err_msg} "
+                f"— retentando em 10s"
+            )
+            await asyncio.sleep(10)
+        else:
+            raise RuntimeError(f"rclone lsjson falhou ({rc}): {err_msg}")
 
     result = []
     for item in json.loads(stdout or b"[]"):
@@ -164,14 +184,18 @@ async def _producer(
     async def _download_one(i: int, entry: RcloneFileEntry) -> None:
         if abort.is_set():
             return
-        if total >= 10 and (i == 1 or i % max(1, total // 4) == 0 or i == total):
-            log.info(f"[rclone-runner] [{i}/{total}] {entry.path}")
 
         prev = prev_files.get(entry.path)
         if prev and prev[0] == entry.mtime:
+            if total >= 10 and (i == 1 or i % max(1, total // 4) == 0 or i == total):
+                log.info(f"[rclone-runner] [{i}/{total}] sem alteração — {entry.path}")
             await queue.put(("skip", entry, prev[1]))
             return
 
+        log.info(
+            f"[rclone-runner] [{i}/{total}] baixando {entry.path} "
+            f"({_fmt_size(entry.size)})"
+        )
         volume = storage.pick_volume()
         tmp_path = volume / f"_rclone_tmp_{os.urandom(8).hex()}"
 
@@ -207,9 +231,10 @@ async def _consumer(
     enc_key: bytes | None,
     errors: list,
     abort: asyncio.Event,
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     processed = 0
     skipped   = 0
+    bytes_dl  = 0
 
     while True:
         item = await queue.get()
@@ -240,6 +265,7 @@ async def _consumer(
                 version_id, entry, tmp_path, sha256, size, volume, enc_key, db,
             )
             processed += 1
+            bytes_dl  += size
         except Exception as e:
             tmp_path.unlink(missing_ok=True)
             msg = f"{entry.path}: {e}"
@@ -247,7 +273,7 @@ async def _consumer(
             log.error(f"[rclone-runner] Erro ao processar {msg}")
             db.rollback()
 
-    return processed, skipped
+    return processed, skipped, bytes_dl
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +324,8 @@ async def run_rclone_backup_job(job_id: int) -> None:
         log.info(f"[rclone-runner] Listando {job.remote_name}:{job.remote_path}")
         all_files = await list_files_recursive(job.remote_name, job.remote_path)
         total = len(all_files)
-        log.info(f"[rclone-runner] {total} arquivo(s) encontrado(s)")
+        total_size = sum(e.size for e in all_files)
+        log.info(f"[rclone-runner] {total} arquivo(s) encontrado(s) ({_fmt_size(total_size)} total)")
 
         enc_key = storage.encryption_key if storage.ENCRYPTION_ENABLED else None
 
@@ -349,10 +376,12 @@ async def run_rclone_backup_job(job_id: int) -> None:
         abort = asyncio.Event()
         queue: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_SIZE)
 
-        _, (processed, skipped) = await asyncio.gather(
+        t_start = time.monotonic()
+        _, (processed, skipped, bytes_dl) = await asyncio.gather(
             _producer(queue, all_files, prev_files, job.remote_name, job.remote_path, errors, abort),
             _consumer(queue, version.id, db, enc_key, errors, abort),
         )
+        elapsed = time.monotonic() - t_start
 
         version.status      = "failed" if (processed == 0 and errors) else "done"
         version.finished_at = datetime.now()
@@ -361,7 +390,8 @@ async def run_rclone_backup_job(job_id: int) -> None:
         downloaded = processed - skipped
         summary = (
             f"{processed}/{total} arquivo(s) processado(s) "
-            f"({downloaded} baixado(s), {skipped} sem alteração)"
+            f"({downloaded} baixado(s) [{_fmt_size(bytes_dl)}], {skipped} sem alteração) "
+            f"em {elapsed:.0f}s"
         )
         if errors:
             summary += f", {len(errors)} erro(s): {'; '.join(errors[:3])}"

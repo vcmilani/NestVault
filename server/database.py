@@ -23,7 +23,7 @@ DB_PATH = os.getenv("DB_PATH", "./backup.db")
 
 engine = create_engine(
     f"sqlite:///{DB_PATH}",
-    connect_args={"check_same_thread": False, "timeout": 30},
+    connect_args={"check_same_thread": False, "timeout": 60},
     poolclass=NullPool,
 )
 

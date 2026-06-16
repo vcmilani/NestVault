@@ -2083,10 +2083,10 @@ def _store_new_content(
         db.rollback()
         dest.unlink(missing_ok=True)
         fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
-    else:
-        if not use_ssd:
-            _ensure_replicas(sha256, dest, db)
-    return fc
+        return fc, None
+    # _ensure_replicas é chamado APÓS db.commit() em upload_file para não manter
+    # o write lock do SQLite durante as cópias de arquivo para volumes réplica.
+    return fc, (dest if not use_ssd else None)
 
 
 @app.post("/upload", response_model=UploadResponse, dependencies=[Depends(require_api_key)])
@@ -2112,6 +2112,8 @@ async def upload_file(
         original_path = base64.b64decode(original_path.encode("ascii")).decode("utf-8")
     except Exception:
         pass
+
+    replica_source: Optional[Path] = None
 
     # Modo "so registrar" — conteudo ja existe no storage
     if content_sha256:
@@ -2161,7 +2163,7 @@ async def upload_file(
                     tmp_path.unlink(missing_ok=True)
 
             if not fc:
-                fc = await asyncio.to_thread(
+                fc, replica_source = await asyncio.to_thread(
                     _store_new_content, sha256, size, tmp_path, volume, ssd_dir,
                     backup_label, version_key, original_path, db,
                 )
@@ -2184,6 +2186,13 @@ async def upload_file(
 
     db.commit()
     db.refresh(vf)
+
+    # Replica copies are created AFTER the write lock is released so that
+    # concurrent uploads are not blocked during potentially slow file I/O.
+    if replica_source is not None:
+        await asyncio.to_thread(_ensure_replicas, sha256, replica_source, db)
+        db.commit()
+
     return UploadResponse(
         status="registered",
         file_id=vf.id,
