@@ -22,7 +22,7 @@ from sqlalchemy import func, select, insert, literal
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
-from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, CloudBackupJob, CloudCredential, MaintenanceJob, SsdCachePendingMove
+from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, CloudBackupJob, CloudCredential, MaintenanceJob, SsdCachePendingMove, RcloneBackupJob
 import crypto
 import storage
 from auth import require_api_key, API_KEY, AUTH_ENABLED
@@ -134,6 +134,16 @@ def _cleanup_stale_running_states():
             job.last_run_status  = "error"
             job.last_run_message = "Interrompido pelo reinício do servidor"
             log.warning(f"[startup] Job cloud {job.id} ({job.folder_name}) estava running — marcado como error")
+
+        stale_rclone_jobs = (
+            db.query(RcloneBackupJob)
+            .filter(RcloneBackupJob.last_run_status == "running")
+            .all()
+        )
+        for job in stale_rclone_jobs:
+            job.last_run_status  = "error"
+            job.last_run_message = "Interrompido pelo reinício do servidor"
+            log.warning(f"[startup] Job rclone {job.id} ({job.display_name}) estava running — marcado como error")
 
         stale_versions = (
             db.query(BackupVersion)
