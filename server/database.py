@@ -180,6 +180,22 @@ class SsdCachePendingMove(Base):
     retry_count = Column(Integer, nullable=False, default=0)
 
 
+class RcloneBackupJob(Base):
+    __tablename__ = "rclone_backup_jobs"
+
+    id               = Column(Integer, primary_key=True)
+    remote_name      = Column(String, nullable=False)
+    remote_path      = Column(String, nullable=False, default="")
+    display_name     = Column(String, nullable=False)
+    target_label     = Column(String, nullable=False)
+    cron_expr        = Column(String, nullable=True)
+    enabled          = Column(Boolean, nullable=False, default=True)
+    last_run_at      = Column(DateTime, nullable=True)
+    last_run_status  = Column(String, nullable=True)
+    last_run_message = Column(String, nullable=True)
+    created_at       = Column(DateTime, default=_utcnow)
+
+
 # -- Token encryption ---------------------------------------------------------
 import logging as _logging
 _log = _logging.getLogger("backup-server")

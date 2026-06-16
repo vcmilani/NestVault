@@ -1,5 +1,5 @@
 """
-NestVault  v6.1.0
+NestVault  v7.0.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -27,6 +27,7 @@ import crypto
 import storage
 from auth import require_api_key, API_KEY, AUTH_ENABLED
 from cloud.router import router as cloud_router
+from cloud.rclone_router import router as rclone_router
 import scheduler as sched
 from cache_state import _activity_wake, invalidate_activity
 
@@ -263,6 +264,7 @@ async def lifespan(_: FastAPI):
     activity_refresh = asyncio.create_task(_activity_refresh_loop())
     sched.scheduler.start()
     sched.reload_jobs_from_db()
+    sched.reload_rclone_jobs_from_db()
     sched.schedule_daily_digest()
     sched.schedule_nightly_cleanup()
     log.info(f"Servidor iniciado — {len(STORAGE_VOLUMES)} volume(s): {[str(v) for v in STORAGE_VOLUMES]}")
@@ -276,8 +278,9 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="6.1.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="7.0.0", lifespan=lifespan)
 app.include_router(cloud_router)
+app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -1212,6 +1215,14 @@ def maintenance_page():
 @app.get("/activity", response_class=HTMLResponse, include_in_schema=False)
 def activity_page():
     page = STATIC_DIR / "activity.html"
+    if not page.exists():
+        return HTMLResponse("<h1>Página não encontrada</h1>", status_code=404)
+    return HTMLResponse(page.read_text(encoding="utf-8"))
+
+
+@app.get("/rclone-jobs", response_class=HTMLResponse, include_in_schema=False)
+def rclone_jobs_page():
+    page = STATIC_DIR / "rclone.html"
     if not page.exists():
         return HTMLResponse("<h1>Página não encontrada</h1>", status_code=404)
     return HTMLResponse(page.read_text(encoding="utf-8"))
