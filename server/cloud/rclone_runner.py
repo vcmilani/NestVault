@@ -313,7 +313,7 @@ async def run_rclone_backup_job(job_id: int) -> None:
             f"[rclone-runner] Iniciando job {job_id}: "
             f"{job.remote_name}:{job.remote_path} → {job.target_label}"
         )
-        job.last_run_at      = datetime.now()
+        job.last_run_at      = datetime.now().astimezone().replace(tzinfo=None)
         job.last_run_status  = "running"
         job.last_run_message = None
         db.commit()
@@ -325,7 +325,7 @@ async def run_rclone_backup_job(job_id: int) -> None:
             db.commit()
 
         # Cria BackupVersion; marca running anteriores como incomplete
-        version_key = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        version_key = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S")
         db.query(BackupVersion).filter(
             BackupVersion.backup_label == job.target_label,
             BackupVersion.status == "running",
@@ -402,7 +402,7 @@ async def run_rclone_backup_job(job_id: int) -> None:
         elapsed = time.monotonic() - t_start
 
         version.status      = "failed" if (processed == 0 and errors) else "done"
-        version.finished_at = datetime.now()
+        version.finished_at = datetime.now().astimezone().replace(tzinfo=None)
         db.commit()
 
         downloaded = processed - skipped
@@ -428,7 +428,7 @@ async def run_rclone_backup_job(job_id: int) -> None:
         if version and version_db_id:
             try:
                 version.status      = "failed"
-                version.finished_at = datetime.now()
+                version.finished_at = datetime.now().astimezone().replace(tzinfo=None)
                 db.commit()
             except Exception:
                 pass
