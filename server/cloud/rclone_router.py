@@ -227,3 +227,21 @@ def job_status(job_id: int, db: Session = Depends(get_db)):
         "last_run_status":   job.last_run_status,
         "last_run_message":  job.last_run_message,
     }
+
+
+@router.post("/jobs/{job_id}/cancel", dependencies=[Depends(require_api_key)])
+def cancel_job(job_id: int, db: Session = Depends(get_db)):
+    """Reseta um job travado como 'running' (ex: após reinício do servidor).
+
+    Retorna 409 se o job estiver genuinamente em execução (lock ativo).
+    """
+    job = _require_job(job_id, db)
+    lock = _job_locks.get(job_id)
+    if lock and lock.locked():
+        raise HTTPException(409, "Job está em execução — aguarde a conclusão ou reinicie o servidor")
+    if job.last_run_status == "running":
+        job.last_run_status  = "error"
+        job.last_run_message = "Cancelado manualmente"
+        db.commit()
+        db.refresh(job)
+    return _job_out(job)

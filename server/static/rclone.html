@@ -356,7 +356,8 @@
     const enabledBadge = j.enabled ? '' : `<span class="badge badge-off" style="margin-left:4px">off</span>`;
     const isRunning = j.last_run_status === 'running';
     const runBtn = isRunning
-      ? `<button class="small-btn btn-run is-running" disabled><span class="spin">⟳</span> Running</button>`
+      ? `<button class="small-btn btn-run is-running" disabled><span class="spin">⟳</span> Running</button>
+         <button class="small-btn btn-danger" onclick="cancelJob(${j.id})" title="Forçar cancelamento">✕</button>`
       : `<button class="small-btn btn-run" onclick="runJob(${j.id})">▶ Run</button>`;
     return `<tr>
       <td>${esc(j.display_name)}${enabledBadge}</td>
@@ -390,6 +391,13 @@
     if (!r.ok) { showError('Erro ao iniciar job'); return; }
     await loadJobs();
     startPoll();
+  }
+
+  async function cancelJob(id) {
+    const r = await fetch(`/rclone/jobs/${id}/cancel`, {method:'POST', headers: H()});
+    if (r.status === 409) { showError('Job está em execução — não é possível cancelar agora'); return; }
+    if (!r.ok) { showError('Erro ao cancelar job'); return; }
+    await loadJobs();
   }
 
   async function deleteJob(id) {
