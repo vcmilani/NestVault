@@ -42,6 +42,11 @@ def _fmt_size(n: int) -> str:
     return f"{n:.1f} PB"
 
 
+# Pastas do OneDrive que exigem autenticação adicional — ignoradas em todos os jobs.
+# "Personal Vault" é o nome em inglês; "Cofre Pessoal" é o nome em PT-BR.
+_ONEDRIVE_PROTECTED_FOLDERS = {"Personal Vault", "Cofre Pessoal"}
+
+
 @dataclass
 class RcloneFileEntry:
     path: str    # relativo à raiz do remote_path configurado no job
@@ -84,7 +89,11 @@ async def browse_remote(remote_name: str, remote_path: str = "") -> list[dict]:
     if rc != 0:
         raise RuntimeError(f"rclone lsjson falhou ({rc}): {stderr.decode().strip()}")
     items = json.loads(stdout or b"[]")
-    return [{"name": item["Name"], "path": item["Path"]} for item in items]
+    return [
+        {"name": item["Name"], "path": item["Path"]}
+        for item in items
+        if item["Name"] not in _ONEDRIVE_PROTECTED_FOLDERS
+    ]
 
 
 async def list_files_recursive(
@@ -93,7 +102,9 @@ async def list_files_recursive(
     """Lista todos os arquivos recursivamente em remote_name:remote_path."""
     src = f"{remote_name}:{remote_path}" if remote_path else f"{remote_name}:"
     for attempt in range(1, retries + 1):
-        stdout, stderr, rc = await _rclone_run("lsjson", "--recursive", src, timeout=3600)
+        stdout, stderr, rc = await _rclone_run(
+            "lsjson", "--recursive", "--exclude", "Personal Vault/**", src, timeout=3600
+        )
         if rc == 0:
             break
         err_msg = stderr.decode().strip()
@@ -107,8 +118,13 @@ async def list_files_recursive(
             raise RuntimeError(f"rclone lsjson falhou ({rc}): {err_msg}")
 
     result = []
+    filtered_protected: set[str] = set()
     for item in json.loads(stdout or b"[]"):
         if item.get("IsDir"):
+            continue
+        top_folder = item["Path"].split("/")[0]
+        if top_folder in _ONEDRIVE_PROTECTED_FOLDERS:
+            filtered_protected.add(top_folder)
             continue
         try:
             mtime = datetime.fromisoformat(
@@ -121,6 +137,8 @@ async def list_files_recursive(
             size=item.get("Size", 0),
             mtime=mtime,
         ))
+    for name in filtered_protected:
+        log.info(f"[rclone] pasta protegida ignorada: {name!r}")
     return result
 
 
