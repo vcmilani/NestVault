@@ -231,6 +231,31 @@ def _migrate_table(src_conn, dst_conn, table: str, bool_cols: set[str]) -> tuple
     return migrated, skipped
 
 
+TABLES_WITH_INT_PK = [
+    "backup_ids", "backup_versions", "file_content_copies",
+    "version_files", "cloud_credentials", "cloud_backup_jobs",
+    "maintenance_jobs", "rclone_backup_jobs",
+]
+
+
+def _reset_sequences(engine) -> None:
+    print("\n[seq] Resetando sequences para MAX(id)...")
+    with engine.connect() as conn:
+        for table in TABLES_WITH_INT_PK:
+            try:
+                seq = conn.execute(
+                    text("SELECT pg_get_serial_sequence(:t, 'id')"), {"t": table}
+                ).scalar()
+                if seq:
+                    conn.execute(
+                        text(f"SELECT setval('{seq}', COALESCE((SELECT MAX(id) FROM {table}), 1))")
+                    )
+                    conn.commit()
+                    print(f"  {table:<30} OK")
+            except Exception as e:
+                print(f"  {table:<30} ERRO: {e}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Migra dados do NestVault de SQLite para PostgreSQL"
@@ -345,6 +370,9 @@ def main():
             print("   e rode a migração novamente com --sqlite backup_recovered.db")
         else:
             print("\n✅ Pronto! Configure DATABASE_URL e reinicie o NestVault.")
+
+        # Reset sequences so new INSERTs don't collide with migrated IDs
+        _reset_sequences(dst_engine)
 
 
 if __name__ == "__main__":
