@@ -2162,3 +2162,28 @@ python migrate_to_postgres.py \
 ```
 
 Após a migração bem-sucedida, configure `DATABASE_URL` e reinicie o servidor. Verifique o dashboard para confirmar que os backups aparecem normalmente.
+
+### Revertendo para SQLite
+
+Se quiser voltar ao SQLite (ou criar um backup portátil do banco PostgreSQL), use o script reverso:
+
+```bash
+cd server
+python migrate_to_sqlite.py \
+  --postgres "postgresql://nestvault:sua_senha_aqui@localhost/nestvault" \
+  --sqlite   /caminho/para/backup_restored.db
+```
+
+Após a migração:
+1. Remova `DATABASE_URL` do ambiente (ou do arquivo systemd)
+2. Configure `DB_PATH=/caminho/para/backup_restored.db` (ou mova o arquivo para o local padrão)
+3. Reinicie o servidor
+
+Para verificar sem migrar dados:
+
+```bash
+python migrate_to_sqlite.py \
+  --postgres "postgresql://nestvault:sua_senha_aqui@localhost/nestvault" \
+  --sqlite   /caminho/para/backup_restored.db \
+  --dry-run
+```
