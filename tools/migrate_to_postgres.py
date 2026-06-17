@@ -198,9 +198,15 @@ def _migrate_table(src_conn, dst_conn, table: str, bool_cols: set[str]) -> tuple
             try:
                 dst_conn.execute(insert_sql, batch)
                 dst_conn.commit()
-            except Exception:
+                migrated += len(rows)
+            except Exception as e:
+                if skipped == 0:
+                    print(f"\n  [{table}] ERRO no insert (offset={offset}): {e}")
                 skipped += len(batch)
-            migrated += len(rows)
+                try:
+                    dst_conn.rollback()
+                except Exception:
+                    pass
             offset += BATCH_SIZE
 
         status = f"  [{table}] {migrated}/{total_str}"
