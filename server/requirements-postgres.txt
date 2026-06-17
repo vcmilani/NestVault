@@ -1,0 +1,7 @@
+# Dependências extras para usar PostgreSQL como backend (opcional).
+# Instale APENAS se for usar DATABASE_URL:
+#   pip install -r requirements-postgres.txt
+#
+# No Raspberry Pi 32-bit (armhf), prefira instalar via apt para evitar compilação:
+#   sudo apt install -y python3-psycopg2
+psycopg2-binary>=2.9.0

@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v7.0.0`
+# 🗄️ NestVault  `v7.1.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -6,6 +6,8 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v7.1.0** — suporte opcional a PostgreSQL como backend de banco de dados: troque entre SQLite (padrão, ideal para Raspberry Pi e NAS) e PostgreSQL (recomendado para servidores com múltiplos uploads simultâneos) via variável `DATABASE_URL`, sem quebrar instalações existentes. Inclui script de migração SQLite → PostgreSQL com fault-tolerance para bancos corrompidos, e script reverso PostgreSQL → SQLite para quem quiser voltar ao modo leve.
+>
 > **v7.0.0** — integração rclone como opção paralela de cloud backup: elimina a necessidade de registrar app no Google Cloud Console ou Azure Portal — o usuário configura os remotes via `rclone config` e o NestVault os referencia pelo nome. Suporta todos os provedores compatíveis com rclone (Google Drive, OneDrive, S3, Backblaze B2, Dropbox e 70+ outros). O pipeline producer-consumer, deduplicação, criptografia e replicação funcionam de forma idêntica ao cloud backup OAuth nativo. Skip por `mtime` garante que syncs recorrentes só baixam arquivos novos ou alterados — sem re-download de tudo. Novos endpoints em `/rclone/*` + nova tabela `rclone_backup_jobs`.
 >
 > **v6.1.0** — otimizações de performance: trabalho bloqueante (criptografia, hashing, cópias) removido do event loop via `asyncio.to_thread` — o servidor permanece responsivo durante uploads grandes e jobs cloud simultâneos. Verificação de dedup passa a ser leve (tamanho esperado calculado por fórmula AES-GCM) em vez de decifrar o arquivo inteiro a cada hit; integridade profunda fica com o job `validate-integrity`. SSD cache move reduz de 3 para 2 leituras por arquivo (`_copy_with_sha256`). Cloud runner reutiliza um único `httpx.AsyncClient` por job — elimina handshake TCP/TLS por arquivo. Cliente Python ganha pool de conexões dimensionado para alta concorrência (`pool_maxsize=32`) e retry com backoff exponencial em erros transientes.
@@ -1312,6 +1314,17 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 
 ## ⚡ Otimizações
 
+### v7.1.0
+
+| Componente | Mudança |
+|---|---|
+| **`server/database.py` — dual backend** | Detecção automática de `DATABASE_URL`: PostgreSQL com `pool_pre_ping`; SQLite com WAL + NullPool (comportamento anterior preservado integralmente) |
+| **`server/database.py` — `BigInteger`** | `FileContent.size` alterado de `Integer` para `BigInteger` — suporte a arquivos > 2 GB no PostgreSQL (SQLite ignora a distinção) |
+| **`server/requirements-postgres.txt`** | Novo arquivo opcional com `psycopg2-binary`; não incluído no `requirements.txt` principal para não quebrar Raspberry Pi 32-bit sem wheel pré-compilado |
+| **`tools/migrate_to_postgres.py`** | Script SQLite → PostgreSQL: coerção de booleanos (0/1 → bool), correção automática de `INTEGER → BIGINT` em tabelas já criadas, fault-tolerance com divisão binária de batches para contornar corrupção física no SQLite |
+| **`tools/migrate_to_sqlite.py`** | Script reverso PostgreSQL → SQLite: permite voltar ao modo leve ou criar backup portátil do banco |
+| **`README.md`** | Nova seção `## 🐘 PostgreSQL (opcional)` com instalação, configuração, migração e reversão |
+
 ### v7.0.0
 
 | Componente | Mudança |
@@ -2048,3 +2061,140 @@ Com o servidor rodando:
 - **Dashboard**: `http://<ip-da-pi>:8000/`
 - **Swagger UI**: `http://<ip-da-pi>:8000/docs`
 - **ReDoc**: `http://<ip-da-pi>:8000/redoc`
+
+---
+
+## 🐘 PostgreSQL (opcional) — v7.1
+
+Por padrão o NestVault usa **SQLite**, que é ideal para uso doméstico e NAS. Se você tiver muitos uploads simultâneos ou quiser eliminar completamente qualquer possibilidade de lock, é possível usar o **PostgreSQL** como backend alternativo.
+
+### Quando usar cada um
+
+| Cenário | Recomendação | Motivo |
+|---|---|---|
+| Raspberry Pi (qualquer modelo) | **SQLite** | PostgreSQL consome 50–150 MB RAM extra e desgasta mais o SD com writes contínuos |
+| NAS doméstico | **SQLite** | NestVault é single-process; WAL já elimina locks sem servidor externo |
+| Servidor x86 com SSD, uploads intensos | **PostgreSQL** | MVCC real compensa; I/O abundante, RAM sobrando |
+| Múltiplas instâncias compartilhando o banco | **PostgreSQL** | Único cenário onde múltiplos writers simultâneos existem de verdade |
+
+### Instalando o driver Python (psycopg2)
+
+O driver PostgreSQL **não é instalado por padrão** (para não impactar quem usa SQLite, especialmente no Raspberry Pi 32-bit onde a compilação do driver pode falhar).
+
+Instale apenas quando for usar PostgreSQL:
+
+```bash
+# Qualquer Linux com pip (Raspberry Pi 64-bit, x86, etc.)
+pip install -r requirements-postgres.txt
+
+# Raspberry Pi 32-bit (armhf) — prefira o pacote do sistema para evitar compilação
+sudo apt install -y python3-psycopg2
+```
+
+### Instalando o PostgreSQL no Linux
+
+```bash
+sudo apt update
+sudo apt install -y postgresql postgresql-contrib
+sudo systemctl enable --now postgresql
+```
+
+Verifique que o serviço está rodando:
+
+```bash
+sudo systemctl status postgresql
+```
+
+### Criando usuário e banco de dados
+
+```bash
+sudo -u postgres psql <<'EOF'
+CREATE USER nestvault WITH PASSWORD 'sua_senha_aqui';
+CREATE DATABASE nestvault OWNER nestvault;
+\q
+EOF
+```
+
+Teste a conexão:
+
+```bash
+psql -U nestvault -h localhost -d nestvault -c "SELECT version();"
+```
+
+### Configurando o NestVault para usar PostgreSQL
+
+Em vez de `DB_PATH`, defina `DATABASE_URL`:
+
+```bash
+export DATABASE_URL="postgresql://nestvault:sua_senha_aqui@localhost/nestvault"
+```
+
+> **Nota:** `DB_PATH` é ignorado quando `DATABASE_URL` está definido.
+
+Se estiver usando systemd, adicione a variável ao arquivo de serviço:
+
+```ini
+[Service]
+Environment="DATABASE_URL=postgresql://nestvault:sua_senha_aqui@localhost/nestvault"
+# Remova ou comente a linha DB_PATH se existir
+```
+
+Reinicie o serviço após a alteração:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart nestvault
+```
+
+O NestVault cria as tabelas automaticamente na primeira inicialização.
+
+### Migrando dados do SQLite para PostgreSQL
+
+Se já possui dados no SQLite e quer migrar para PostgreSQL, use o script incluído:
+
+```bash
+python tools/migrate_to_postgres.py \
+  --sqlite /caminho/para/backup.db \
+  --postgres "postgresql://nestvault:sua_senha_aqui@localhost/nestvault"
+```
+
+O script:
+- Cria as tabelas no PostgreSQL (caso ainda não existam)
+- Copia os dados em lotes de 500 registros
+- É **idempotente**: registros já existentes no destino são ignorados, então pode ser re-executado com segurança
+- Exibe progresso por tabela e resumo final com contagem de registros
+
+Para verificar a conexão sem migrar dados:
+
+```bash
+python tools/migrate_to_postgres.py \
+  --sqlite /caminho/para/backup.db \
+  --postgres "postgresql://nestvault:sua_senha_aqui@localhost/nestvault" \
+  --dry-run
+```
+
+Após a migração bem-sucedida, configure `DATABASE_URL` e reinicie o servidor. Verifique o dashboard para confirmar que os backups aparecem normalmente.
+
+### Revertendo para SQLite
+
+Se quiser voltar ao SQLite (ou criar um backup portátil do banco PostgreSQL), use o script reverso:
+
+```bash
+python tools/migrate_to_sqlite.py \
+  --postgres "postgresql://nestvault:sua_senha_aqui@localhost/nestvault" \
+  --sqlite   /caminho/para/backup_restored.db
+```
+
+Após a migração:
+1. Remova `DATABASE_URL` do ambiente (ou do arquivo systemd)
+2. Configure `DB_PATH=/caminho/para/backup_restored.db` (ou mova o arquivo para o local padrão)
+3. Reinicie o servidor
+
+Para verificar sem migrar dados:
+
+```bash
+python tools/migrate_to_sqlite.py \
+  --postgres "postgresql://nestvault:sua_senha_aqui@localhost/nestvault" \
+  --sqlite   /caminho/para/backup_restored.db \
+  --dry-run
+```
