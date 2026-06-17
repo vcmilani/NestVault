@@ -23,7 +23,7 @@ DB_PATH = os.getenv("DB_PATH", "./backup.db")
 
 engine = create_engine(
     f"sqlite:///{DB_PATH}",
-    connect_args={"check_same_thread": False, "timeout": 30},
+    connect_args={"check_same_thread": False, "timeout": 60},
     poolclass=NullPool,
 )
 
@@ -178,6 +178,22 @@ class SsdCachePendingMove(Base):
     dest_path   = Column(String, nullable=False)
     created_at  = Column(DateTime, default=_utcnow)
     retry_count = Column(Integer, nullable=False, default=0)
+
+
+class RcloneBackupJob(Base):
+    __tablename__ = "rclone_backup_jobs"
+
+    id               = Column(Integer, primary_key=True)
+    remote_name      = Column(String, nullable=False)
+    remote_path      = Column(String, nullable=False, default="")
+    display_name     = Column(String, nullable=False)
+    target_label     = Column(String, nullable=False)
+    cron_expr        = Column(String, nullable=True)
+    enabled          = Column(Boolean, nullable=False, default=True)
+    last_run_at      = Column(DateTime, nullable=True)
+    last_run_status  = Column(String, nullable=True)
+    last_run_message = Column(String, nullable=True)
+    created_at       = Column(DateTime, default=_utcnow)
 
 
 # -- Token encryption ---------------------------------------------------------

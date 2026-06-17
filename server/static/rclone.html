@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#e8a940">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="NestVault">
+<link rel="icon" type="image/png" href="/static/icon_web.png">
+<link rel="manifest" href="/static/manifest.json">
+<title>rclone — NestVault</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/theme.css">
+<link rel="stylesheet" href="/static/nav.css">
+<script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+  body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;min-height:100vh}
+  body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.04) 2px,rgba(0,0,0,.04) 4px);pointer-events:none;z-index:999}
+
+  header{border-bottom:1px solid var(--border);padding:0 32px;display:flex;align-items:center;justify-content:space-between;height:56px;position:sticky;top:0;background:var(--bg);z-index:10}
+  .logo{display:flex;align-items:center;gap:12px}
+  .logo-icon{width:28px;height:28px;border:1.5px solid var(--amber);display:grid;place-items:center;color:var(--amber);font-size:14px}
+  .logo-text{font-size:12px;font-weight:500;letter-spacing:.12em;text-transform:uppercase}
+  .logo-sub{font-size:10px;color:var(--text-dim);letter-spacing:.08em}
+  .header-right{display:flex;align-items:center;gap:16px}
+  .hbtn{display:inline-flex;align-items:center;justify-content:center;background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 12px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s;text-decoration:none;user-select:none}
+  .hbtn:hover,.hbtn:active{border-color:var(--amber);color:var(--amber)}
+  .hbtn.active{border-color:var(--amber);color:var(--amber)}
+  .hbtn:disabled{opacity:.4;cursor:not-allowed;pointer-events:none}
+
+  main{padding:28px 32px;max-width:1300px}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  .error-bar{background:var(--red-dim);border:1px solid var(--red);padding:10px 16px;margin-bottom:20px;color:var(--red);font-size:11px;display:none}
+  .error-bar.visible{display:block}
+
+  .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+  .section-title{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-dim);display:flex;align-items:center;gap:8px}
+  .section-title::before{content:'';display:block;width:3px;height:12px;background:var(--amber)}
+
+  .table-wrap{border:1px solid var(--border);margin-bottom:24px;animation:fadeUp .4s .1s ease both;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  table{width:100%;border-collapse:collapse}
+  thead th{background:var(--bg3);padding:9px 14px;text-align:left;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);border-bottom:1px solid var(--border);white-space:nowrap}
+  thead th:first-child{padding-left:18px}
+  tbody tr{border-bottom:1px solid var(--border);transition:background .1s}
+  tbody tr:last-child{border-bottom:none}
+  tbody tr:hover{background:var(--bg3)}
+  td{padding:10px 14px;vertical-align:middle;font-size:12px}
+  td:first-child{padding-left:18px}
+
+  .badge{display:inline-block;padding:2px 7px;font-size:10px;letter-spacing:.06em;text-transform:uppercase}
+  .badge-success{background:var(--green-dim);color:var(--green)}
+  .badge-error{background:var(--red-dim);color:var(--red)}
+  .badge-running{background:var(--amber-dim);color:var(--amber)}
+  .badge-running::before{content:'⟳ ';display:inline-block;animation:spin .9s linear infinite}
+  .badge-off{background:var(--bg3);border:1px solid var(--border2);color:var(--text-mute)}
+
+  .small-btn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:2px 8px;font-family:var(--mono);font-size:10px;cursor:pointer;letter-spacing:.04em;transition:all .15s;display:inline-flex;align-items:center;gap:3px;white-space:nowrap;user-select:none;min-height:28px}
+  .small-btn:hover{border-color:var(--amber);color:var(--amber)}
+  .small-btn:disabled{opacity:.35;cursor:not-allowed;pointer-events:none}
+  .small-btn.btn-run:hover{border-color:var(--green);color:var(--green)}
+  .small-btn.btn-run.is-running{border-color:var(--amber-dim);color:var(--amber);pointer-events:none}
+  .small-btn.btn-danger:hover{border-color:var(--red);color:var(--red)}
+  .small-btn.btn-cancel:hover{border-color:var(--amber);color:var(--amber)}
+  .spin{display:inline-block;animation:spin .8s linear infinite}
+
+  .empty{padding:32px;text-align:center;color:var(--text-mute);font-size:11px}
+  .loading{padding:40px;text-align:center;color:var(--text-mute);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+  .loading::after{content:'...';animation:dots 1.2s steps(4,end) infinite}
+  @keyframes dots{0%,20%{content:'.'}40%{content:'..'}60%,100%{content:'...'}}
+
+  .remote-chips{display:flex;flex-wrap:wrap;gap:8px;padding:16px 18px}
+  .remote-chip{background:var(--bg3);border:1px solid var(--border2);padding:4px 12px;font-size:11px;color:var(--text-dim)}
+
+  code{background:var(--bg3);padding:1px 5px;font-size:11px}
+  .dim{color:var(--text-dim)}
+  .mute{color:var(--text-mute)}
+
+  /* Modal */
+  .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:center;justify-content:center;padding:16px}
+  .modal-overlay.open{display:flex}
+  .modal-box{background:var(--bg2);border:1px solid var(--border);padding:28px;width:min(520px,100%);max-height:calc(100vh - 32px);overflow-y:auto;box-sizing:border-box;animation:fadeUp .2s ease}
+  .modal-title{font-size:13px;font-weight:600;margin-bottom:20px}
+  .field-label{font-size:11px;color:var(--text-dim);display:block;margin-bottom:4px;margin-top:12px}
+  .field-label:first-of-type{margin-top:0}
+  .field-input{width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:var(--mono);padding:7px 10px;font-size:12px;box-sizing:border-box;outline:none;transition:border-color .15s}
+  .field-input:focus{border-color:var(--amber)}
+  .field-input option{background:var(--bg2)}
+  .field-row{display:flex;gap:8px;align-items:flex-end}
+  .field-row .field-input{flex:1}
+  .modal-error{color:var(--red);font-size:11px;margin-top:10px;display:none}
+  .modal-error.visible{display:block}
+  .modal-footer{display:flex;gap:8px;justify-content:flex-end;margin-top:20px}
+  .toggle-wrap{display:flex;align-items:center;gap:8px;margin-top:14px}
+  .toggle-label{font-size:11px;color:var(--text-dim)}
+  input[type=checkbox]{accent-color:var(--amber);width:15px;height:15px;cursor:pointer}
+
+  .msg-row{font-size:10px;color:var(--text-mute);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  /* Login */
+  .login-overlay{position:fixed;inset:0;background:var(--overlay-bg);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
+  .login-box{border:1px solid var(--border2);border-top:2px solid var(--amber);background:var(--bg2);padding:40px 48px;width:min(400px,calc(100vw - 32px));animation:fadeUp .3s ease}
+  .login-title{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--amber);margin-bottom:6px}
+  .login-sub{font-size:11px;color:var(--text-dim);margin-bottom:28px}
+  .login-label{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);display:block;margin-bottom:8px}
+  .login-input{width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:13px;padding:10px 14px;outline:none;transition:border-color .15s}
+  .login-input:focus{border-color:var(--amber)}
+  .login-btn{margin-top:16px;width:100%;background:var(--amber);border:none;color:var(--bg);font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;padding:11px;cursor:pointer;transition:opacity .15s;min-height:44px}
+  .login-btn:hover{opacity:.85}
+  .login-error{margin-top:12px;font-size:11px;color:var(--red);min-height:16px}
+
+  @media(max-width:768px){
+    main{padding:16px}
+    header{padding:0 16px}
+    .header-right{gap:10px}
+    .hbtn{min-height:40px;padding:8px 10px}
+    .small-btn{min-height:36px;padding:4px 8px}
+  }
+  @media(max-width:480px){
+    main{padding:12px 10px}
+    .login-box{padding:28px 20px}
+    .login-btn{min-height:48px}
+    .hbtn{min-height:44px}
+  }
+  ::-webkit-scrollbar{width:6px;height:6px}
+  ::-webkit-scrollbar-track{background:var(--bg)}
+  ::-webkit-scrollbar-thumb{background:var(--border2)}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">◈</div>
+    <div><div class="logo-text">NestVault</div><div class="logo-sub">rclone</div></div>
+  </div>
+  <div class="header-right">
+    <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
+    <button class="hbtn" onclick="loadAll()">↻ Refresh</button>
+    <a class="hbtn" href="/" style="text-decoration:none">← Dashboard</a>
+    <a class="hbtn" href="/activity" style="text-decoration:none">◎ Atividade</a>
+    <a class="hbtn active" href="/rclone-jobs" style="text-decoration:none">⟳ rclone</a>
+    <button class="hbtn always-visible" id="logoutBtn">⌀ API Key</button>
+    <button class="nav-hamburger"></button>
+  </div>
+</header>
+
+<nav class="mobile-nav">
+  <button onclick="loadAll();closeNav()">↻ Refresh</button>
+  <a href="/">← Dashboard</a>
+  <a href="/activity">◎ Atividade</a>
+  <a class="active" href="/rclone-jobs">⟳ rclone</a>
+</nav>
+<div class="mobile-nav-backdrop"></div>
+
+<main>
+  <div class="error-bar" id="errorBar"></div>
+
+  <!-- Remotes -->
+  <div class="section-head">
+    <div class="section-title">Remotes configurados</div>
+    <button class="hbtn" onclick="loadRemotes()">↻ Verificar</button>
+  </div>
+  <div class="table-wrap">
+    <div id="remotesWrap"><div class="loading">Carregando</div></div>
+  </div>
+
+  <!-- Jobs -->
+  <div class="section-head" style="margin-top:4px">
+    <div class="section-title">Jobs rclone</div>
+    <button class="hbtn" style="background:var(--amber);color:var(--bg)" onclick="openModal()">+ Novo Job</button>
+  </div>
+  <div class="table-wrap">
+    <div id="jobsWrap"><div class="loading">Carregando</div></div>
+  </div>
+</main>
+
+<!-- Modal criar/editar job -->
+<div class="modal-overlay" id="jobModal">
+  <div class="modal-box">
+    <div class="modal-title" id="modalTitle">Novo job rclone</div>
+
+    <label class="field-label" for="mRemote">Remote (configurado no rclone)</label>
+    <select class="field-input" id="mRemote" onchange="onRemoteChange()">
+      <option value="">— carregando remotes... —</option>
+    </select>
+
+    <label class="field-label" for="mPath">Pasta no remote (vazio = raiz)</label>
+    <div class="field-row">
+      <input class="field-input" id="mPath" placeholder="Ex: Documents/Photos" autocomplete="off">
+      <button class="small-btn" id="mBrowseBtn" onclick="browsePath()" style="min-height:36px;padding:4px 10px" disabled>Explorar</button>
+    </div>
+    <div id="browseWrap" style="display:none;margin-top:6px;border:1px solid var(--border);max-height:180px;overflow-y:auto;background:var(--bg3)"></div>
+
+    <label class="field-label" for="mName">Nome de exibição</label>
+    <input class="field-input" id="mName" placeholder="Ex: Fotos Google Drive" autocomplete="off">
+
+    <label class="field-label" for="mLabel">Label de destino no NestVault</label>
+    <input class="field-input" id="mLabel" placeholder="Ex: gdrive-fotos" autocomplete="off">
+
+    <label class="field-label" for="mCron">Agendamento cron (opcional)</label>
+    <input class="field-input" id="mCron" placeholder="Ex: 0 3 * * * (3h diário)" autocomplete="off">
+
+    <div class="toggle-wrap">
+      <input type="checkbox" id="mEnabled" checked>
+      <label class="toggle-label" for="mEnabled">Habilitado</label>
+    </div>
+
+    <div class="modal-error" id="modalError"></div>
+
+    <div class="modal-footer">
+      <button class="hbtn" onclick="closeModal()">Cancelar</button>
+      <button class="hbtn" id="modalSaveBtn" style="background:var(--amber);color:var(--bg)" onclick="saveJob()">Criar Job</button>
+    </div>
+  </div>
+</div>
+
+<!-- Login overlay -->
+<div class="login-overlay" id="loginOverlay" style="display:none">
+  <div class="login-box">
+    <div class="login-title">◈ NestVault</div>
+    <div class="login-sub">Informe a API Key para continuar</div>
+    <form id="loginForm">
+      <label class="login-label" for="apiKeyInput">API Key</label>
+      <input class="login-input" id="apiKeyInput" type="password" placeholder="sua-api-key-aqui" autocomplete="off">
+      <button class="login-btn" type="submit">Entrar →</button>
+      <div class="login-error" id="loginError"></div>
+    </form>
+  </div>
+</div>
+
+<script>
+  let API_KEY = localStorage.getItem('backupApiKey') || '';
+  let _editingJobId = null;
+  let _remotes = [];
+  let _pollTimer = null;
+  let _browsePath = '';
+
+  const H = () => ({'X-API-Key': API_KEY});
+  const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+  // -- Theme ------------------------------------------------------------------
+  function toggleTheme() {
+    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+    if (isLight) {
+      document.documentElement.removeAttribute('data-theme');
+      localStorage.removeItem('nv-theme');
+      document.getElementById('themeBtn').textContent = '☀ Claro';
+    } else {
+      document.documentElement.setAttribute('data-theme','light');
+      localStorage.setItem('nv-theme','light');
+      document.getElementById('themeBtn').textContent = '☾ Escuro';
+    }
+  }
+  (function(){
+    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+    document.getElementById('themeBtn').textContent = isLight ? '☾ Escuro' : '☀ Claro';
+  })();
+
+  // -- Error / Login ----------------------------------------------------------
+  function showError(msg) {
+    const b = document.getElementById('errorBar');
+    b.textContent = '⚠ ' + msg; b.classList.add('visible');
+  }
+  function clearError() { document.getElementById('errorBar').classList.remove('visible'); }
+
+  function showLogin(msg='') {
+    document.getElementById('loginOverlay').style.display = 'flex';
+    document.getElementById('loginError').textContent = msg;
+  }
+  function hideLogin() { document.getElementById('loginOverlay').style.display = 'none'; }
+
+  document.getElementById('loginForm').addEventListener('submit', e => {
+    e.preventDefault();
+    const key = document.getElementById('apiKeyInput').value.trim();
+    if (!key) return;
+    API_KEY = key; localStorage.setItem('backupApiKey', key);
+    hideLogin(); loadAll();
+  });
+  document.getElementById('logoutBtn').addEventListener('click', () => {
+    localStorage.removeItem('backupApiKey'); API_KEY = ''; showLogin();
+  });
+
+  // -- Load ------------------------------------------------------------------
+  async function loadAll() {
+    clearError();
+    await Promise.all([loadRemotes(), loadJobs()]);
+  }
+
+  async function loadRemotes() {
+    const el = document.getElementById('remotesWrap');
+    el.innerHTML = '<div class="loading">Carregando</div>';
+    try {
+      const r = await fetch('/rclone/remotes', {headers: H()});
+      if (r.status === 401) { showLogin('API Key inválida.'); return; }
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const {remotes} = await r.json();
+      _remotes = remotes;
+      if (!remotes.length) {
+        el.innerHTML = '<div class="empty">Nenhum remote configurado — execute <code>rclone config</code> no servidor</div>';
+        return;
+      }
+      el.innerHTML = `<div class="remote-chips">${remotes.map(r =>
+        `<span class="remote-chip">⬡ ${esc(r)}</span>`
+      ).join('')}</div>`;
+      updateRemoteSelect();
+    } catch(e) {
+      el.innerHTML = `<div class="empty">Erro ao consultar rclone: ${esc(e.message)}</div>`;
+      showError('rclone não encontrado ou sem config — verifique instalação no servidor');
+    }
+  }
+
+  async function loadJobs() {
+    const el = document.getElementById('jobsWrap');
+    if (el.innerHTML === '') el.innerHTML = '<div class="loading">Carregando</div>';
+    try {
+      const r = await fetch('/rclone/jobs', {headers: H()});
+      if (r.status === 401) { showLogin('API Key inválida.'); return; }
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const jobs = await r.json();
+      renderJobs(jobs);
+      const hasRunning = jobs.some(j => j.last_run_status === 'running');
+      if (hasRunning) startPoll(); else stopPoll();
+    } catch(e) {
+      el.innerHTML = `<div class="empty">Erro: ${esc(e.message)}</div>`;
+    }
+  }
+
+  function renderJobs(jobs) {
+    const el = document.getElementById('jobsWrap');
+    if (!jobs.length) {
+      el.innerHTML = '<div class="empty">Nenhum job configurado — clique em "+ Novo Job" para criar</div>';
+      return;
+    }
+    el.innerHTML = `<table>
+      <thead><tr>
+        <th>Nome</th>
+        <th>Remote</th>
+        <th>Pasta</th>
+        <th>Label destino</th>
+        <th>Cron</th>
+        <th>Status</th>
+        <th>Último run</th>
+        <th></th>
+      </tr></thead>
+      <tbody>${jobs.map(j => jobRow(j)).join('')}</tbody>
+    </table>`;
+  }
+
+  function jobRow(j) {
+    const statusBadge = j.last_run_status
+      ? `<span class="badge badge-${j.last_run_status}" title="${esc(j.last_run_message||'')}">${j.last_run_status}</span>`
+      : `<span class="mute">—</span>`;
+    const enabledBadge = j.enabled ? '' : `<span class="badge badge-off" style="margin-left:4px">off</span>`;
+    const isRunning = j.last_run_status === 'running';
+    const runBtn = isRunning
+      ? `<button class="small-btn btn-run is-running" disabled><span class="spin">⟳</span> Running</button>
+         <button class="small-btn btn-cancel" onclick="cancelJob(${j.id})" title="Forçar cancelamento">⏹</button>`
+      : `<button class="small-btn btn-run" onclick="runJob(${j.id})">▶ Run</button>`;
+    return `<tr>
+      <td>${esc(j.display_name)}${enabledBadge}</td>
+      <td class="dim">${esc(j.remote_name)}:</td>
+      <td class="dim">${j.remote_path ? esc(j.remote_path) : '<span class="mute">(raiz)</span>'}</td>
+      <td>${esc(j.target_label)}</td>
+      <td><code>${esc(j.cron_expr || 'manual')}</code></td>
+      <td>${statusBadge}</td>
+      <td class="dim">${j.last_run_at ? j.last_run_at.slice(0,19).replace('T',' ') : '—'}</td>
+      <td style="white-space:nowrap;display:flex;gap:4px;padding:8px 14px">
+        ${runBtn}
+        <button class="small-btn" onclick="editJob(${j.id})" title="Editar">✎</button>
+        <button class="small-btn btn-danger" onclick="deleteJob(${j.id})" title="Excluir">✕</button>
+      </td>
+    </tr>`;
+  }
+
+  // -- Polling when running --------------------------------------------------
+  function startPoll() {
+    if (_pollTimer) return;
+    _pollTimer = setInterval(() => loadJobs(), 4000);
+  }
+  function stopPoll() {
+    if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+  }
+
+  // -- Job actions -----------------------------------------------------------
+  async function runJob(id) {
+    const r = await fetch(`/rclone/jobs/${id}/run`, {method:'POST', headers: H()});
+    if (r.status === 409) { showError('Job já está em execução'); return; }
+    if (!r.ok) { showError('Erro ao iniciar job'); return; }
+    await loadJobs();
+    startPoll();
+  }
+
+  async function cancelJob(id) {
+    const r = await fetch(`/rclone/jobs/${id}/cancel`, {method:'POST', headers: H()});
+    if (r.status === 409) { showError('Job está em execução — não é possível cancelar agora'); return; }
+    if (!r.ok) { showError('Erro ao cancelar job'); return; }
+    await loadJobs();
+  }
+
+  async function deleteJob(id) {
+    if (!confirm('Excluir este job rclone?\nOs dados já salvos no NestVault não serão removidos.')) return;
+    const r = await fetch(`/rclone/jobs/${id}`, {method:'DELETE', headers: H()});
+    if (!r.ok) { showError('Erro ao excluir job'); return; }
+    await loadJobs();
+  }
+
+  // -- Modal -----------------------------------------------------------------
+  let _jobsCache = {};
+
+  function openModal(job = null) {
+    _editingJobId = job ? job.id : null;
+    document.getElementById('modalTitle').textContent = job ? 'Editar job rclone' : 'Novo job rclone';
+    document.getElementById('modalSaveBtn').textContent = job ? 'Salvar' : 'Criar Job';
+    document.getElementById('modalError').classList.remove('visible');
+    document.getElementById('browseWrap').style.display = 'none';
+    _browsePath = '';
+
+    updateRemoteSelect(job ? job.remote_name : '');
+    document.getElementById('mPath').value    = job ? job.remote_path : '';
+    document.getElementById('mName').value    = job ? job.display_name : '';
+    document.getElementById('mLabel').value   = job ? job.target_label : '';
+    document.getElementById('mCron').value    = job ? (job.cron_expr || '') : '';
+    document.getElementById('mEnabled').checked = job ? job.enabled : true;
+
+    document.getElementById('jobModal').classList.add('open');
+  }
+
+  function closeModal() {
+    document.getElementById('jobModal').classList.remove('open');
+    document.getElementById('browseWrap').style.display = 'none';
+    _editingJobId = null;
+  }
+
+  function updateRemoteSelect(selected = '') {
+    const sel = document.getElementById('mRemote');
+    if (!_remotes.length) {
+      sel.innerHTML = '<option value="">— nenhum remote disponível —</option>';
+      document.getElementById('mBrowseBtn').disabled = true;
+      return;
+    }
+    sel.innerHTML = '<option value="">— selecione o remote —</option>' +
+      _remotes.map(r => `<option value="${esc(r)}" ${r === selected ? 'selected' : ''}>${esc(r)}</option>`).join('');
+    document.getElementById('mBrowseBtn').disabled = !sel.value;
+  }
+
+  function onRemoteChange() {
+    const sel = document.getElementById('mRemote');
+    document.getElementById('mBrowseBtn').disabled = !sel.value;
+    document.getElementById('browseWrap').style.display = 'none';
+    _browsePath = '';
+  }
+
+  async function browsePath() {
+    const remote = document.getElementById('mRemote').value;
+    if (!remote) return;
+    const wrap = document.getElementById('browseWrap');
+    wrap.style.display = 'block';
+    wrap.innerHTML = '<div style="padding:10px 14px;font-size:11px;color:var(--text-mute)">Carregando...</div>';
+
+    const path = document.getElementById('mPath').value.trim().replace(/\/+$/,'');
+    try {
+      const url = `/rclone/remotes/${encodeURIComponent(remote.replace(':',''))}/browse?path=${encodeURIComponent(path)}`;
+      const r = await fetch(url, {headers: H()});
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const {folders} = await r.json();
+      if (!folders.length) {
+        wrap.innerHTML = '<div style="padding:10px 14px;font-size:11px;color:var(--text-mute)">Nenhuma subpasta</div>';
+        return;
+      }
+      const prefix = path ? path + '/' : '';
+      wrap.innerHTML = folders.map(f => {
+        const fullPath = prefix + f;
+        return `<div style="padding:8px 14px;font-size:11px;cursor:pointer;border-bottom:1px solid var(--border)"
+                     onmouseover="this.style.background='var(--bg2)'" onmouseout="this.style.background=''"
+                     onclick="selectFolder('${esc(fullPath)}')">
+                  📁 ${esc(f)}
+                </div>`;
+      }).join('');
+    } catch(e) {
+      wrap.innerHTML = `<div style="padding:10px 14px;font-size:11px;color:var(--red)">Erro: ${esc(e.message)}</div>`;
+    }
+  }
+
+  function selectFolder(path) {
+    document.getElementById('mPath').value = path;
+    document.getElementById('browseWrap').style.display = 'none';
+  }
+
+  async function editJob(id) {
+    const r = await fetch(`/rclone/jobs/${id}`, {headers: H()});
+    if (!r.ok) { showError('Erro ao carregar job'); return; }
+    const job = await r.json();
+    openModal(job);
+  }
+
+  async function saveJob() {
+    const errEl = document.getElementById('modalError');
+    errEl.classList.remove('visible');
+
+    const remote_name  = document.getElementById('mRemote').value.replace(/:$/,'').trim();
+    const remote_path  = document.getElementById('mPath').value.trim();
+    const display_name = document.getElementById('mName').value.trim();
+    const target_label = document.getElementById('mLabel').value.trim();
+    const cron_expr    = document.getElementById('mCron').value.trim() || null;
+    const enabled      = document.getElementById('mEnabled').checked;
+
+    if (!remote_name)  { errEl.textContent = 'Selecione um remote'; errEl.classList.add('visible'); return; }
+    if (!display_name) { errEl.textContent = 'Informe o nome de exibição'; errEl.classList.add('visible'); return; }
+    if (!target_label) { errEl.textContent = 'Informe o label de destino'; errEl.classList.add('visible'); return; }
+
+    const btn = document.getElementById('modalSaveBtn');
+    btn.disabled = true; btn.textContent = 'Salvando...';
+
+    const body = {remote_name, remote_path, display_name, target_label, cron_expr, enabled};
+    const [url, method] = _editingJobId
+      ? [`/rclone/jobs/${_editingJobId}`, 'PATCH']
+      : ['/rclone/jobs', 'POST'];
+
+    const r = await fetch(url, {
+      method,
+      headers: {...H(), 'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+
+    btn.disabled = false; btn.textContent = _editingJobId ? 'Salvar' : 'Criar Job';
+
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      errEl.textContent = d.detail || 'Erro ao salvar job';
+      errEl.classList.add('visible');
+      return;
+    }
+
+    closeModal();
+    await loadJobs();
+  }
+
+  // -- Init ------------------------------------------------------------------
+  async function init() {
+    const resp = await fetch('/health');
+    if (!resp.ok) { showError('Servidor indisponível'); return; }
+    const test = await fetch('/rclone/jobs', {headers: H()});
+    if (test.status === 401) { showLogin(); }
+    else { loadAll(); }
+  }
+  init();
+</script>
+</body>
+</html>

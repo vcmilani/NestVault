@@ -1,5 +1,5 @@
 """
-NestVault  v6.1.0
+NestVault  v7.0.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -22,11 +22,12 @@ from sqlalchemy import func, select, insert, literal
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
-from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, CloudBackupJob, CloudCredential, MaintenanceJob, SsdCachePendingMove
+from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, CloudBackupJob, CloudCredential, MaintenanceJob, SsdCachePendingMove, RcloneBackupJob
 import crypto
 import storage
 from auth import require_api_key, API_KEY, AUTH_ENABLED
 from cloud.router import router as cloud_router
+from cloud.rclone_router import router as rclone_router
 import scheduler as sched
 from cache_state import _activity_wake, invalidate_activity
 
@@ -133,6 +134,16 @@ def _cleanup_stale_running_states():
             job.last_run_status  = "error"
             job.last_run_message = "Interrompido pelo reinício do servidor"
             log.warning(f"[startup] Job cloud {job.id} ({job.folder_name}) estava running — marcado como error")
+
+        stale_rclone_jobs = (
+            db.query(RcloneBackupJob)
+            .filter(RcloneBackupJob.last_run_status == "running")
+            .all()
+        )
+        for job in stale_rclone_jobs:
+            job.last_run_status  = "error"
+            job.last_run_message = "Interrompido pelo reinício do servidor"
+            log.warning(f"[startup] Job rclone {job.id} ({job.display_name}) estava running — marcado como error")
 
         stale_versions = (
             db.query(BackupVersion)
@@ -263,6 +274,7 @@ async def lifespan(_: FastAPI):
     activity_refresh = asyncio.create_task(_activity_refresh_loop())
     sched.scheduler.start()
     sched.reload_jobs_from_db()
+    sched.reload_rclone_jobs_from_db()
     sched.schedule_daily_digest()
     sched.schedule_nightly_cleanup()
     log.info(f"Servidor iniciado — {len(STORAGE_VOLUMES)} volume(s): {[str(v) for v in STORAGE_VOLUMES]}")
@@ -276,8 +288,9 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="6.1.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="7.0.0", lifespan=lifespan)
 app.include_router(cloud_router)
+app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -1217,6 +1230,14 @@ def activity_page():
     return HTMLResponse(page.read_text(encoding="utf-8"))
 
 
+@app.get("/rclone-jobs", response_class=HTMLResponse, include_in_schema=False)
+def rclone_jobs_page():
+    page = STATIC_DIR / "rclone.html"
+    if not page.exists():
+        return HTMLResponse("<h1>Página não encontrada</h1>", status_code=404)
+    return HTMLResponse(page.read_text(encoding="utf-8"))
+
+
 def _build_fast_data(db: Session) -> tuple:
     """Queries leves para dados em tempo real: versões/jobs em execução, storage e discos.
     Chamado inline a cada request — retorna (running_version_infos, running_job_infos, storage_obj, disks_list)."""
@@ -2072,10 +2093,10 @@ def _store_new_content(
         db.rollback()
         dest.unlink(missing_ok=True)
         fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
-    else:
-        if not use_ssd:
-            _ensure_replicas(sha256, dest, db)
-    return fc
+        return fc, None
+    # _ensure_replicas é chamado APÓS db.commit() em upload_file para não manter
+    # o write lock do SQLite durante as cópias de arquivo para volumes réplica.
+    return fc, (dest if not use_ssd else None)
 
 
 @app.post("/upload", response_model=UploadResponse, dependencies=[Depends(require_api_key)])
@@ -2101,6 +2122,8 @@ async def upload_file(
         original_path = base64.b64decode(original_path.encode("ascii")).decode("utf-8")
     except Exception:
         pass
+
+    replica_source: Optional[Path] = None
 
     # Modo "so registrar" — conteudo ja existe no storage
     if content_sha256:
@@ -2150,7 +2173,7 @@ async def upload_file(
                     tmp_path.unlink(missing_ok=True)
 
             if not fc:
-                fc = await asyncio.to_thread(
+                fc, replica_source = await asyncio.to_thread(
                     _store_new_content, sha256, size, tmp_path, volume, ssd_dir,
                     backup_label, version_key, original_path, db,
                 )
@@ -2173,6 +2196,13 @@ async def upload_file(
 
     db.commit()
     db.refresh(vf)
+
+    # Replica copies are created AFTER the write lock is released so that
+    # concurrent uploads are not blocked during potentially slow file I/O.
+    if replica_source is not None:
+        await asyncio.to_thread(_ensure_replicas, sha256, replica_source, db)
+        db.commit()
+
     return UploadResponse(
         status="registered",
         file_id=vf.id,
