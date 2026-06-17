@@ -200,13 +200,25 @@ def _migrate_table(src_conn, dst_conn, table: str, bool_cols: set[str]) -> tuple
                 dst_conn.commit()
                 migrated += len(rows)
             except Exception as e:
+                # Batch falhou (ex: FK violation por sha256 corrompido) — tenta linha a linha
                 if skipped == 0:
-                    print(f"\n  [{table}] ERRO no insert (offset={offset}): {e}")
-                skipped += len(batch)
+                    short_err = str(e).split("\n")[0]
+                    print(f"\n  [{table}] batch falhou (offset={offset}), tentando linha a linha: {short_err}")
                 try:
                     dst_conn.rollback()
                 except Exception:
                     pass
+                for row in batch:
+                    try:
+                        dst_conn.execute(insert_sql, [row])
+                        dst_conn.commit()
+                        migrated += 1
+                    except Exception:
+                        try:
+                            dst_conn.rollback()
+                        except Exception:
+                            pass
+                        skipped += 1
             offset += BATCH_SIZE
 
         status = f"  [{table}] {migrated}/{total_str}"
