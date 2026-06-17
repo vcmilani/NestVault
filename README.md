@@ -1321,8 +1321,8 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 | **`server/database.py` — dual backend** | Detecção automática de `DATABASE_URL`: PostgreSQL com `pool_pre_ping`; SQLite com WAL + NullPool (comportamento anterior preservado integralmente) |
 | **`server/database.py` — `BigInteger`** | `FileContent.size` alterado de `Integer` para `BigInteger` — suporte a arquivos > 2 GB no PostgreSQL (SQLite ignora a distinção) |
 | **`server/requirements-postgres.txt`** | Novo arquivo opcional com `psycopg2-binary`; não incluído no `requirements.txt` principal para não quebrar Raspberry Pi 32-bit sem wheel pré-compilado |
-| **`server/migrate_to_postgres.py`** | Script SQLite → PostgreSQL: coerção de booleanos (0/1 → bool), correção automática de `INTEGER → BIGINT` em tabelas já criadas, fault-tolerance com divisão binária de batches para contornar corrupção física no SQLite |
-| **`server/migrate_to_sqlite.py`** | Script reverso PostgreSQL → SQLite: permite voltar ao modo leve ou criar backup portátil do banco |
+| **`tools/migrate_to_postgres.py`** | Script SQLite → PostgreSQL: coerção de booleanos (0/1 → bool), correção automática de `INTEGER → BIGINT` em tabelas já criadas, fault-tolerance com divisão binária de batches para contornar corrupção física no SQLite |
+| **`tools/migrate_to_sqlite.py`** | Script reverso PostgreSQL → SQLite: permite voltar ao modo leve ou criar backup portátil do banco |
 | **`README.md`** | Nova seção `## 🐘 PostgreSQL (opcional)` com instalação, configuração, migração e reversão |
 
 ### v7.0.0
@@ -2153,8 +2153,7 @@ O NestVault cria as tabelas automaticamente na primeira inicialização.
 Se já possui dados no SQLite e quer migrar para PostgreSQL, use o script incluído:
 
 ```bash
-cd server
-python migrate_to_postgres.py \
+python tools/migrate_to_postgres.py \
   --sqlite /caminho/para/backup.db \
   --postgres "postgresql://nestvault:sua_senha_aqui@localhost/nestvault"
 ```
@@ -2168,7 +2167,7 @@ O script:
 Para verificar a conexão sem migrar dados:
 
 ```bash
-python migrate_to_postgres.py \
+python tools/migrate_to_postgres.py \
   --sqlite /caminho/para/backup.db \
   --postgres "postgresql://nestvault:sua_senha_aqui@localhost/nestvault" \
   --dry-run
@@ -2181,8 +2180,7 @@ Após a migração bem-sucedida, configure `DATABASE_URL` e reinicie o servidor.
 Se quiser voltar ao SQLite (ou criar um backup portátil do banco PostgreSQL), use o script reverso:
 
 ```bash
-cd server
-python migrate_to_sqlite.py \
+python tools/migrate_to_sqlite.py \
   --postgres "postgresql://nestvault:sua_senha_aqui@localhost/nestvault" \
   --sqlite   /caminho/para/backup_restored.db
 ```
@@ -2195,7 +2193,7 @@ Após a migração:
 Para verificar sem migrar dados:
 
 ```bash
-python migrate_to_sqlite.py \
+python tools/migrate_to_sqlite.py \
   --postgres "postgresql://nestvault:sua_senha_aqui@localhost/nestvault" \
   --sqlite   /caminho/para/backup_restored.db \
   --dry-run

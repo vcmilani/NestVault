@@ -13,9 +13,12 @@ O script é idempotente: registros já existentes no destino são ignorados
 """
 
 import argparse
+import os
 import sys
 import time
 from datetime import datetime
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 
 from sqlalchemy import BigInteger, Boolean, create_engine, inspect, text
 from sqlalchemy.pool import NullPool
