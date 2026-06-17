@@ -45,6 +45,7 @@ def _fmt_size(n: int) -> str:
 # Pastas do OneDrive que exigem autenticação adicional — ignoradas em todos os jobs.
 # "Personal Vault" é o nome em inglês; "Cofre Pessoal" é o nome em PT-BR.
 _ONEDRIVE_PROTECTED_FOLDERS = {"Personal Vault", "Cofre Pessoal"}
+_IGNORED_SYSTEM_FILES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 
 
 @dataclass
@@ -103,7 +104,12 @@ async def list_files_recursive(
     src = f"{remote_name}:{remote_path}" if remote_path else f"{remote_name}:"
     for attempt in range(1, retries + 1):
         stdout, stderr, rc = await _rclone_run(
-            "lsjson", "--recursive", "--exclude", "Personal Vault/**", src, timeout=3600
+            "lsjson", "--recursive",
+            "--exclude", "Personal Vault/**",
+            "--exclude", ".DS_Store",
+            "--exclude", "Thumbs.db",
+            "--exclude", "desktop.ini",
+            src, timeout=3600
         )
         if rc == 0:
             break
@@ -121,6 +127,8 @@ async def list_files_recursive(
     filtered_protected: set[str] = set()
     for item in json.loads(stdout or b"[]"):
         if item.get("IsDir"):
+            continue
+        if Path(item["Path"]).name in _IGNORED_SYSTEM_FILES:
             continue
         top_folder = item["Path"].split("/")[0]
         if top_folder in _ONEDRIVE_PROTECTED_FOLDERS:
