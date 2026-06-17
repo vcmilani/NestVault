@@ -41,6 +41,32 @@ def _count(conn, table: str) -> int:
     return conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar()
 
 
+def _count_safe(conn, table: str) -> int | None:
+    """Retorna total de linhas ou None se a tabela estiver corrompida."""
+    try:
+        return _count(conn, table)
+    except Exception:
+        return None
+
+
+def _preflight_check(src_engine) -> list[str]:
+    """
+    Roda PRAGMA integrity_check no SQLite e retorna lista de problemas.
+    Corrupção parcial é reportada mas não impede a migração.
+    """
+    problems = []
+    try:
+        with src_engine.connect() as conn:
+            rows = conn.execute(text("PRAGMA integrity_check")).fetchall()
+            for row in rows:
+                msg = row[0]
+                if msg != "ok":
+                    problems.append(msg)
+    except Exception as e:
+        problems.append(f"Falha ao rodar integrity_check: {e}")
+    return problems
+
+
 def _fix_column_types(dst_engine, metadata):
     """
     Corrige tipos de coluna no PostgreSQL que divergem do schema SQLAlchemy.
@@ -86,11 +112,31 @@ def _bool_columns(table: str, metadata) -> set[str]:
     }
 
 
-def _migrate_table(src_conn, dst_conn, table: str, bool_cols: set[str]) -> int:
-    total = _count(src_conn, table)
+def _coerce_row(record: dict, bool_cols: set[str]) -> dict:
+    for col in bool_cols:
+        if col in record and record[col] is not None:
+            record[col] = bool(record[col])
+    return record
+
+
+def _try_fetch(src_conn, cols_str: str, table: str, limit: int, offset: int):
+    """Tenta buscar linhas; retorna lista vazia se o range estiver corrompido."""
+    try:
+        return src_conn.execute(
+            text(f"SELECT {cols_str} FROM {table} LIMIT {limit} OFFSET {offset}")
+        ).fetchall()
+    except Exception:
+        return None
+
+
+def _migrate_table(src_conn, dst_conn, table: str, bool_cols: set[str]) -> tuple[int, int]:
+    """Retorna (migrated, skipped)."""
+    total = _count_safe(src_conn, table)
+    total_str = str(total) if total is not None else "?"
+
     if total == 0:
         print(f"  [{table}] vazia — pulando")
-        return 0
+        return 0, 0
 
     # Descobre colunas da tabela no SQLite
     cols_result = src_conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
@@ -103,32 +149,65 @@ def _migrate_table(src_conn, dst_conn, table: str, bool_cols: set[str]) -> int:
     )
 
     migrated = 0
-    offset = 0
+    skipped  = 0
+    offset   = 0
+
     while True:
-        rows = src_conn.execute(
-            text(f"SELECT {cols_str} FROM {table} LIMIT {BATCH_SIZE} OFFSET {offset}")
-        ).fetchall()
-        if not rows:
+        rows = _try_fetch(src_conn, cols_str, table, BATCH_SIZE, offset)
+
+        if rows is None:
+            # Batch corrompido — divide em batches menores até chegar a 1 linha
+            recovered_in_range = 0
+            mini_size = BATCH_SIZE // 2
+            mini_offset = offset
+            end_offset = offset + BATCH_SIZE
+
+            while mini_size >= 1 and mini_offset < end_offset:
+                mini_rows = _try_fetch(src_conn, cols_str, table, mini_size, mini_offset)
+                if mini_rows is None:
+                    if mini_size == 1:
+                        # Linha individual corrompida — pula
+                        skipped += 1
+                        mini_offset += 1
+                    else:
+                        mini_size //= 2
+                else:
+                    if not mini_rows:
+                        break
+                    batch = [_coerce_row(dict(zip(columns, r)), bool_cols) for r in mini_rows]
+                    try:
+                        dst_conn.execute(insert_sql, batch)
+                        dst_conn.commit()
+                        recovered_in_range += len(mini_rows)
+                    except Exception:
+                        skipped += len(mini_rows)
+                    mini_offset += len(mini_rows)
+
+            migrated += recovered_in_range
+            offset += BATCH_SIZE
+
+        elif not rows:
+            # Fim da tabela
             break
 
-        batch = []
-        for row in rows:
-            record = dict(zip(columns, row))
-            # SQLite armazena Boolean como 0/1; PostgreSQL exige True/False
-            for col in bool_cols:
-                if col in record and record[col] is not None:
-                    record[col] = bool(record[col])
-            batch.append(record)
+        else:
+            batch = [_coerce_row(dict(zip(columns, r)), bool_cols) for r in rows]
+            try:
+                dst_conn.execute(insert_sql, batch)
+                dst_conn.commit()
+            except Exception:
+                skipped += len(batch)
+            migrated += len(rows)
+            offset += BATCH_SIZE
 
-        dst_conn.execute(insert_sql, batch)
-        dst_conn.commit()
+        status = f"  [{table}] {migrated}/{total_str}"
+        if skipped:
+            status += f" ({skipped} corrompidos)"
+        print(status, end="\r", flush=True)
 
-        migrated += len(rows)
-        offset += BATCH_SIZE
-        print(f"  [{table}] {migrated}/{total}", end="\r", flush=True)
-
-    print(f"  [{table}] {migrated}/{total} OK          ")
-    return migrated
+    suffix = f" ({skipped} linhas corrompidas ignoradas)" if skipped else ""
+    print(f"  [{table}] {migrated}/{total_str} OK{suffix}          ")
+    return migrated, skipped
 
 
 def main():
@@ -160,6 +239,22 @@ def main():
         src_tables = inspect(src_engine).get_table_names()
         print(f"[3/4] Tabelas encontradas no SQLite: {', '.join(src_tables)}")
 
+        # Verifica integridade do SQLite
+        print("[3b/4] Verificando integridade do SQLite...")
+        problems = _preflight_check(src_engine)
+        if problems:
+            print(f"  ⚠️  {len(problems)} problema(s) de integridade detectados:")
+            for p in problems[:10]:
+                print(f"     {p}")
+            if len(problems) > 10:
+                print(f"     ... e mais {len(problems) - 10} problemas")
+            print("  Continuando — linhas corrompidas serão ignoradas.\n")
+            print("  Dica para recuperar o SQLite antes de migrar:")
+            print("    sqlite3 backup.db \".recover\" | sqlite3 backup_recovered.db")
+            print("    sqlite3 backup_recovered.db \"PRAGMA integrity_check\"\n")
+        else:
+            print("  ✅ Integridade OK\n")
+
         # Verifica se o PostgreSQL já tem dados
         from database import Base
         print("[4/4] Criando schema no PostgreSQL (se necessário)...")
@@ -188,28 +283,47 @@ def main():
         # --- Migração ---
         print(f"\nIniciando migração — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         t0 = time.time()
-        summary = {}
+        summary: dict[str, tuple[int, int]] = {}  # table → (migrated, skipped)
 
         for table in TABLES_IN_ORDER:
             if table not in src_tables:
                 print(f"  [{table}] não existe no SQLite — pulando")
                 continue
             bool_cols = _bool_columns(table, Base.metadata)
-            summary[table] = _migrate_table(src_conn, dst_conn, table, bool_cols)
+            try:
+                summary[table] = _migrate_table(src_conn, dst_conn, table, bool_cols)
+            except Exception as e:
+                print(f"  [{table}] ❌ ERRO FATAL (tabela ignorada): {e}")
+                summary[table] = (0, -1)  # -1 = tabela inacessível
 
         elapsed = time.time() - t0
 
         # --- Resumo ---
         print("\n" + "=" * 50)
         print(f"Migração concluída em {elapsed:.1f}s\n")
-        total_rows = 0
-        for table, count in summary.items():
-            print(f"  {table:<30} {count:>8} registros")
-            total_rows += count
+        total_migrated = 0
+        total_skipped = 0
+        for table, (mig, skip) in summary.items():
+            if skip == -1:
+                print(f"  {table:<30} {'INACESSÍVEL':>12}")
+            elif skip > 0:
+                print(f"  {table:<30} {mig:>8} migrados  {skip:>6} corrompidos ignorados")
+            else:
+                print(f"  {table:<30} {mig:>8} registros")
+            total_migrated += mig
+            total_skipped  += max(skip, 0)
         print("-" * 50)
-        print(f"  {'TOTAL':<30} {total_rows:>8} registros")
+        print(f"  {'TOTAL migrado':<30} {total_migrated:>8} registros")
+        if total_skipped:
+            print(f"  {'TOTAL ignorado':<30} {total_skipped:>8} linhas corrompidas")
         print("=" * 50)
-        print("\n✅ Pronto! Configure DATABASE_URL e reinicie o NestVault.")
+        if total_skipped:
+            print("\n⚠️  Algumas linhas corrompidas foram ignoradas.")
+            print("   Para tentar recuperá-las, use:")
+            print("     sqlite3 backup.db \".recover\" | sqlite3 backup_recovered.db")
+            print("   e rode a migração novamente com --sqlite backup_recovered.db")
+        else:
+            print("\n✅ Pronto! Configure DATABASE_URL e reinicie o NestVault.")
 
 
 if __name__ == "__main__":
