@@ -17,7 +17,7 @@ import sys
 import time
 from datetime import datetime
 
-from sqlalchemy import Boolean, create_engine, inspect, text
+from sqlalchemy import BigInteger, Boolean, create_engine, inspect, text
 from sqlalchemy.pool import NullPool
 
 # Tabelas na ordem correta de inserção (respeitando foreign keys)
@@ -39,6 +39,40 @@ BATCH_SIZE = 500
 
 def _count(conn, table: str) -> int:
     return conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar()
+
+
+def _fix_column_types(dst_engine, metadata):
+    """
+    Corrige tipos de coluna no PostgreSQL que divergem do schema SQLAlchemy.
+    Necessário quando a tabela foi criada antes de uma mudança de tipo no modelo
+    (ex: Integer → BigInteger para suportar arquivos > 2 GB).
+    """
+    inspector = inspect(dst_engine)
+    existing_tables = inspector.get_table_names()
+    fixes = []
+
+    for table_name, table in metadata.tables.items():
+        if table_name not in existing_tables:
+            continue
+        existing_cols = {col["name"]: col for col in inspector.get_columns(table_name)}
+        for col in table.columns:
+            if col.name not in existing_cols:
+                continue
+            pg_type = type(existing_cols[col.name]["type"]).__name__.upper()
+            # INTEGER (32-bit) deve virar BIGINT quando o modelo declara BigInteger
+            if isinstance(col.type, BigInteger) and pg_type == "INTEGER":
+                fixes.append((table_name, col.name))
+
+    if not fixes:
+        return
+
+    with dst_engine.connect() as conn:
+        for table_name, col_name in fixes:
+            print(f"  [schema] ALTER TABLE {table_name}.{col_name}: INTEGER → BIGINT")
+            conn.execute(text(
+                f'ALTER TABLE "{table_name}" ALTER COLUMN "{col_name}" TYPE BIGINT'
+            ))
+        conn.commit()
 
 
 def _bool_columns(table: str, metadata) -> set[str]:
@@ -130,6 +164,7 @@ def main():
         from database import Base
         print("[4/4] Criando schema no PostgreSQL (se necessário)...")
         Base.metadata.create_all(bind=dst_engine)
+        _fix_column_types(dst_engine, Base.metadata)
 
         existing_rows = 0
         for table in TABLES_IN_ORDER:

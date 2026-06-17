@@ -8,7 +8,7 @@ PostgreSQL: configurado via DATABASE_URL (ex: postgresql://user:pass@host/db) â€
 """
 
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, Boolean,
+    create_engine, Column, Integer, BigInteger, String, Float, Boolean,
     DateTime, ForeignKey, UniqueConstraint, Index, event, text
 )
 from sqlalchemy.ext.declarative import declarative_base
@@ -99,7 +99,7 @@ class FileContent(Base):
 
     sha256     = Column(String(64), primary_key=True)
     stored_at  = Column(String, nullable=False)
-    size       = Column(Integer, nullable=False)
+    size       = Column(BigInteger, nullable=False)
     encrypted  = Column(Boolean, nullable=False, default=False, server_default="0")
     created_at = Column(DateTime, default=_utcnow)
 
