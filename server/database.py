@@ -1,9 +1,10 @@
 """
-Models do banco de dados — v3.0
-Ajustes de performance:
-- WAL mode no SQLite (escritas nao bloqueiam leituras)
-- Indices em colunas usadas em filtros e joins
-- Cache mais agressivo
+Models do banco de dados — v7.1
+Suporte dual: SQLite (padrão) ou PostgreSQL (opcional via DATABASE_URL).
+
+SQLite:  configurado via DB_PATH (padrão ./backup.db) — ideal para uso doméstico/NAS.
+PostgreSQL: configurado via DATABASE_URL (ex: postgresql://user:pass@host/db) —
+            recomendado para ambientes com muitos uploads concorrentes.
 """
 
 from sqlalchemy import (
@@ -19,25 +20,39 @@ import os, hashlib, base64
 def _utcnow():
     return datetime.now()
 
-DB_PATH = os.getenv("DB_PATH", "./backup.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
+DB_PATH      = os.getenv("DB_PATH", "./backup.db")
 
-engine = create_engine(
-    f"sqlite:///{DB_PATH}",
-    connect_args={"check_same_thread": False, "timeout": 60},
-    poolclass=NullPool,
-)
+if DATABASE_URL:
+    # Valida que o driver PostgreSQL está instalado antes de tentar conectar
+    try:
+        import psycopg2  # noqa: F401
+    except ImportError:
+        raise RuntimeError(
+            "DATABASE_URL está definida, mas o driver PostgreSQL não está instalado.\n"
+            "  Instale com:  pip install -r requirements-postgres.txt\n"
+            "  Raspberry Pi: sudo apt install -y python3-psycopg2"
+        )
+    # PostgreSQL: pool com health-check automático; sem pragmas SQLite
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+else:
+    # SQLite: NullPool + WAL para melhor concorrência sem servidor externo
+    engine = create_engine(
+        f"sqlite:///{DB_PATH}",
+        connect_args={"check_same_thread": False, "timeout": 60},
+        poolclass=NullPool,
+    )
 
-# Ativa WAL mode + outras pragmas de performance no SQLite
-@event.listens_for(engine, "connect")
-def _set_sqlite_pragma(dbapi_connection, _):
-    cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL")           # leituras nao bloqueiam escritas
-    cursor.execute("PRAGMA synchronous=NORMAL")          # mais rapido, ainda seguro
-    cursor.execute("PRAGMA cache_size=-64000")           # 64MB de cache
-    cursor.execute("PRAGMA temp_store=MEMORY")           # tabelas temp na RAM
-    cursor.execute("PRAGMA mmap_size=268435456")         # 256MB mmap
-    cursor.execute("PRAGMA foreign_keys=ON")             # enforça FKs declaradas nos modelos
-    cursor.close()
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragma(dbapi_connection, _):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")           # leituras nao bloqueiam escritas
+        cursor.execute("PRAGMA synchronous=NORMAL")          # mais rapido, ainda seguro
+        cursor.execute("PRAGMA cache_size=-64000")           # 64MB de cache
+        cursor.execute("PRAGMA temp_store=MEMORY")           # tabelas temp na RAM
+        cursor.execute("PRAGMA mmap_size=268435456")         # 256MB mmap
+        cursor.execute("PRAGMA foreign_keys=ON")             # enforça FKs declaradas nos modelos
+        cursor.close()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -254,6 +269,13 @@ def init_db():
     _log_init = _initlog.getLogger("backup-server")
 
     Base.metadata.create_all(bind=engine)
+
+    # Migrações manuais apenas para SQLite — no PostgreSQL o create_all já cria o schema completo
+    if engine.dialect.name != "sqlite":
+        _log_init.info(f"[db] Backend: {engine.dialect.name} — migrações SQLite ignoradas")
+        return
+
+    _log_init.info("[db] Backend: SQLite — aplicando migrações incrementais")
 
     with engine.connect() as conn:
         # Migração: adiciona coluna encrypted em bancos existentes (ignora se já existir)

@@ -2048,3 +2048,117 @@ Com o servidor rodando:
 - **Dashboard**: `http://<ip-da-pi>:8000/`
 - **Swagger UI**: `http://<ip-da-pi>:8000/docs`
 - **ReDoc**: `http://<ip-da-pi>:8000/redoc`
+
+---
+
+## 🐘 PostgreSQL (opcional) — v7.1
+
+Por padrão o NestVault usa **SQLite**, que é ideal para uso doméstico e NAS. Se você tiver muitos uploads simultâneos ou quiser eliminar completamente qualquer possibilidade de lock, é possível usar o **PostgreSQL** como backend alternativo.
+
+### Quando usar cada um
+
+| Cenário | Recomendação | Motivo |
+|---|---|---|
+| Raspberry Pi (qualquer modelo) | **SQLite** | PostgreSQL consome 50–150 MB RAM extra e desgasta mais o SD com writes contínuos |
+| NAS doméstico | **SQLite** | NestVault é single-process; WAL já elimina locks sem servidor externo |
+| Servidor x86 com SSD, uploads intensos | **PostgreSQL** | MVCC real compensa; I/O abundante, RAM sobrando |
+| Múltiplas instâncias compartilhando o banco | **PostgreSQL** | Único cenário onde múltiplos writers simultâneos existem de verdade |
+
+### Instalando o driver Python (psycopg2)
+
+O driver PostgreSQL **não é instalado por padrão** (para não impactar quem usa SQLite, especialmente no Raspberry Pi 32-bit onde a compilação do driver pode falhar).
+
+Instale apenas quando for usar PostgreSQL:
+
+```bash
+# Qualquer Linux com pip (Raspberry Pi 64-bit, x86, etc.)
+pip install -r requirements-postgres.txt
+
+# Raspberry Pi 32-bit (armhf) — prefira o pacote do sistema para evitar compilação
+sudo apt install -y python3-psycopg2
+```
+
+### Instalando o PostgreSQL no Linux
+
+```bash
+sudo apt update
+sudo apt install -y postgresql postgresql-contrib
+sudo systemctl enable --now postgresql
+```
+
+Verifique que o serviço está rodando:
+
+```bash
+sudo systemctl status postgresql
+```
+
+### Criando usuário e banco de dados
+
+```bash
+sudo -u postgres psql <<'EOF'
+CREATE USER nestvault WITH PASSWORD 'sua_senha_aqui';
+CREATE DATABASE nestvault OWNER nestvault;
+\q
+EOF
+```
+
+Teste a conexão:
+
+```bash
+psql -U nestvault -h localhost -d nestvault -c "SELECT version();"
+```
+
+### Configurando o NestVault para usar PostgreSQL
+
+Em vez de `DB_PATH`, defina `DATABASE_URL`:
+
+```bash
+export DATABASE_URL="postgresql://nestvault:sua_senha_aqui@localhost/nestvault"
+```
+
+> **Nota:** `DB_PATH` é ignorado quando `DATABASE_URL` está definido.
+
+Se estiver usando systemd, adicione a variável ao arquivo de serviço:
+
+```ini
+[Service]
+Environment="DATABASE_URL=postgresql://nestvault:sua_senha_aqui@localhost/nestvault"
+# Remova ou comente a linha DB_PATH se existir
+```
+
+Reinicie o serviço após a alteração:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart nestvault
+```
+
+O NestVault cria as tabelas automaticamente na primeira inicialização.
+
+### Migrando dados do SQLite para PostgreSQL
+
+Se já possui dados no SQLite e quer migrar para PostgreSQL, use o script incluído:
+
+```bash
+cd server
+python migrate_to_postgres.py \
+  --sqlite /caminho/para/backup.db \
+  --postgres "postgresql://nestvault:sua_senha_aqui@localhost/nestvault"
+```
+
+O script:
+- Cria as tabelas no PostgreSQL (caso ainda não existam)
+- Copia os dados em lotes de 500 registros
+- É **idempotente**: registros já existentes no destino são ignorados, então pode ser re-executado com segurança
+- Exibe progresso por tabela e resumo final com contagem de registros
+
+Para verificar a conexão sem migrar dados:
+
+```bash
+python migrate_to_postgres.py \
+  --sqlite /caminho/para/backup.db \
+  --postgres "postgresql://nestvault:sua_senha_aqui@localhost/nestvault" \
+  --dry-run
+```
+
+Após a migração bem-sucedida, configure `DATABASE_URL` e reinicie o servidor. Verifique o dashboard para confirmar que os backups aparecem normalmente.

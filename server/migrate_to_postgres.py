@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""
+migrate_to_postgres.py — NestVault v7.1
+Migra todos os dados de um banco SQLite para PostgreSQL.
+
+Uso:
+    python migrate_to_postgres.py \
+        --sqlite  /caminho/para/backup.db \
+        --postgres postgresql://nestvault:senha@localhost/nestvault
+
+O script é idempotente: registros já existentes no destino são ignorados
+(INSERT ... ON CONFLICT DO NOTHING). Pode ser re-executado com segurança.
+"""
+
+import argparse
+import sys
+import time
+from datetime import datetime
+
+from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.pool import NullPool
+
+# Tabelas na ordem correta de inserção (respeitando foreign keys)
+TABLES_IN_ORDER = [
+    "backup_ids",
+    "file_contents",
+    "cloud_credentials",
+    "rclone_backup_jobs",
+    "cloud_backup_jobs",
+    "maintenance_jobs",
+    "ssd_cache_pending_moves",
+    "backup_versions",
+    "file_content_copies",
+    "version_files",
+]
+
+BATCH_SIZE = 500
+
+
+def _count(conn, table: str) -> int:
+    return conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar()
+
+
+def _migrate_table(src_conn, dst_conn, table: str) -> int:
+    total = _count(src_conn, table)
+    if total == 0:
+        print(f"  [{table}] vazia — pulando")
+        return 0
+
+    # Descobre colunas da tabela no SQLite
+    cols_result = src_conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
+    columns = [row[1] for row in cols_result]
+    cols_str = ", ".join(columns)
+    placeholders = ", ".join(f":{c}" for c in columns)
+
+    insert_sql = text(
+        f"INSERT INTO {table} ({cols_str}) VALUES ({placeholders}) ON CONFLICT DO NOTHING"
+    )
+
+    migrated = 0
+    offset = 0
+    while True:
+        rows = src_conn.execute(
+            text(f"SELECT {cols_str} FROM {table} LIMIT {BATCH_SIZE} OFFSET {offset}")
+        ).fetchall()
+        if not rows:
+            break
+
+        batch = [dict(zip(columns, row)) for row in rows]
+        dst_conn.execute(insert_sql, batch)
+        dst_conn.commit()
+
+        migrated += len(rows)
+        offset += BATCH_SIZE
+        print(f"  [{table}] {migrated}/{total}", end="\r", flush=True)
+
+    print(f"  [{table}] {migrated}/{total} OK          ")
+    return migrated
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Migra dados do NestVault de SQLite para PostgreSQL"
+    )
+    parser.add_argument("--sqlite",   required=True, help="Caminho para o arquivo .db do SQLite")
+    parser.add_argument("--postgres", required=True, help="URL de conexão PostgreSQL (postgresql://...)")
+    parser.add_argument("--dry-run",  action="store_true", help="Apenas verifica a conexão, não migra dados")
+    args = parser.parse_args()
+
+    # --- Conexões ---
+    print(f"\n[1/4] Conectando ao SQLite: {args.sqlite}")
+    src_engine = create_engine(
+        f"sqlite:///{args.sqlite}",
+        connect_args={"check_same_thread": False},
+        poolclass=NullPool,
+    )
+
+    print(f"[2/4] Conectando ao PostgreSQL: {args.postgres}")
+    try:
+        dst_engine = create_engine(args.postgres, pool_pre_ping=True)
+    except Exception as e:
+        print(f"ERRO ao criar engine PostgreSQL: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    with src_engine.connect() as src_conn, dst_engine.connect() as dst_conn:
+        # Verifica tabelas no SQLite
+        src_tables = inspect(src_engine).get_table_names()
+        print(f"[3/4] Tabelas encontradas no SQLite: {', '.join(src_tables)}")
+
+        # Verifica se o PostgreSQL já tem dados
+        from database import Base
+        print("[4/4] Criando schema no PostgreSQL (se necessário)...")
+        Base.metadata.create_all(bind=dst_engine)
+
+        existing_rows = 0
+        for table in TABLES_IN_ORDER:
+            if table in src_tables:
+                try:
+                    existing_rows += _count(dst_conn, table)
+                except Exception:
+                    pass
+
+        if existing_rows > 0:
+            print(f"\n⚠️  O banco PostgreSQL já contém {existing_rows} registros.")
+            resp = input("   Continuar mesmo assim? Duplicatas serão ignoradas. [s/N] ").strip().lower()
+            if resp != "s":
+                print("Migração cancelada.")
+                sys.exit(0)
+
+        if args.dry_run:
+            print("\n[dry-run] Conexões OK. Nenhum dado foi migrado.")
+            return
+
+        # --- Migração ---
+        print(f"\nIniciando migração — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        t0 = time.time()
+        summary = {}
+
+        for table in TABLES_IN_ORDER:
+            if table not in src_tables:
+                print(f"  [{table}] não existe no SQLite — pulando")
+                continue
+            summary[table] = _migrate_table(src_conn, dst_conn, table)
+
+        elapsed = time.time() - t0
+
+        # --- Resumo ---
+        print("\n" + "=" * 50)
+        print(f"Migração concluída em {elapsed:.1f}s\n")
+        total_rows = 0
+        for table, count in summary.items():
+            print(f"  {table:<30} {count:>8} registros")
+            total_rows += count
+        print("-" * 50)
+        print(f"  {'TOTAL':<30} {total_rows:>8} registros")
+        print("=" * 50)
+        print("\n✅ Pronto! Configure DATABASE_URL e reinicie o NestVault.")
+
+
+if __name__ == "__main__":
+    main()
