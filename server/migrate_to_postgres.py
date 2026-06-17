@@ -17,7 +17,7 @@ import sys
 import time
 from datetime import datetime
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import Boolean, create_engine, inspect, text
 from sqlalchemy.pool import NullPool
 
 # Tabelas na ordem correta de inserção (respeitando foreign keys)
@@ -41,7 +41,18 @@ def _count(conn, table: str) -> int:
     return conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar()
 
 
-def _migrate_table(src_conn, dst_conn, table: str) -> int:
+def _bool_columns(table: str, metadata) -> set[str]:
+    """Retorna nomes de colunas Boolean da tabela no schema SQLAlchemy."""
+    if table not in metadata.tables:
+        return set()
+    return {
+        col.name
+        for col in metadata.tables[table].columns
+        if isinstance(col.type, Boolean)
+    }
+
+
+def _migrate_table(src_conn, dst_conn, table: str, bool_cols: set[str]) -> int:
     total = _count(src_conn, table)
     if total == 0:
         print(f"  [{table}] vazia — pulando")
@@ -66,7 +77,15 @@ def _migrate_table(src_conn, dst_conn, table: str) -> int:
         if not rows:
             break
 
-        batch = [dict(zip(columns, row)) for row in rows]
+        batch = []
+        for row in rows:
+            record = dict(zip(columns, row))
+            # SQLite armazena Boolean como 0/1; PostgreSQL exige True/False
+            for col in bool_cols:
+                if col in record and record[col] is not None:
+                    record[col] = bool(record[col])
+            batch.append(record)
+
         dst_conn.execute(insert_sql, batch)
         dst_conn.commit()
 
@@ -140,7 +159,8 @@ def main():
             if table not in src_tables:
                 print(f"  [{table}] não existe no SQLite — pulando")
                 continue
-            summary[table] = _migrate_table(src_conn, dst_conn, table)
+            bool_cols = _bool_columns(table, Base.metadata)
+            summary[table] = _migrate_table(src_conn, dst_conn, table, bool_cols)
 
         elapsed = time.time() - t0
 
