@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v7.0.0`
+# 🗄️ NestVault  `v7.1.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -6,6 +6,8 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v7.1.0** — suporte opcional a PostgreSQL como backend de banco de dados: troque entre SQLite (padrão, ideal para Raspberry Pi e NAS) e PostgreSQL (recomendado para servidores com múltiplos uploads simultâneos) via variável `DATABASE_URL`, sem quebrar instalações existentes. Inclui script de migração SQLite → PostgreSQL com fault-tolerance para bancos corrompidos, e script reverso PostgreSQL → SQLite para quem quiser voltar ao modo leve.
+>
 > **v7.0.0** — integração rclone como opção paralela de cloud backup: elimina a necessidade de registrar app no Google Cloud Console ou Azure Portal — o usuário configura os remotes via `rclone config` e o NestVault os referencia pelo nome. Suporta todos os provedores compatíveis com rclone (Google Drive, OneDrive, S3, Backblaze B2, Dropbox e 70+ outros). O pipeline producer-consumer, deduplicação, criptografia e replicação funcionam de forma idêntica ao cloud backup OAuth nativo. Skip por `mtime` garante que syncs recorrentes só baixam arquivos novos ou alterados — sem re-download de tudo. Novos endpoints em `/rclone/*` + nova tabela `rclone_backup_jobs`.
 >
 > **v6.1.0** — otimizações de performance: trabalho bloqueante (criptografia, hashing, cópias) removido do event loop via `asyncio.to_thread` — o servidor permanece responsivo durante uploads grandes e jobs cloud simultâneos. Verificação de dedup passa a ser leve (tamanho esperado calculado por fórmula AES-GCM) em vez de decifrar o arquivo inteiro a cada hit; integridade profunda fica com o job `validate-integrity`. SSD cache move reduz de 3 para 2 leituras por arquivo (`_copy_with_sha256`). Cloud runner reutiliza um único `httpx.AsyncClient` por job — elimina handshake TCP/TLS por arquivo. Cliente Python ganha pool de conexões dimensionado para alta concorrência (`pool_maxsize=32`) e retry com backoff exponencial em erros transientes.
@@ -1311,6 +1313,17 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 ---
 
 ## ⚡ Otimizações
+
+### v7.1.0
+
+| Componente | Mudança |
+|---|---|
+| **`server/database.py` — dual backend** | Detecção automática de `DATABASE_URL`: PostgreSQL com `pool_pre_ping`; SQLite com WAL + NullPool (comportamento anterior preservado integralmente) |
+| **`server/database.py` — `BigInteger`** | `FileContent.size` alterado de `Integer` para `BigInteger` — suporte a arquivos > 2 GB no PostgreSQL (SQLite ignora a distinção) |
+| **`server/requirements-postgres.txt`** | Novo arquivo opcional com `psycopg2-binary`; não incluído no `requirements.txt` principal para não quebrar Raspberry Pi 32-bit sem wheel pré-compilado |
+| **`server/migrate_to_postgres.py`** | Script SQLite → PostgreSQL: coerção de booleanos (0/1 → bool), correção automática de `INTEGER → BIGINT` em tabelas já criadas, fault-tolerance com divisão binária de batches para contornar corrupção física no SQLite |
+| **`server/migrate_to_sqlite.py`** | Script reverso PostgreSQL → SQLite: permite voltar ao modo leve ou criar backup portátil do banco |
+| **`README.md`** | Nova seção `## 🐘 PostgreSQL (opcional)` com instalação, configuração, migração e reversão |
 
 ### v7.0.0
 
