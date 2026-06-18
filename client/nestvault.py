@@ -929,6 +929,10 @@ def restore(destination, label, version_key, server=DEFAULT_SERVER,
                         else original_path.lstrip("/"))
             dest_file = dest_root / relative
 
+            if Path(relative).name in IGNORED_NAMES:
+                stats["skipped"] += 1
+                continue
+
             if any(ex in Path(relative).parts for ex in (exclude or [])):
                 stats["skipped"] += 1
                 continue

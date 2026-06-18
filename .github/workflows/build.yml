@@ -23,7 +23,7 @@ jobs:
             artifact_path: client/dist/nestvault-linux-arm64
             strip: "true"
 
-          - os: macos-13
+          - os: macos-13-xlarge
             asset_name: nestvault-macos-x64
             artifact_path: client/dist/nestvault-macos-x64
             strip: "true"
