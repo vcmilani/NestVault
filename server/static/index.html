@@ -40,6 +40,13 @@
   @keyframes spin{to{transform:rotate(360deg)}}
   .spin{display:inline-block;animation:spin .8s linear infinite}
   .last-updated{font-size:11px;color:var(--text-mute)}
+  /* Failed backup alert banner */
+  .failed-alert{display:none;background:var(--red-dim);border:1px solid var(--red);border-left:3px solid var(--red);padding:10px 18px;margin-bottom:16px;font-size:11px;color:var(--red);animation:fadeUp .3s ease}
+  .failed-alert.visible{display:flex;align-items:center;gap:10px}
+  /* Backup search */
+  .backup-search{width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:12px;padding:8px 14px;outline:none;margin-bottom:10px;transition:border-color .15s;box-sizing:border-box}
+  .backup-search:focus{border-color:var(--amber)}
+  .backup-search::placeholder{color:var(--text-mute)}
 
   /* Layout */
   main{padding:28px 32px;max-width:1500px}
@@ -268,6 +275,8 @@
     </div>
   </div>
 
+  <div class="failed-alert" id="failedAlert">⚠ <span id="failedAlertMsg"></span></div>
+
   <div class="section-head">
     <div class="section-title">Backups</div>
     <div style="display:flex;align-items:center;gap:10px">
@@ -275,6 +284,7 @@
       <span class="count-badge" id="backupCount">0</span>
     </div>
   </div>
+  <input class="backup-search" id="backupSearch" type="text" placeholder="Filtrar backups por label ou cliente…" oninput="filterBackups(this.value)">
   <div class="table-wrap">
     <div id="backupsTable"><div class="loading">Carregando</div></div>
   </div>
@@ -363,6 +373,9 @@
   let expandedLabel = null;
   let expandedVersion = {};  // label -> version_key
   let checkedVersions = {};  // label -> Set of version_keys (max 2)
+  let _lastLoadTime = null;
+  let _tickTimer    = null;
+  let _allBackups   = [];    // cache para filtro
 
   const H = () => ({'X-API-Key': API_KEY});
 
@@ -381,6 +394,16 @@
   const fmtDate = s => s ? s.replace('T',' ').slice(0,19) : '—';
   const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   const badge = s => `<span class="badge badge-${s}">${s}</span>`;
+
+  function _startTick() {
+    clearInterval(_tickTimer);
+    _tickTimer = setInterval(function() {
+      if (!_lastLoadTime) return;
+      const secs = Math.round((Date.now() - _lastLoadTime) / 1000);
+      const el = document.getElementById('lastUpdated');
+      if (el) el.textContent = 'atualizado há ' + secs + 's';
+    }, 1000);
+  }
 
   function showError(msg) {
     const b = document.getElementById('errorBar');
@@ -421,12 +444,15 @@
 
       renderStats(backups, disk);
       renderBackups(backups);
-      document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString('pt-BR');
+      _lastLoadTime = Date.now();
+      _startTick();
+      filterBackups(document.getElementById('backupSearch').value);
 
       // Preenche células de disco quando o fetch (já em andamento) completar
       const respDiskSummary = await diskSummaryPromise;
       const diskSummary = (respDiskSummary && respDiskSummary.ok) ? await respDiskSummary.json() : {};
       renderDiskCells(backups, diskSummary);
+      if (typeof _updateOverflowHints === 'function') _updateOverflowHints();
     } catch(e) {
       showError('Não foi possível conectar: '+e.message);
     }
@@ -456,9 +482,35 @@
     }
   }
 
+  function filterBackups(q) {
+    q = (q || '').trim().toLowerCase();
+    const rows = document.querySelectorAll('#backupsTable tbody tr:not(.versions-row)');
+    rows.forEach(function(tr) {
+      const label = (tr.cells[0] ? tr.cells[0].textContent : '').toLowerCase();
+      const client = (tr.cells[1] ? tr.cells[1].textContent : '').toLowerCase();
+      tr.style.display = (!q || label.includes(q) || client.includes(q)) ? '' : 'none';
+      const vrow = document.getElementById('vrow-' + tr.cells[0].textContent.replace(/[▶▸]/g,'').trim());
+      if (vrow) vrow.style.display = 'none';
+    });
+    const count = Array.from(rows).filter(tr => tr.style.display !== 'none').length;
+    document.getElementById('backupCount').textContent = q ? count + '/' + rows.length : _allBackups.length;
+  }
+
   function renderBackups(backups) {
+    _allBackups = backups;
     const el = document.getElementById('backupsTable');
     if (!backups.length) { el.innerHTML='<div class="empty">Nenhum backup encontrado</div>'; return; }
+
+    // Alerta de backups com falha
+    const failed = backups.filter(b => b.status === 'failed');
+    const alertEl = document.getElementById('failedAlert');
+    if (failed.length) {
+      document.getElementById('failedAlertMsg').textContent =
+        failed.length + ' backup(s) com falha: ' + failed.map(b => b.label).join(', ');
+      alertEl.classList.add('visible');
+    } else {
+      alertEl.classList.remove('visible');
+    }
 
     const runningCount = backups.filter(b => b.has_running).length;
     const pill = document.getElementById('runningPill');
@@ -481,7 +533,7 @@
           <td class="num-cell">${b.version_count}</td>
           <td class="num-cell">${b.file_count.toLocaleString('pt-BR')}</td>
           <td class="size-cell">${fmtSize(b.total_size_bytes)}</td>
-          <td class="date-cell">${b.last_version ? fmtDate(b.last_version) : '—'}</td>
+          <td class="date-cell">${b.last_version ? (window.relTime ? relTime(b.last_version) : fmtDate(b.last_version)) : '—'}</td>
           <td id="disks-${esc(b.label)}" onclick="event.stopPropagation()" style="white-space:nowrap"><span class="disk-tag-loading">·</span></td>
         </tr>
         <tr class="versions-row" id="vrow-${esc(b.label)}" style="display:${isExp?'':'none'}">
@@ -588,7 +640,7 @@
           <td class="num-cell">${v.file_count}</td>
           <td class="size-cell">${fmtSize(v.total_size_bytes)}</td>
           <td class="num-cell dim-cell">${fmtDuration(v.duration_seconds)}</td>
-          <td class="date-cell">${fmtDate(v.version_key)}</td>
+          <td class="date-cell">${window.relTime ? relTime(v.version_key) : fmtDate(v.version_key)}</td>
           <td style="padding:4px 14px 4px 6px">
             <a href="/explorer?label=${encodeURIComponent(label)}&version=${encodeURIComponent(v.version_key)}"
                onclick="event.stopPropagation()"
@@ -679,7 +731,7 @@
         <td class="path-cell" title="${esc(f.original_path)}">${esc(f.original_path)}</td>
         <td class="size-cell">${fmtSize(f.size)}</td>
         <td class="hash-cell">${f.sha256.slice(0,16)}…</td>
-        <td class="date-cell">${fmtDate(f.created_at)}</td>
+        <td class="date-cell">${window.relTime ? relTime(f.created_at) : fmtDate(f.created_at)}</td>
       </tr>`).join('');
     el.innerHTML = `
       <table>
@@ -845,7 +897,7 @@
         <td>${esc(j.folder_name)}</td>
         <td>${esc(j.target_label)}</td>
         <td><code>${esc(j.cron_expr||'manual')}</code></td>
-        <td>${j.last_run_at ? j.last_run_at.slice(0,19).replace('T',' ') : '—'}</td>
+        <td>${j.last_run_at ? (window.relTime ? relTime(j.last_run_at) : j.last_run_at.slice(0,19).replace('T',' ')) : '—'}</td>
         <td title="${esc(j.last_run_message||'')}">  ${status}</td>
         <td style="white-space:nowrap">${
           j.last_run_status === 'running'

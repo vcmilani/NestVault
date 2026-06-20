@@ -70,7 +70,12 @@
   .disk-bar-fill.crit{background:var(--red)}
   .disk-bar-fill.cache{background:var(--blue)}
 
-  .disk-bar-labels{display:flex;justify-content:space-between;font-size:10px;color:var(--text-mute);margin-bottom:16px}
+  .disk-bar-labels{display:flex;justify-content:space-between;font-size:10px;color:var(--text-mute);margin-bottom:12px}
+  /* Sparkline row */
+  .disk-sparkline-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+  .disk-sparkline-label{font-size:9px;color:var(--text-mute);letter-spacing:.06em}
+  .disk-sparkline-label.trend-up{color:var(--red)}
+  .disk-sparkline-label.trend-down{color:var(--green)}
 
   .disk-content-info{border-top:1px solid var(--border);padding-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:12px}
   .disk-ci-item{display:flex;flex-direction:column;gap:4px}
@@ -123,11 +128,12 @@
     <div><div class="logo-text">NestVault</div><div class="logo-sub">Discos</div></div>
   </div>
   <div class="header-right">
+    <span class="last-updated" id="lastUpdated" style="font-size:11px;color:var(--text-mute)"></span>
     <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
     <button class="hbtn" onclick="load()">↻ Refresh</button>
-    <a class="hbtn" href="/" style="text-decoration:none">← Voltar</a>
-    <a class="hbtn" href="/activity" style="text-decoration:none">◎ Atividade</a>
-    <a class="hbtn" href="/rclone-jobs" style="text-decoration:none">⟳ rclone</a>
+    <a class="hbtn" href="/">← Voltar</a>
+    <a class="hbtn" href="/activity">◎ Atividade</a>
+    <a class="hbtn" href="/rclone-jobs">⟳ rclone</a>
     <button class="hbtn always-visible" id="logoutBtn">⌀ API Key</button>
     <button class="nav-hamburger"></button>
   </div>
@@ -171,7 +177,50 @@
 
 <script>
   let API_KEY = localStorage.getItem('backupApiKey') || '';
+  let _lastLoadTime = null;
+  let _tickTimer    = null;
+  let _autoRefresh  = null;
   const H = () => ({'X-API-Key': API_KEY});
+
+  // Disk usage sparkline via localStorage
+  function _saveDiskHistory(path, usedPct) {
+    const key = 'nv-disk-' + path.replace(/[^a-z0-9]/gi, '_');
+    const hist = JSON.parse(localStorage.getItem(key) || '[]');
+    hist.push({ ts: Date.now(), pct: Math.round(usedPct * 10) / 10 });
+    if (hist.length > 48) hist.splice(0, hist.length - 48);
+    localStorage.setItem(key, JSON.stringify(hist));
+  }
+
+  function _renderSparkline(path) {
+    const key = 'nv-disk-' + path.replace(/[^a-z0-9]/gi, '_');
+    const hist = JSON.parse(localStorage.getItem(key) || '[]');
+    if (hist.length < 2) return '<span class="disk-sparkline-label">sem histórico</span>';
+    const pts = hist.map(h => h.pct);
+    const max = Math.max(...pts), min = Math.min(...pts);
+    const range = max - min || 1;
+    const w = 64, h = 16;
+    const step = w / (pts.length - 1);
+    const points = pts.map((v, i) =>
+      (i * step).toFixed(1) + ',' + (h - ((v - min) / range) * h).toFixed(1)
+    ).join(' ');
+    const trend = pts[pts.length - 1] - pts[0];
+    const color = trend > 5 ? 'var(--red)' : trend > 1 ? 'var(--amber)' : 'var(--green)';
+    const trendCls = trend > 2 ? 'trend-up' : trend < -2 ? 'trend-down' : '';
+    const trendTxt = trend > 0.5 ? '▲ ' + trend.toFixed(1) + '%' : trend < -0.5 ? '▼ ' + Math.abs(trend).toFixed(1) + '%' : '—';
+    return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="overflow:visible" title="Tendência de uso (${pts.length} amostras)">
+      <polyline points="${points}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round"/>
+    </svg><span class="disk-sparkline-label ${trendCls}" style="margin-left:8px">${trendTxt}</span>`;
+  }
+
+  function _startTick() {
+    clearInterval(_tickTimer);
+    _tickTimer = setInterval(function() {
+      if (!_lastLoadTime) return;
+      const secs = Math.round((Date.now() - _lastLoadTime) / 1000);
+      const el = document.getElementById('lastUpdated');
+      if (el) el.textContent = 'atualizado há ' + secs + 's';
+    }, 1000);
+  }
 
   const fmtSize = b => {
     const u = ['B','KB','MB','GB','TB'];
@@ -206,13 +255,20 @@
   async function load() {
     clearError();
     const container = document.getElementById('disksContainer');
-    container.innerHTML = '<div class="loading">Carregando</div>';
+    if (!container.querySelector('.disk-card')) container.innerHTML = '<div class="loading">Carregando</div>';
     try {
       const r = await fetch('/storage/disks', {headers: H()});
       if (r.status === 401) { showLogin('API Key inválida.'); container.innerHTML = ''; return; }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const disks = await r.json();
+      disks.forEach(d => {
+        const usedPct = d.total_bytes > 0 ? d.used_bytes / d.total_bytes * 100 : 0;
+        _saveDiskHistory(d.path, usedPct);
+      });
       renderDisks(disks);
+      _lastLoadTime = Date.now();
+      _startTick();
+      if (typeof _updateOverflowHints === 'function') _updateOverflowHints();
     } catch(e) {
       showError('Não foi possível conectar: '+e.message);
       container.innerHTML = '<div class="empty">Nenhum dado disponível</div>';
@@ -263,6 +319,9 @@
             <span>${usedPct.toFixed(1)}% usado</span>
             <span>${freePct.toFixed(1)}% livre</span>
           </div>
+          <div class="disk-sparkline-row">
+            ${_renderSparkline(d.path)}
+          </div>
 
           <div class="disk-content-info">
             <div class="disk-ci-item">
@@ -285,7 +344,10 @@
     if (!resp.ok) { showError('Servidor indisponível'); return; }
     const test = await fetch('/storage/disks', {headers: H()});
     if (test.status === 401) { showLogin(); }
-    else { load(); }
+    else {
+      load();
+      _autoRefresh = setInterval(load, 30000);
+    }
   }
   init();
 

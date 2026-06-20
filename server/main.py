@@ -1,5 +1,5 @@
 """
-NestVault  v7.0.0
+NestVault  v7.2.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -7,6 +7,15 @@ Otimizacoes de performance:
 - Indices no banco + WAL mode
 - Cleanup de orfaos em uma unica query
 - Limpeza de arquivos ao deletar label/versao feita em background (nao bloqueia o cliente)
+
+v7.2.0:
+- Progresso em tempo real para todas as operações de manutenção
+- ssd-cache-move: exibe "Movendo: X / Y arquivo(s) (Z%)" em tempo real
+- cleanup-by-date: progresso por lote "Removendo: X / Y versões (Z%)"
+- nightly-cleanup: status running no início com progresso label-a-label
+- encrypt-existing: convertido para background com progresso "Cifrando: X / Y (Z%)"
+- cleanup-orphans, rereplicate, reconcile-replication, cleanup-versions: passam a registrar no histórico de atividade
+- activity.html: labels adicionados para todos os tipos de job de manutenção
 """
 
 from fastapi import FastAPI, Request, HTTPException, Depends, Header, BackgroundTasks, Query
@@ -181,22 +190,38 @@ def _bg_process_ssd_pending_moves():
     db.add(job)
     db.commit()
     db.refresh(job)
+    job_id = job.id
     try:
-        total = 0
+        from database import SsdCachePendingMove
+        total_pending = db.query(SsdCachePendingMove).count()
+        processed = 0
+        if total_pending:
+            job.summary = f"Movendo: 0 / {total_pending} arquivo(s) (0%)"
+            db.commit()
+            invalidate_activity()
         while True:
             done = storage.process_ssd_pending_moves(db)
-            total += done
             if done == 0:
                 break
+            processed += done
+            if total_pending:
+                pct = round(processed / total_pending * 100)
+                job = db.get(MaintenanceJob, job_id)
+                job.summary = f"Movendo: {processed} / {total_pending} arquivo(s) ({pct}%)"
+                db.commit()
+                invalidate_activity()
         storage.reconcile_orphaned_ssd_copies(db)
+        job = db.get(MaintenanceJob, job_id)
         job.status = "done"
         job.finished_at = datetime.now()
-        job.summary = f"{total} arquivo(s) movidos SSD → HDD"
+        job.summary = f"{processed} arquivo(s) movidos SSD → HDD"
     except Exception as e:
         log.error(f"[ssd-cache] Erro no worker de move: {e}")
-        job.status = "error"
-        job.finished_at = datetime.now()
-        job.summary = str(e)
+        job = db.get(MaintenanceJob, job_id)
+        if job:
+            job.status = "error"
+            job.finished_at = datetime.now()
+            job.summary = str(e)
     finally:
         db.commit()
         invalidate_activity()
@@ -213,32 +238,43 @@ def _resume_ssd_pending_moves():
     db = SessionLocal()
     try:
         recovered = storage.recover_stuck_ssd_files(db)
-        count = db.query(SsdCachePendingMove).count()
-        if not count:
+        total_pending = db.query(SsdCachePendingMove).count()
+        if not total_pending:
             return
-        log.info(f"[ssd-cache] {count} move(s) pendentes encontrados — retomando")
-        summary_prefix = f"Recovery: {count} pendente(s)" + (f", {recovered} recuperado(s) do SSD" if recovered else "")
+        log.info(f"[ssd-cache] {total_pending} move(s) pendentes encontrados — retomando")
+        summary_prefix = f"Recovery: {total_pending} pendente(s)" + (f", {recovered} recuperado(s) do SSD" if recovered else "")
         job = MaintenanceJob(job_type="ssd-cache-move", status="running", summary=summary_prefix)
         db.add(job)
         db.commit()
         db.refresh(job)
-        total = 0
+        job_id = job.id
+        processed = 0
         while True:
             done = storage.process_ssd_pending_moves(db)
-            total += done
             if done == 0:
                 break
+            processed += done
+            pct = round(processed / total_pending * 100)
+            job = db.get(MaintenanceJob, job_id)
+            if job:
+                job.summary = f"Recovery: Movendo: {processed} / {total_pending} arquivo(s) ({pct}%)"
+                db.commit()
+                invalidate_activity()
         storage.reconcile_orphaned_ssd_copies(db)
-        job.status = "done"
-        job.finished_at = datetime.now()
-        job.summary = f"Recovery: {total} arquivo(s) movidos SSD → HDD"
-        log.info(f"[ssd-cache] recovery concluída — {total} arquivo(s) movidos para HDD")
+        job = db.get(MaintenanceJob, job_id)
+        if job:
+            job.status = "done"
+            job.finished_at = datetime.now()
+            job.summary = f"Recovery: {processed} arquivo(s) movidos SSD → HDD"
+        log.info(f"[ssd-cache] recovery concluída — {processed} arquivo(s) movidos para HDD")
     except Exception as e:
         log.error(f"[ssd-cache] Erro na recovery de moves pendentes: {e}")
-        if 'job' in locals():
-            job.status = "error"
-            job.finished_at = datetime.now()
-            job.summary = str(e)
+        if 'job_id' in locals():
+            job = db.get(MaintenanceJob, job_id)
+            if job:
+                job.status = "error"
+                job.finished_at = datetime.now()
+                job.summary = str(e)
     finally:
         db.commit()
         invalidate_activity()
@@ -288,7 +324,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="7.0.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="7.2.0", lifespan=lifespan)
 app.include_router(cloud_router)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
@@ -973,6 +1009,13 @@ def _bg_cleanup_by_date(version_ids: list[int], scope: str) -> None:
                 )
                 db.commit()
                 total_files += deleted_files
+                done_so_far = min(i + _CLEANUP_BY_DATE_BATCH, total)
+                pct = round(done_so_far / total * 100) if total else 100
+                mj = db.get(MaintenanceJob, mj_id)
+                if mj:
+                    mj.summary = f"Removendo: {done_so_far} / {total} versões ({pct}%)"
+                    db.commit()
+                    invalidate_activity()
                 log.debug(
                     f"[bg-cleanup-by-date] lote {i // _CLEANUP_BY_DATE_BATCH + 1}: "
                     f"{len(batch)} versão(ões), {deleted_files} VersionFile(s)"
@@ -2371,6 +2414,15 @@ def force_nightly_cleanup(background_tasks: BackgroundTasks):
 def force_cleanup_orphans(db: Session = Depends(get_db)):
     """Remove todos os FileContents nao referenciados por nenhuma versao ativa."""
     files_removed, bytes_freed = _cleanup_orphan_contents(db)
+    mj = MaintenanceJob(
+        job_type="cleanup-orphans",
+        status="done",
+        finished_at=datetime.now(),
+        summary=f"{files_removed} arquivo(s) removido(s) ({round(bytes_freed / 1024 / 1024, 2)} MB)",
+    )
+    db.add(mj)
+    db.commit()
+    invalidate_activity()
     return OrphanCleanupResponse(files_removed=files_removed, bytes_freed=bytes_freed)
 
 
@@ -2378,7 +2430,17 @@ def force_cleanup_orphans(db: Session = Depends(get_db)):
 def force_rereplicate(db: Session = Depends(get_db)):
     """Re-replica conteúdos com menos cópias que REPLICATION_FACTOR. Útil após adicionar um disco novo."""
     replicated, skipped = _rereplicate_all(db)
-    return RereplicateResponse(replicated=replicated, skipped=skipped, target_copies=_target_replicas())
+    target = _target_replicas()
+    mj = MaintenanceJob(
+        job_type="rereplicate",
+        status="done",
+        finished_at=datetime.now(),
+        summary=f"{replicated} replicado(s), {skipped} pulado(s) — fator alvo: {target}",
+    )
+    db.add(mj)
+    db.commit()
+    invalidate_activity()
+    return RereplicateResponse(replicated=replicated, skipped=skipped, target_copies=target)
 
 
 @app.post("/maintenance/reconcile-replication", response_model=ReconcileResponse, dependencies=[Depends(require_api_key)])
@@ -2386,11 +2448,21 @@ def reconcile_replication(db: Session = Depends(get_db)):
     """Remove cópias excedentes e preenche arquivos sub-replicados conforme REPLICATION_FACTOR."""
     cleaned = _cleanup_excess_copies(db)
     replicated, skipped = _rereplicate_all(db)
+    target = _target_replicas()
+    mj = MaintenanceJob(
+        job_type="reconcile-replication",
+        status="done",
+        finished_at=datetime.now(),
+        summary=f"{replicated} replicado(s), {cleaned} cópia(s) excedente(s) removida(s), {skipped} pulado(s) — fator alvo: {target}",
+    )
+    db.add(mj)
+    db.commit()
+    invalidate_activity()
     return ReconcileResponse(
         replicated=replicated,
         skipped=skipped,
         cleaned=cleaned,
-        target_copies=_target_replicas(),
+        target_copies=target,
     )
 
 
@@ -2450,73 +2522,112 @@ def validate_integrity(background_tasks: BackgroundTasks, db: Session = Depends(
     return {"scheduled": True, "job_id": mj.id}
 
 
-@app.post("/maintenance/encrypt-existing", response_model=EncryptExistingResponse, dependencies=[Depends(require_api_key)])
-def encrypt_existing_files(db: Session = Depends(get_db)):
+def _bg_encrypt_existing(job_id: int) -> None:
+    db = SessionLocal()
+    try:
+        degraded_strs = [str(v) for v in _degraded_volumes]
+        pending       = db.query(FileContent).filter(FileContent.encrypted == False).all()  # noqa: E712
+        total         = len(pending)
+        log.info(f"[encrypt-existing] {total} arquivo(s) pendente(s) de cifragem")
+
+        mj = db.get(MaintenanceJob, job_id)
+        if mj:
+            mj.summary = f"Cifrando: 0 / {total} arquivo(s) (0%)"
+            db.commit()
+            invalidate_activity()
+
+        pending_shas = [fc.sha256 for fc in pending]
+        copies_q = db.query(FileContentCopy).filter(FileContentCopy.sha256.in_(pending_shas))
+        if degraded_strs:
+            copies_q = copies_q.filter(~FileContentCopy.volume_path.in_(degraded_strs))
+        encrypt_copies_by_sha: dict[str, list] = {}
+        for c in copies_q.all():
+            encrypt_copies_by_sha.setdefault(c.sha256, []).append(c)
+
+        files_encrypted = 0
+        bytes_processed = 0
+        skipped         = 0
+
+        for i, fc in enumerate(pending, 1):
+            copies = encrypt_copies_by_sha.get(fc.sha256, [])
+
+            if not copies:
+                log.warning(f"[encrypt-existing] [{i}/{total}] {fc.sha256[:8]}… sem cópia acessível — pulando")
+                skipped += 1
+                continue
+
+            size_mb = fc.size / 1024 / 1024
+            log.info(f"[encrypt-existing] [{i}/{total}] {fc.sha256[:8]}… ({size_mb:.2f} MB) — {len(copies)} cópia(s)")
+
+            success = True
+            for copy in copies:
+                p = Path(copy.stored_at)
+                if not p.exists():
+                    log.warning(f"[encrypt-existing] [{i}/{total}] arquivo físico não encontrado em {copy.volume_path} — pulando cópia")
+                    continue
+                log.info(f"[encrypt-existing] [{i}/{total}] cifrando cópia em {copy.volume_path}")
+                tmp_enc = p.parent / f"_enc_{os.urandom(4).hex()}"
+                try:
+                    crypto.encrypt_stream(p, tmp_enc, storage.encryption_key)
+                    shutil.move(str(tmp_enc), str(p))
+                    log.info(f"[encrypt-existing] [{i}/{total}] cópia em {copy.volume_path} cifrada com sucesso")
+                except Exception as e:
+                    log.warning(f"[encrypt-existing] [{i}/{total}] erro em {p}: {e}")
+                    tmp_enc.unlink(missing_ok=True)
+                    success = False
+                    break
+
+            if success:
+                fc.encrypted = True
+                files_encrypted += 1
+                bytes_processed += fc.size
+                db.commit()
+                log.info(f"[encrypt-existing] [{i}/{total}] {fc.sha256[:8]}… concluído")
+            else:
+                skipped += 1
+
+            pct = round(i / total * 100) if total else 100
+            mj = db.get(MaintenanceJob, job_id)
+            if mj:
+                mj.summary = f"Cifrando: {i} / {total} arquivo(s) ({pct}%)"
+                db.commit()
+                invalidate_activity()
+
+        log.info(f"[encrypt-existing] concluído — {files_encrypted} cifrado(s), {skipped} pulado(s), {bytes_processed / 1024 / 1024:.2f} MB processados")
+        mj = db.get(MaintenanceJob, job_id)
+        if mj:
+            mj.status = "done"
+            mj.finished_at = datetime.now()
+            mj.summary = f"{files_encrypted} arquivo(s) cifrado(s), {skipped} pulado(s) — {bytes_processed / 1024 / 1024:.1f} MB"
+            db.commit()
+    except Exception as e:
+        log.exception("[encrypt-existing] erro no background")
+        mj = db.get(MaintenanceJob, job_id)
+        if mj:
+            mj.status = "error"
+            mj.finished_at = datetime.now()
+            mj.summary = f"Erro: {e}"
+            db.commit()
+    finally:
+        invalidate_activity()
+        db.close()
+
+
+@app.post("/maintenance/encrypt-existing", dependencies=[Depends(require_api_key)])
+def encrypt_existing_files(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """Cifra todos os FileContents ainda não cifrados. Requer ENCRYPTION_ENABLED=true no servidor."""
     if not ENCRYPTION_ENABLED:
         raise HTTPException(400, "Criptografia não habilitada no servidor (ENCRYPTION_ENABLED=false)")
-
-    pending       = db.query(FileContent).filter(FileContent.encrypted == False).all()  # noqa: E712
-    degraded_strs = [str(v) for v in _degraded_volumes]
-    files_encrypted = 0
-    bytes_processed = 0
-    skipped         = 0
-    total           = len(pending)
-
-    log.info(f"[encrypt-existing] {total} arquivo(s) pendente(s) de cifragem")
-
-    pending_shas = [fc.sha256 for fc in pending]
-    copies_q = db.query(FileContentCopy).filter(FileContentCopy.sha256.in_(pending_shas))
-    if degraded_strs:
-        copies_q = copies_q.filter(~FileContentCopy.volume_path.in_(degraded_strs))
-    encrypt_copies_by_sha: dict[str, list] = {}
-    for c in copies_q.all():
-        encrypt_copies_by_sha.setdefault(c.sha256, []).append(c)
-
-    for i, fc in enumerate(pending, 1):
-        copies = encrypt_copies_by_sha.get(fc.sha256, [])
-
-        if not copies:
-            log.warning(f"[encrypt-existing] [{i}/{total}] {fc.sha256[:8]}… sem cópia acessível — pulando")
-            skipped += 1
-            continue
-
-        size_mb = fc.size / 1024 / 1024
-        log.info(f"[encrypt-existing] [{i}/{total}] {fc.sha256[:8]}… ({size_mb:.2f} MB) — {len(copies)} cópia(s)")
-
-        success = True
-        for copy in copies:
-            p = Path(copy.stored_at)
-            if not p.exists():
-                log.warning(f"[encrypt-existing] [{i}/{total}] arquivo físico não encontrado em {copy.volume_path} — pulando cópia")
-                continue
-            log.info(f"[encrypt-existing] [{i}/{total}] cifrando cópia em {copy.volume_path}")
-            tmp_enc = p.parent / f"_enc_{os.urandom(4).hex()}"
-            try:
-                crypto.encrypt_stream(p, tmp_enc, storage.encryption_key)
-                shutil.move(str(tmp_enc), str(p))
-                log.info(f"[encrypt-existing] [{i}/{total}] cópia em {copy.volume_path} cifrada com sucesso")
-            except Exception as e:
-                log.warning(f"[encrypt-existing] [{i}/{total}] erro em {p}: {e}")
-                tmp_enc.unlink(missing_ok=True)
-                success = False
-                break
-
-        if success:
-            fc.encrypted = True
-            db.commit()  # persiste por arquivo — retomada segura se interrompido
-            bytes_processed += fc.size
-            files_encrypted += 1
-            log.info(f"[encrypt-existing] [{i}/{total}] {fc.sha256[:8]}… concluído")
-        else:
-            skipped += 1
-
-    log.info(f"[encrypt-existing] concluído — {files_encrypted} cifrado(s), {skipped} pulado(s), {bytes_processed / 1024 / 1024:.2f} MB processados")
-    return EncryptExistingResponse(
-        files_encrypted=files_encrypted,
-        bytes_processed=bytes_processed,
-        skipped=skipped,
+    mj = MaintenanceJob(
+        job_type="encrypt-existing",
+        status="running",
+        summary="Iniciando cifragem de arquivos...",
     )
+    db.add(mj)
+    db.commit()
+    db.refresh(mj)
+    background_tasks.add_task(_bg_encrypt_existing, mj.id)
+    return {"scheduled": True, "job_id": mj.id}
 
 
 # -- Cleanup ------------------------------------------------------------------
@@ -2549,6 +2660,15 @@ def cleanup_versions(label: str, req: CleanupRequest, db: Session = Depends(get_
     db.commit()
     orphans_removed, _ = _cleanup_orphan_contents(db)
     log.info(f"[cleanup] {label}: {orphans_removed} arquivo(s) de storage removidos")
+    mj = MaintenanceJob(
+        job_type="cleanup-versions",
+        status="done",
+        finished_at=datetime.now(),
+        summary=f"{label}: {len(keys_removed)} versão(ões) removida(s), {orphans_removed} arquivo(s) de storage liberado(s)",
+    )
+    db.add(mj)
+    db.commit()
+    invalidate_activity()
     return CleanupResponse(
         kept=req.keep,
         versions_removed=keys_removed,

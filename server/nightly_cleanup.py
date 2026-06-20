@@ -220,6 +220,16 @@ def validate_latest_versions_integrity(db, log_fn=None) -> dict:
 def run_nightly_cleanup() -> None:
     """Executa a limpeza noturna de versões conforme política de retenção."""
     db = SessionLocal()
+    mj = MaintenanceJob(
+        job_type="nightly-cleanup",
+        status="running",
+        summary="Iniciando limpeza noturna...",
+    )
+    db.add(mj)
+    db.commit()
+    db.refresh(mj)
+    mj_id = mj.id
+    invalidate_activity()
     try:
         now = datetime.now()
         stale_cutoff = now - _ONE_WEEK
@@ -227,6 +237,7 @@ def run_nightly_cleanup() -> None:
         log.info("[nightly-cleanup] iniciando limpeza noturna")
 
         labels = [row[0] for row in db.query(BackupID.label).all()]
+        total_labels = len(labels)
 
         total_stale   = 0
         total_day     = 0
@@ -234,7 +245,13 @@ def run_nightly_cleanup() -> None:
         total_month   = 0
         labels_touched = 0
 
-        for label in labels:
+        for idx, label in enumerate(labels, 1):
+            mj = db.get(MaintenanceJob, mj_id)
+            if mj:
+                mj.summary = f"Processando label {idx} / {total_labels}: {label}"
+                db.commit()
+                invalidate_activity()
+
             versions = (
                 db.query(BackupVersion)
                 .filter(BackupVersion.backup_label == label)
@@ -290,9 +307,19 @@ def run_nightly_cleanup() -> None:
         total_removed = total_stale + total_day + total_week + total_month
 
         # Limpeza de conteúdos órfãos após todas as exclusões
+        mj = db.get(MaintenanceJob, mj_id)
+        if mj:
+            mj.summary = "Limpando arquivos órfãos..."
+            db.commit()
+            invalidate_activity()
         orphans_removed, bytes_freed = _cleanup_orphan_contents(db)
 
         # Validação de integridade das últimas versões done
+        mj = db.get(MaintenanceJob, mj_id)
+        if mj:
+            mj.summary = "Verificando integridade das últimas versões..."
+            db.commit()
+            invalidate_activity()
         integrity = validate_latest_versions_integrity(db)
         if integrity["invalidated"]:
             _integrity_note = (
@@ -326,27 +353,23 @@ def run_nightly_cleanup() -> None:
             summary = "Nenhuma versão removida — política de retenção satisfeita" + _integrity_note
             log.info(f"[nightly-cleanup] {summary}")
 
-        mj = MaintenanceJob(
-            job_type="nightly-cleanup",
-            status="done",
-            finished_at=datetime.now(),
-            summary=summary,
-        )
-        db.add(mj)
-        db.commit()
+        mj = db.get(MaintenanceJob, mj_id)
+        if mj:
+            mj.status = "done"
+            mj.finished_at = datetime.now()
+            mj.summary = summary
+            db.commit()
         invalidate_activity()
 
     except Exception:
         log.exception("[nightly-cleanup] Erro durante limpeza noturna")
         try:
-            mj = MaintenanceJob(
-                job_type="nightly-cleanup",
-                status="failed",
-                finished_at=datetime.now(),
-                summary="Erro durante execução — ver logs do servidor",
-            )
-            db.add(mj)
-            db.commit()
+            mj = db.get(MaintenanceJob, mj_id)
+            if mj:
+                mj.status = "failed"
+                mj.finished_at = datetime.now()
+                mj.summary = "Erro durante execução — ver logs do servidor"
+                db.commit()
             invalidate_activity()
         except Exception:
             pass

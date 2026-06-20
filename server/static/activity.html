@@ -125,6 +125,19 @@
   .loading::after{content:'...';animation:dots 1.2s steps(4,end) infinite}
   @keyframes dots{0%,20%{content:'.'}40%{content:'..'}60%,100%{content:'...'}}
 
+  /* Status filter toggles */
+  .status-filters{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+  .sf-btn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:3px 10px;font-family:var(--mono);font-size:10px;cursor:pointer;letter-spacing:.06em;transition:all .15s;min-height:28px;user-select:none}
+  .sf-btn:hover{border-color:var(--amber);color:var(--amber)}
+  .sf-btn.active{border-color:var(--amber);color:var(--amber);background:color-mix(in srgb,var(--amber) 8%,transparent)}
+  .sf-btn.filter-done.active{border-color:var(--green);color:var(--green);background:color-mix(in srgb,var(--green) 8%,transparent)}
+  .sf-btn.filter-failed.active{border-color:var(--red);color:var(--red);background:color-mix(in srgb,var(--red) 8%,transparent)}
+  .sf-btn.filter-running.active{border-color:var(--amber);color:var(--amber)}
+
+  /* Notification banner */
+  .notif-bar{display:none;background:color-mix(in srgb,var(--blue) 10%,var(--bg2));border:1px solid var(--blue-dim);padding:8px 18px;font-size:11px;color:var(--blue);align-items:center;gap:10px;margin-bottom:12px}
+  .notif-bar.visible{display:flex}
+
   /* Login overlay */
   .login-overlay{position:fixed;inset:0;background:var(--overlay-bg);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
   .login-box{border:1px solid var(--border2);border-top:2px solid var(--amber);background:var(--bg2);padding:40px 48px;width:min(400px,calc(100vw - 32px));animation:fadeUp .3s ease}
@@ -209,9 +222,22 @@
   </div>
 
   <!-- Atividade recente -->
-  <div class="section-head" style="margin-bottom:10px">
+  <div class="section-head" style="margin-bottom:8px">
     <div class="section-title">Atividade recente</div>
     <span class="section-sub">últimas 24h</span>
+  </div>
+  <div class="notif-bar" id="notifBar">
+    🔔 Notificações de backup inativas —
+    <button class="sf-btn" onclick="requestNotifPermission()" style="min-height:24px;font-size:10px">Permitir</button>
+    <button class="sf-btn" onclick="document.getElementById('notifBar').classList.remove('visible')" style="min-height:24px;border:none;opacity:.5">✕</button>
+  </div>
+  <div class="status-filters" id="statusFilters">
+    <span style="font-size:10px;color:var(--text-mute);letter-spacing:.06em;align-self:center">Filtrar:</span>
+    <button class="sf-btn active" data-filter="all" onclick="setStatusFilter('all')">Todos</button>
+    <button class="sf-btn filter-done" data-filter="done" onclick="setStatusFilter('done')">done</button>
+    <button class="sf-btn filter-failed" data-filter="failed" onclick="setStatusFilter('failed')">failed</button>
+    <button class="sf-btn" data-filter="incomplete" onclick="setStatusFilter('incomplete')">incomplete</button>
+    <button class="sf-btn filter-running" data-filter="running" onclick="setStatusFilter('running')">running</button>
   </div>
   <div id="recentSection">
     <div class="loading">Carregando</div>
@@ -234,6 +260,8 @@
 
 <script>
   let API_KEY = localStorage.getItem('backupApiKey') || '';
+  let _statusFilter = 'all';
+  let _lastVersionStatuses = {};  // label -> status (para notificações)
   const H = () => ({'X-API-Key': API_KEY});
 
   const fmtSize = b => {
@@ -296,6 +324,65 @@
     localStorage.removeItem('backupApiKey'); API_KEY = ''; showLogin();
   });
 
+  // Status filter
+  function setStatusFilter(f) {
+    _statusFilter = f;
+    document.querySelectorAll('#statusFilters .sf-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.filter === f);
+    });
+    applyStatusFilter();
+  }
+
+  function applyStatusFilter() {
+    const tbl = document.querySelector('#recentSection .table-section table tbody');
+    if (!tbl) return;
+    tbl.querySelectorAll('tr').forEach(tr => {
+      if (_statusFilter === 'all') { tr.style.display = ''; return; }
+      const badge = tr.querySelector('.badge');
+      const status = badge ? badge.textContent.trim() : '';
+      tr.style.display = status === _statusFilter ? '' : 'none';
+    });
+  }
+
+  // Browser notifications
+  function requestNotifPermission() {
+    if (!('Notification' in window)) return;
+    Notification.requestPermission().then(p => {
+      if (p === 'granted') document.getElementById('notifBar').classList.remove('visible');
+    });
+  }
+
+  function _showNotifBannerIfNeeded() {
+    if (!('Notification' in window)) return;
+    if (Notification.permission === 'default') {
+      document.getElementById('notifBar').classList.add('visible');
+    }
+  }
+
+  function _checkNotifications(runningVersions, recentVersions) {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    recentVersions.forEach(v => {
+      const key = v.backup_label + '/' + v.version_key;
+      const prev = _lastVersionStatuses[key];
+      if (prev === 'running' && v.status === 'done') {
+        new Notification('NestVault — Backup concluído', {
+          body: v.backup_label + ' · ' + v.file_count.toLocaleString('pt-BR') + ' arq.',
+          icon: '/static/icon-192.png',
+        });
+      } else if (prev === 'running' && v.status === 'failed') {
+        new Notification('NestVault — Backup com falha', {
+          body: v.backup_label + ' falhou',
+          icon: '/static/icon-192.png',
+        });
+      }
+      _lastVersionStatuses[key] = v.status;
+    });
+    runningVersions.forEach(v => {
+      const key = v.backup_label + '/' + v.version_key;
+      _lastVersionStatuses[key] = 'running';
+    });
+  }
+
   // Polling
   let _pollTimer = null;
   let _lastUpdateTime = null;
@@ -336,17 +423,26 @@
 
   // Render
   function render(data) {
+    _checkNotifications(data.running_versions || [], data.recent_versions || []);
     renderRunning(data.running_versions, data.running_jobs, data.maintenance_jobs || []);
     renderStorage(data.storage, data.disks);
     renderRecent(data.recent_versions, data.recent_jobs, data.maintenance_jobs || []);
+    setTimeout(applyStatusFilter, 0);
+    if (typeof _updateOverflowHints === 'function') _updateOverflowHints();
   }
 
   const JOB_TYPE_LABELS = {
-    'cleanup-by-date': 'Limpeza por data',
-    'auto-cleanup':    'Limpeza automática',
-    'cleanup-orphans': 'Limpeza de órfãos',
-    'disk-migration':  'Migração de Disco',
-    'ssd-cache-move':  'SSD Cache → HDD',
+    'cleanup-by-date':       'Limpeza por data',
+    'auto-cleanup':          'Limpeza automática',
+    'cleanup-orphans':       'Limpeza de órfãos',
+    'cleanup-versions':      'Limpeza de versões',
+    'disk-migration':        'Migração de Disco',
+    'ssd-cache-move':        'SSD Cache → HDD',
+    'nightly-cleanup':       'Limpeza Noturna',
+    'validate-integrity':    'Verificação de Integridade',
+    'encrypt-existing':      'Cifragem de Arquivos',
+    'rereplicate':           'Replicação',
+    'reconcile-replication': 'Reconciliação de Réplicas',
   };
 
   function renderRunning(versions, jobs, maintJobs) {
@@ -470,7 +566,7 @@
         <td class="td-r td-dim">${v.file_count.toLocaleString('pt-BR')}</td>
         <td class="td-r td-dim td-nb">${fmtDuration(v.duration_seconds)}</td>
         <td class="td-nb">${fmtDiff(v)}</td>
-        <td class="td-dim td-nb">${fmtDate(v.finished_at)}</td>
+        <td class="td-dim td-nb">${window.relTime ? relTime(v.finished_at) : fmtDate(v.finished_at)}</td>
       </tr>`).join('');
 
     const jRows = jobs.map(j => `
@@ -481,7 +577,7 @@
         <td>${esc(j.target_label)}</td>
         <td>${badge(j.last_run_status)}</td>
         <td class="td-dim" title="${esc(j.last_run_message||'')}">${esc((j.last_run_message||'').slice(0,60)||'—')}</td>
-        <td class="td-dim td-nb">${fmtDate(j.last_run_at)}</td>
+        <td class="td-dim td-nb">${window.relTime ? relTime(j.last_run_at) : fmtDate(j.last_run_at)}</td>
       </tr>`).join('');
 
     const mRows = recentMaint.map(m => {
@@ -493,7 +589,7 @@
         <td>${badge(m.status)}</td>
         <td class="td-dim">${esc(m.summary || '—')}</td>
         <td class="td-r td-dim td-nb">${dur}</td>
-        <td class="td-dim td-nb">${fmtDate(m.finished_at)}</td>
+        <td class="td-dim td-nb">${window.relTime ? relTime(m.finished_at) : fmtDate(m.finished_at)}</td>
       </tr>`;
     }).join('');
 
@@ -555,6 +651,7 @@
     const resp = await fetch('/health');
     if (!resp.ok) { showError('Servidor indisponível'); return; }
     _startTick();
+    _showNotifBannerIfNeeded();
     poll();
   }
   init();

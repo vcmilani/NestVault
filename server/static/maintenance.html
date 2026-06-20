@@ -98,6 +98,22 @@
   .login-btn{width:100%;background:var(--amber);border:none;color:var(--bg);font-family:var(--mono);font-size:11px;font-weight:500;letter-spacing:.08em;padding:10px;cursor:pointer;text-transform:uppercase}
   .login-btn:hover{opacity:.9}
 
+  /* Modal de confirmação customizado */
+  #confirmModal{position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:450;display:none;place-items:center;padding:16px}
+  #confirmModal.visible{display:grid}
+  .confirm-box{background:var(--bg2);border:1px solid var(--red);border-top:3px solid var(--red);padding:28px 32px;width:100%;max-width:440px}
+  .confirm-title{font-size:12px;font-weight:500;letter-spacing:.1em;text-transform:uppercase;color:var(--red);margin-bottom:12px}
+  .confirm-msg{font-size:12px;color:var(--text-dim);line-height:1.7;margin-bottom:18px;white-space:pre-wrap}
+  .confirm-word-label{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);margin-bottom:6px}
+  .confirm-word-input{width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:12px;padding:8px 12px;outline:none;margin-bottom:16px;box-sizing:border-box}
+  .confirm-word-input:focus{border-color:var(--red)}
+  .confirm-actions{display:flex;gap:10px;justify-content:flex-end}
+  .confirm-cancel{background:none;border:1px solid var(--border2);color:var(--text-dim);font-family:var(--mono);font-size:11px;padding:7px 16px;cursor:pointer;transition:all .15s}
+  .confirm-cancel:hover{border-color:var(--amber);color:var(--amber)}
+  .confirm-ok{background:var(--red-dim);border:1px solid var(--red);color:var(--red);font-family:var(--mono);font-size:11px;padding:7px 16px;cursor:pointer;transition:all .15s}
+  .confirm-ok:hover:not(:disabled){background:var(--red);color:var(--bg)}
+  .confirm-ok:disabled{opacity:.35;cursor:not-allowed}
+
   /* migrar disco — modal */
   #migrateModal{position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:400;display:none;place-items:center;padding:16px}
   #migrateModal.visible{display:grid}
@@ -434,6 +450,23 @@
   </div>
 </main>
 
+<!-- Modal de confirmação para operações irreversíveis -->
+<div id="confirmModal">
+  <div class="confirm-box">
+    <div class="confirm-title" id="confirmTitle">Confirmar operação</div>
+    <div class="confirm-msg" id="confirmMsg"></div>
+    <div id="confirmWordWrap" style="display:none">
+      <div class="confirm-word-label" id="confirmWordLabel">Digite para confirmar</div>
+      <input class="confirm-word-input" id="confirmWordInput" autocomplete="off"
+             placeholder="" oninput="_onConfirmWordInput()">
+    </div>
+    <div class="confirm-actions">
+      <button class="confirm-cancel" onclick="_rejectConfirm()">Cancelar</button>
+      <button class="confirm-ok" id="confirmOkBtn" onclick="_acceptConfirm()">Confirmar</button>
+    </div>
+  </div>
+</div>
+
 <!-- Modal de migração de disco -->
 <div id="migrateModal">
   <div class="migrate-box">
@@ -470,6 +503,52 @@ let API_KEY = localStorage.getItem('backupApiKey') || '';
 
 const H = () => ({'X-API-Key': API_KEY});
 
+// ── Modal de confirmação customizado ─────────────────────────────────────
+let _confirmResolve = null;
+let _confirmWord    = null;
+
+function nvConfirm(title, message, opts) {
+  return new Promise(resolve => {
+    _confirmResolve = resolve;
+    _confirmWord    = opts && opts.word ? opts.word : null;
+
+    document.getElementById('confirmTitle').textContent  = title;
+    document.getElementById('confirmMsg').textContent    = message;
+    document.getElementById('confirmWordInput').value    = '';
+    document.getElementById('confirmOkBtn').disabled     = !!_confirmWord;
+
+    const wordWrap = document.getElementById('confirmWordWrap');
+    if (_confirmWord) {
+      document.getElementById('confirmWordLabel').textContent =
+        'Digite "' + _confirmWord + '" para confirmar:';
+      document.getElementById('confirmWordInput').placeholder = _confirmWord;
+      wordWrap.style.display = 'block';
+    } else {
+      wordWrap.style.display = 'none';
+      document.getElementById('confirmOkBtn').disabled = false;
+    }
+    document.getElementById('confirmModal').classList.add('visible');
+  });
+}
+
+function _onConfirmWordInput() {
+  const val = document.getElementById('confirmWordInput').value;
+  document.getElementById('confirmOkBtn').disabled = val !== _confirmWord;
+}
+
+function _acceptConfirm() {
+  document.getElementById('confirmModal').classList.remove('visible');
+  if (_confirmResolve) { _confirmResolve(true); _confirmResolve = null; }
+}
+
+function _rejectConfirm() {
+  document.getElementById('confirmModal').classList.remove('visible');
+  if (_confirmResolve) { _confirmResolve(false); _confirmResolve = null; }
+}
+document.getElementById('confirmModal').addEventListener('click', e => {
+  if (e.target === document.getElementById('confirmModal')) _rejectConfirm();
+});
+
 const OPS = {
   nightly:    {endpoint: '/maintenance/nightly-cleanup',       confirm: false},
   orphans:    {endpoint: '/maintenance/cleanup-orphans',       confirm: false},
@@ -489,8 +568,8 @@ function fmtBytes(b) {
 }
 
 function fmtResult(key, data) {
+  if (data.scheduled) return 'Operação iniciada — acompanhe nas atividades em execução';
   if (key === 'integrity') {
-    if (data.scheduled) return 'Verificação iniciada — acompanhe nas atividades em execução';
     const parts = [`${data.checked} versão(ões) verificadas`, `${data.invalidated} invalidada(s)`];
     if (data.files_removed) parts.push(`${data.files_removed} arquivo(s) removido(s)`);
     return parts.join(' · ');
@@ -528,7 +607,9 @@ function showSuccess(key, html) {
   const res = document.getElementById('result-'+key);
   const ts = new Date().toLocaleTimeString('pt-BR');
   res.className = 'op-result success';
-  res.innerHTML = html + `<span class="result-ts">${ts}</span>`;
+  const actLink = html.includes('background') || html.includes('acompanhe')
+    ? '' : ' · <a href="/activity" style="color:var(--green);font-size:9px">◎ Atividade</a>';
+  res.innerHTML = html + actLink + `<span class="result-ts">${ts}</span>`;
 }
 
 function showError(key, msg) {
@@ -548,10 +629,13 @@ async function apiCall(method, url, body) {
 
 async function runOp(key) {
   const op = OPS[key];
-  if (op.confirm && !confirm(op.confirmMsg)) return;
-  if (op.confirmWord) {
-    const typed = prompt(`Digite "${op.confirmWord}" para confirmar:`);
-    if (typed !== op.confirmWord) { if (typed !== null) showError(key, `Confirmação incorreta — digite exatamente "${op.confirmWord}".`); return; }
+  if (op.confirm) {
+    const ok = await nvConfirm(
+      'Confirmar operação',
+      op.confirmMsg,
+      op.confirmWord ? { word: op.confirmWord } : null
+    );
+    if (!ok) return;
   }
 
   setRunning(key, true);
@@ -603,9 +687,14 @@ async function runDeleteLabel() {
   const label   = document.getElementById('delete-label-select').value;
   const typed   = document.getElementById('delete-label-confirm').value.trim();
 
-  if (!label)        { showError('delete-label', 'Selecione um label.'); return; }
+  if (!label)          { showError('delete-label', 'Selecione um label.'); return; }
   if (typed !== label) { showError('delete-label', 'Nome digitado não confere com o label selecionado.'); return; }
-  if (!confirm(`Excluir permanentemente o label "${label}" e TODAS as suas versões?\n\nEssa ação é IRREVERSÍVEL.`)) return;
+  const ok = await nvConfirm(
+    'Excluir label permanentemente',
+    `Esta ação removerá o label "${label}" e TODAS as suas versões e arquivos.\n\nOperação IRREVERSÍVEL — não pode ser desfeita.`,
+    { word: label }
+  );
+  if (!ok) return;
 
   setRunning('delete-label', true, '✕ Excluir');
   try {
@@ -706,7 +795,12 @@ async function runCleanupByDate() {
   if (!before) return;
 
   const scopeMsg = label ? `label "${label}"` : 'todos os labels';
-  if (!confirm(`Excluir permanentemente todas as versões anteriores a ${before} em ${scopeMsg}?\n\nA versão done mais recente de cada label será preservada.\n\nEssa ação é IRREVERSÍVEL.`)) return;
+  const ok2 = await nvConfirm(
+    'Excluir versões por data',
+    `Excluir todas as versões anteriores a ${before} em ${scopeMsg}?\n\nA versão done mais recente de cada label será preservada.\n\nOperação IRREVERSÍVEL.`,
+    { word: 'EXCLUIR' }
+  );
+  if (!ok2) return;
 
   setRunning('cleanupdate', true, '✕ Excluir versões');
   try {
@@ -901,7 +995,11 @@ async function runMigrate() {
 
   const sourceShort = source.split('/').filter(Boolean).slice(-2).join('/');
   const destShorts  = dests.map(d => d.split('/').filter(Boolean).slice(-2).join('/')).join(', ');
-  if (!confirm(`Mover TODOS os dados de /${sourceShort} para: ${destShorts}?\n\nA cópia original só será removida após verificação de integridade.\n\nA migração ocorre em background — acompanhe em ◎ Atividade.`)) return;
+  const okMig = await nvConfirm(
+    'Migrar disco',
+    `Mover TODOS os dados de /${sourceShort} para: ${destShorts}?\n\nA cópia original só será removida após verificação de integridade SHA-256.\nA migração ocorre em background.`
+  );
+  if (!okMig) return;
 
   document.getElementById('migrate-btn-confirm').disabled = true;
   document.getElementById('migrate-btn-preview').disabled = true;
