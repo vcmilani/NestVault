@@ -88,6 +88,21 @@
 }
 .mobile-nav-backdrop.open { display: block; }
 
+/* Active nav button — highlights current page link */
+.hbtn.active { border-color: var(--amber); color: var(--amber); }
+
+/* Horizontal overflow scroll hint for wide tables */
+.table-wrap { position: relative; }
+.table-wrap.has-h-overflow::after {
+  content: '';
+  position: absolute;
+  top: 0; right: 0; bottom: 0;
+  width: 48px;
+  background: linear-gradient(to right, transparent, var(--bg2));
+  pointer-events: none;
+  z-index: 2;
+}
+
 /* ── Breakpoint: show hamburger, hide nav buttons ── */
 @media(max-width:768px) {
   .nav-hamburger { display: flex; }
