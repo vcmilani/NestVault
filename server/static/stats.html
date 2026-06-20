@@ -42,11 +42,12 @@
   .section-sub{font-size:10px;color:var(--text-mute);letter-spacing:.06em}
 
   /* Stats bar */
-  .stats-bar{display:grid;grid-template-columns:repeat(6,1fr);gap:1px;border:1px solid var(--border);margin-bottom:28px;background:var(--border)}
+  .stats-bar{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;border:1px solid var(--border);margin-bottom:28px;background:var(--border)}
   .stat-box{background:var(--bg2);padding:18px 22px;position:relative;overflow:hidden;animation:fadeUp .4s ease both}
   .stat-box:nth-child(1){animation-delay:.05s}.stat-box:nth-child(2){animation-delay:.10s}
   .stat-box:nth-child(3){animation-delay:.15s}.stat-box:nth-child(4){animation-delay:.20s}
   .stat-box:nth-child(5){animation-delay:.25s}.stat-box:nth-child(6){animation-delay:.30s}
+  .stat-box:nth-child(7){animation-delay:.35s}.stat-box:nth-child(8){animation-delay:.40s}
   .stat-box::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:var(--amber);transform:scaleX(0);transform-origin:left;transition:transform .3s}
   .stat-box:hover::before{transform:scaleX(1)}
   .stat-label{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim);margin-bottom:8px}
@@ -166,7 +167,7 @@
     header{padding:0 16px}
     .header-right{gap:10px}
     .hbtn{min-height:40px;padding:8px 10px}
-    .stats-bar{grid-template-columns:repeat(3,1fr)}
+    .stats-bar{grid-template-columns:repeat(2,1fr)}
     .storage-nums{grid-template-columns:1fr 1fr}
     .login-input{font-size:16px}
   }
@@ -249,6 +250,16 @@
       <div class="stat-label">Duração Média</div>
       <div class="stat-value" id="sAvgDur">—</div>
       <div class="stat-sub">por versão</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-label">Novos Labels (30d)</div>
+      <div class="stat-value" id="sLabels30d">—</div>
+      <div class="stat-sub">labels criados</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-label">Versões Removidas</div>
+      <div class="stat-value" id="sVersionsCleaned">—</div>
+      <div class="stat-sub" id="sVersionsCleanedSub">por limpeza</div>
     </div>
   </div>
 
@@ -423,6 +434,11 @@
     document.getElementById('sDedup').textContent = d.dedup_ratio.toFixed(2)+'×';
     document.getElementById('sSuccess').textContent = d.version_success_rate.toFixed(1)+'%';
     document.getElementById('sAvgDur').textContent = fmtDuration(d.avg_duration_seconds);
+    document.getElementById('sLabels30d').textContent = d.labels_created_30d.toLocaleString('pt-BR');
+    document.getElementById('sVersionsCleaned').textContent = d.versions_cleaned_total.toLocaleString('pt-BR');
+    if (d.bytes_freed_by_cleanup > 0) {
+      document.getElementById('sVersionsCleanedSub').textContent = fmtSize(d.bytes_freed_by_cleanup)+' liberados';
+    }
   }
 
   function renderStorage(d) {

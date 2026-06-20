@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
-import asyncio, os, hashlib, secrets, base64, shutil, logging, time, threading
+import asyncio, os, hashlib, secrets, base64, shutil, logging, time, threading, re
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
@@ -663,6 +663,9 @@ class StatsResponse(BaseModel):
     cloud_jobs: list[CloudJobStat]
     rclone_total: int
     rclone_enabled: int
+    labels_created_30d: int
+    versions_cleaned_total: int
+    bytes_freed_by_cleanup: int
     server_time: str
 
 
@@ -1521,6 +1524,32 @@ def _build_stats_data(db: Session) -> StatsResponse:
     rclone_total   = int(rclone_row.total   or 0) if rclone_row else 0
     rclone_enabled = int(rclone_row.enabled or 0) if rclone_row else 0
 
+    # --- Q9: ciclo de vida dos labels ---
+    labels_created_30d = db.query(func.count(BackupID.id)).filter(
+        BackupID.created_at >= cutoff
+    ).scalar() or 0
+
+    _cleanup_types = ["cleanup-by-date", "auto-cleanup", "cleanup-versions", "nightly-cleanup"]
+    cleanup_summaries = db.query(MaintenanceJob.summary).filter(
+        MaintenanceJob.job_type.in_(_cleanup_types),
+        MaintenanceJob.status == "done",
+        MaintenanceJob.summary.isnot(None),
+    ).all()
+
+    _re_ver = re.compile(r'(\d+) versão\(ões\) removidas')
+    _re_mb  = re.compile(r'\(([\d.]+) MB\)')
+    versions_cleaned_total = 0
+    bytes_freed_by_cleanup = 0
+    for (summary,) in cleanup_summaries:
+        if not summary:
+            continue
+        m = _re_ver.search(summary)
+        if m:
+            versions_cleaned_total += int(m.group(1))
+        m2 = _re_mb.search(summary)
+        if m2:
+            bytes_freed_by_cleanup += int(float(m2.group(1)) * 1024 * 1024)
+
     return StatsResponse(
         total_backups=total_backups,
         total_versions_done=total_done,
@@ -1545,6 +1574,9 @@ def _build_stats_data(db: Session) -> StatsResponse:
         cloud_jobs=cloud_jobs,
         rclone_total=rclone_total,
         rclone_enabled=rclone_enabled,
+        labels_created_30d=int(labels_created_30d),
+        versions_cleaned_total=versions_cleaned_total,
+        bytes_freed_by_cleanup=bytes_freed_by_cleanup,
         server_time=datetime.now().isoformat(),
     )
 
