@@ -54,9 +54,30 @@
   .filter-input::placeholder{color:var(--text-mute)}
   .cbtn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 10px;font-family:var(--mono);font-size:10px;cursor:pointer;letter-spacing:.06em;transition:all .15s;white-space:nowrap;flex-shrink:0;user-select:none;min-height:36px;display:inline-flex;align-items:center;justify-content:center}
   .cbtn:hover,.cbtn:active{border-color:var(--amber);color:var(--amber)}
+  .cbtn:disabled{opacity:.35;cursor:not-allowed;border-color:var(--border2) !important;color:var(--text-mute) !important}
+
+  /* Version navigator */
+  .ver-nav{display:flex;align-items:center;gap:8px;padding:8px 14px;border:1px solid var(--border);border-top:none;border-bottom:none;background:var(--bg3)}
+  .ver-nav.hidden{display:none}
+  .ver-label{flex:1;text-align:center;font-size:11px;color:var(--text-dim);letter-spacing:.04em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ver-label strong{color:var(--text)}
+
+  /* Diff badges */
+  .diff-badge{font-size:9px;letter-spacing:.06em;padding:1px 5px;margin-left:5px;flex-shrink:0;vertical-align:middle}
+  .diff-add{background:rgba(76,175,80,.15);color:#4caf50;border:1px solid rgba(76,175,80,.3)}
+  .diff-mod{background:rgba(232,169,64,.12);color:var(--amber);border:1px solid rgba(232,169,64,.25)}
+  .diff-del{background:rgba(244,67,54,.12);color:var(--red);border:1px solid rgba(244,67,54,.25)}
+
+  /* Folder change dot in tree */
+  .t-change-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;margin-left:4px;display:inline-block}
+
+  /* Diff summary bar */
+  .diff-summary{font-size:10px;color:var(--text-mute);display:flex;gap:12px;align-items:center;padding:5px 14px;border-bottom:1px solid var(--border);background:var(--bg3);flex-shrink:0}
+  .diff-summary.hidden{display:none}
+  .diff-summary span{display:flex;align-items:center;gap:4px}
 
   /* Two-panel layout */
-  .explorer-layout{display:flex;border:1px solid var(--border);animation:fadeUp .35s .05s ease both;height:calc(100vh - 295px);min-height:400px}
+  .explorer-layout{display:flex;border:1px solid var(--border);animation:fadeUp .35s .05s ease both;height:calc(100vh - 330px);min-height:400px}
   .tree-panel{width:320px;min-width:160px;flex-shrink:0;border-right:1px solid var(--border);overflow-y:auto;overflow-x:auto;background:var(--bg2)}
   .tree-panel .t-count{display:none}
   .files-panel{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
@@ -137,7 +158,7 @@
     .hbtn{min-height:40px;padding:8px 12px}
     .cbtn{min-height:40px}
     .explorer-tabs{display:flex}
-    .explorer-layout{flex-direction:column;height:calc(100vh - 270px);min-height:300px}
+    .explorer-layout{flex-direction:column;height:calc(100vh - 305px);min-height:300px}
     .tree-panel{width:100%;height:100%;max-height:none;border-right:none;border-bottom:none;flex:1}
     .tree-panel.tab-hidden{display:none}
     .files-panel{height:100%;max-height:none;flex:1}
@@ -150,7 +171,7 @@
     main{padding:10px 12px}
     .cbtn{min-height:44px}
     .hbtn{min-height:44px}
-    .explorer-layout{height:calc(100vh - 230px)}
+    .explorer-layout{height:calc(100vh - 265px)}
   }
 </style>
 </head>
@@ -204,6 +225,12 @@
     <button class="cbtn" onclick="collapseAll()">⊟ Colapsar</button>
   </div>
 
+  <div class="ver-nav hidden" id="verNav">
+    <button class="cbtn" id="verPrev" onclick="navigateVersion(-1)">← Anterior</button>
+    <span class="ver-label" id="verLabel"></span>
+    <button class="cbtn" id="verNext" onclick="navigateVersion(+1)">Próxima →</button>
+  </div>
+
   <div class="explorer-tabs" id="explorerTabs">
     <button class="explorer-tab active" id="tabTree" onclick="switchTab('tree')">📁 Pastas</button>
     <button class="explorer-tab" id="tabFiles" onclick="switchTab('files')">📄 Arquivos</button>
@@ -214,6 +241,7 @@
       <div class="loading">Carregando</div>
     </div>
     <div class="files-panel tab-hidden" id="filesPanel">
+      <div class="diff-summary hidden" id="diffSummary"></div>
       <div class="files-header" id="filesHeader"></div>
       <div class="files-list" id="filesList">
         <div class="files-placeholder">
@@ -240,17 +268,23 @@
 
 <script>
   let API_KEY = localStorage.getItem('backupApiKey') || '';
-  const qp      = new URLSearchParams(location.search);
-  const LABEL   = qp.get('label')   || '';
-  const VERSION = qp.get('version') || '';
+  const qp    = new URLSearchParams(location.search);
+  const LABEL = qp.get('label') || '';
+  let currentVersion = qp.get('version') || '';
 
-  let allFiles     = [];
-  let treeRoot     = null;
-  let nodeMap      = new Map();
-  let selectedPath = null;
-  let _nodeId      = 0;
+  let allFiles      = [];
+  let treeRoot      = null;
+  let nodeMap       = new Map();
+  let selectedPath  = null;
+  let _nodeId       = 0;
 
-  const H = () => ({ 'X-API-Key': API_KEY });
+  let allVersions   = [];
+  let currentVerIdx = -1;
+  let compareData   = null;  // { added: Map<normPath,entry>, deleted: Map, modified: Map }
+  let folderChanges = null;  // Map<folderPath, {add,mod,del}>
+
+  const H        = () => ({ 'X-API-Key': API_KEY });
+  const normPath = p => p.replace(/\\/g, '/').replace(/^\//, '');
 
   const fmtSize = b => {
     if (!b) return '0 B';
@@ -328,6 +362,15 @@
   }
 
   // -- Left panel: dir tree ---------------------------------------------------
+  function _changeDot(path) {
+    const fc = folderChanges?.get(path);
+    if (!fc) return '';
+    if (fc.add) return `<span class="t-change-dot" style="background:#4caf50" title="${fc.add} adicionado(s)"></span>`;
+    if (fc.mod) return `<span class="t-change-dot" style="background:var(--amber)" title="${fc.mod} modificado(s)"></span>`;
+    if (fc.del) return `<span class="t-change-dot" style="background:var(--red)" title="${fc.del} removido(s)"></span>`;
+    return '';
+  }
+
   function renderDirTree(node, depth) {
     let html = '';
     const pad = depth * 18;
@@ -344,6 +387,7 @@
   <span class="t-icon">▸</span>
   <span class="t-name">${esc(name)}/</span>
   <div class="t-meta">
+    ${_changeDot(child.path)}
     <span class="t-count">${st.count} arq.</span>
     <span class="t-size">${fmtSize(st.size)}</span>
   </div>
@@ -363,6 +407,7 @@
   <span class="t-icon">◈</span>
   <span class="t-name" style="letter-spacing:.04em">raiz/</span>
   <div class="t-meta">
+    ${_changeDot('')}
     <span class="t-count">${st.count} arq.</span>
     <span class="t-size">${fmtSize(st.size)}</span>
   </div>
@@ -420,24 +465,63 @@
     const pathDisplay = node.path ? node.path + '/' : 'raiz/';
     const directFiles = [...node.files].sort((a,b) =>
       a._basename.localeCompare(b._basename, 'pt', { sensitivity:'base' }));
+
+    // Files deleted in this folder relative to previous version
+    const deletedInFolder = compareData
+      ? [...compareData.deleted.values()].filter(f => {
+          const fp  = normPath(f.original_path);
+          const sep = fp.lastIndexOf('/');
+          const dir = sep >= 0 ? fp.slice(0, sep) : '';
+          return dir === node.path;
+        })
+      : [];
+
+    let metaStr = `${directFiles.length} arq.`;
+    if (deletedInFolder.length) metaStr += ` · ${deletedInFolder.length} removido(s)`;
+    metaStr += ` · ${node.children.size} subpasta(s)`;
     header.innerHTML =
       `<span class="fh-path">${esc(pathDisplay)}</span>` +
-      `<span class="fh-meta">${directFiles.length} arq. · ${node.children.size} subpasta(s)</span>`;
-    if (!directFiles.length) {
+      `<span class="fh-meta">${metaStr}</span>`;
+
+    if (!directFiles.length && !deletedInFolder.length) {
       list.innerHTML = '<div class="empty">Nenhum arquivo direto nesta pasta</div>';
       return;
     }
-    list.innerHTML = directFiles.map(f => `
+
+    const fileRows = directFiles.map(f => {
+      const key   = normPath(f.original_path);
+      const badge = !compareData ? '' :
+        compareData.added.has(key)    ? '<span class="diff-badge diff-add">+ novo</span>' :
+        compareData.modified.has(key) ? '<span class="diff-badge diff-mod">~ mod</span>' : '';
+      return `
 <div class="tree-row file-row">
   <span class="t-chevron" style="visibility:hidden">▶</span>
   <span class="t-icon">·</span>
   <span class="t-name" title="${esc(f.original_path)}">${esc(f._basename)}</span>
   <div class="t-meta">
+    ${badge}
     <span class="t-hash">${f.sha256 ? f.sha256.slice(0,10)+'…' : '—'}</span>
     <span class="t-size">${fmtSize(f.size || 0)}</span>
     <button class="t-dl" onclick="dlFile(${f.id},'${esc(f._basename)}')" title="Baixar arquivo">↓ baixar</button>
   </div>
-</div>`).join('');
+</div>`;
+    });
+
+    const deletedRows = deletedInFolder.map(f => {
+      const bn = basename(f.original_path);
+      return `
+<div class="tree-row file-row" style="opacity:.55">
+  <span class="t-chevron" style="visibility:hidden">▶</span>
+  <span class="t-icon" style="color:var(--red)">·</span>
+  <span class="t-name" style="text-decoration:line-through;color:var(--text-mute)" title="${esc(f.original_path)}">${esc(bn)}</span>
+  <div class="t-meta">
+    <span class="diff-badge diff-del">− removido</span>
+    <span class="t-size">${fmtSize(f.size || 0)}</span>
+  </div>
+</div>`;
+    });
+
+    list.innerHTML = [...fileRows, ...deletedRows].join('');
   }
 
   // -- Filter -----------------------------------------------------------------
@@ -504,30 +588,142 @@
     }
   }
 
+  // -- Version navigation -----------------------------------------------------
+  async function loadVersionList() {
+    if (!LABEL) return;
+    try {
+      const r = await fetch(`/backups/${encodeURIComponent(LABEL)}/versions`, { headers: H() });
+      if (!r.ok) return;
+      allVersions = (await r.json()).sort((a, b) =>
+        a.version_key < b.version_key ? -1 : 1);
+      currentVerIdx = allVersions.findIndex(v => v.version_key === currentVersion);
+      renderVerNav();
+    } catch(e) { /* non-critical */ }
+  }
+
+  function renderVerNav() {
+    const nav = document.getElementById('verNav');
+    if (allVersions.length <= 1) { nav.classList.add('hidden'); return; }
+    nav.classList.remove('hidden');
+    const v     = allVersions[currentVerIdx];
+    const label = v
+      ? `<strong>${esc(v.version_key.slice(0,19).replace('T',' '))}</strong> · ${currentVerIdx + 1}/${allVersions.length}`
+      : '—';
+    document.getElementById('verLabel').innerHTML = label;
+    document.getElementById('verPrev').disabled = currentVerIdx <= 0;
+    document.getElementById('verNext').disabled = currentVerIdx >= allVersions.length - 1;
+  }
+
+  async function navigateVersion(delta) {
+    const newIdx = currentVerIdx + delta;
+    if (newIdx < 0 || newIdx >= allVersions.length) return;
+    // Disable buttons during load to prevent double-clicks
+    document.getElementById('verPrev').disabled = true;
+    document.getElementById('verNext').disabled = true;
+    const newVer    = allVersions[newIdx].version_key;
+    const prevVer   = newIdx > 0 ? allVersions[newIdx - 1].version_key : null;
+    const savedPath = selectedPath;
+    currentVerIdx   = newIdx;
+    currentVersion  = newVer;
+    // Update URL without reload
+    const url = new URL(location.href);
+    url.searchParams.set('version', newVer);
+    history.pushState({}, '', url);
+    // Clear filter input
+    document.getElementById('filterInput').value = '';
+    const ok = await loadFilesData(newVer);
+    if (!ok) { renderVerNav(); return; }
+    if (prevVer) {
+      await fetchCompare(prevVer, newVer);
+    } else {
+      compareData = null; folderChanges = null;
+      document.getElementById('diffSummary').classList.add('hidden');
+    }
+    _renderDirTree();
+    // Restore folder selection if it still exists in the new version
+    const restoredNode = savedPath !== null ? nodeMap.get(savedPath) : null;
+    if (restoredNode) {
+      selectDir(savedPath);
+    } else {
+      selectedPath = '';
+      renderFileList(treeRoot);
+    }
+    renderVerNav();
+  }
+
+  async function fetchCompare(v1, v2) {
+    try {
+      const r = await fetch(
+        `/backups/${encodeURIComponent(LABEL)}/compare?v1=${encodeURIComponent(v1)}&v2=${encodeURIComponent(v2)}`,
+        { headers: H() }
+      );
+      if (!r.ok) { compareData = null; folderChanges = null; return; }
+      const data = await r.json();
+      compareData = {
+        added:    new Map(data.added.map(f    => [normPath(f.original_path), f])),
+        deleted:  new Map(data.deleted.map(f  => [normPath(f.original_path), f])),
+        modified: new Map(data.modified.map(f => [normPath(f.original_path), f])),
+      };
+      folderChanges = buildFolderChanges(data);
+      updateDiffSummary(data);
+    } catch(e) { compareData = null; folderChanges = null; }
+  }
+
+  function buildFolderChanges(data) {
+    const m = new Map();
+    function mark(filePath, type) {
+      const parts = normPath(filePath).split('/');
+      if (!m.has('')) m.set('', { add:0, mod:0, del:0 });
+      m.get('')[type]++;
+      for (let i = 1; i < parts.length; i++) {
+        const fp = parts.slice(0, i).join('/');
+        if (!m.has(fp)) m.set(fp, { add:0, mod:0, del:0 });
+        m.get(fp)[type]++;
+      }
+    }
+    data.added.forEach(f    => mark(f.original_path, 'add'));
+    data.deleted.forEach(f  => mark(f.original_path, 'del'));
+    data.modified.forEach(f => mark(f.original_path, 'mod'));
+    return m;
+  }
+
+  function updateDiffSummary(data) {
+    const el = document.getElementById('diffSummary');
+    if (!data || (!data.added.length && !data.deleted.length && !data.modified.length)) {
+      el.classList.add('hidden'); return;
+    }
+    el.classList.remove('hidden');
+    el.innerHTML =
+      `<span><span class="diff-badge diff-add">+${data.added.length}</span> adicionados</span>` +
+      `<span><span class="diff-badge diff-mod">~${data.modified.length}</span> modificados</span>` +
+      `<span><span class="diff-badge diff-del">-${data.deleted.length}</span> removidos</span>` +
+      `<span style="margin-left:auto">${data.summary_unchanged} inalterados</span>`;
+  }
+
   // -- Load -------------------------------------------------------------------
-  async function loadFiles() {
+  async function loadFilesData(versionKey) {
     const dirTree     = document.getElementById('dirTree');
     const filesHeader = document.getElementById('filesHeader');
     const filesList   = document.getElementById('filesList');
 
-    if (!LABEL || !VERSION) {
+    if (!LABEL || !versionKey) {
       dirTree.innerHTML   = '';
       filesHeader.innerHTML = '';
       filesList.innerHTML = `<div class="empty">Nenhuma versão selecionada.<br><a href="/">← Voltar ao dashboard</a></div>`;
-      return;
+      return false;
     }
 
     document.getElementById('bcLabel').textContent   = LABEL;
-    document.getElementById('bcVersion').textContent = VERSION;
-    document.title = `NestVault — ${LABEL} / ${VERSION}`;
+    document.getElementById('bcVersion').textContent = versionKey;
+    document.title = `NestVault — ${LABEL} / ${versionKey}`;
     dirTree.innerHTML   = '<div class="loading">Carregando</div>';
     filesHeader.innerHTML = '';
     filesList.innerHTML = '';
 
     try {
-      const url = `/files?backup_label=${encodeURIComponent(LABEL)}&version_key=${encodeURIComponent(VERSION)}`;
+      const url = `/files?backup_label=${encodeURIComponent(LABEL)}&version_key=${encodeURIComponent(versionKey)}`;
       const r   = await fetch(url, { headers: H() });
-      if (r.status === 401) { showLogin(); return; }
+      if (r.status === 401) { showLogin(); return false; }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       allFiles = await r.json();
 
@@ -537,7 +733,7 @@
         filesList.innerHTML = '<div class="empty">Nenhum arquivo nesta versão</div>';
         ['sFiles','sDirs','sSize','sDepth'].forEach(id =>
           document.getElementById(id).textContent = '0');
-        return;
+        return false;
       }
 
       treeRoot    = buildTree(allFiles);
@@ -548,14 +744,24 @@
       document.getElementById('sSize').textContent  = fmtSize(stats.size);
       document.getElementById('sDepth').textContent = stats.depth;
 
-      selectedPath = '';
-      _renderDirTree();
-      renderFileList(treeRoot);
+      return true;
     } catch(e) {
       dirTree.innerHTML   = `<div class="empty">Erro ao carregar: ${esc(e.message)}</div>`;
       filesHeader.innerHTML = '';
       filesList.innerHTML = '';
       showError('Não foi possível carregar: ' + e.message);
+      return false;
+    }
+  }
+
+  async function loadFiles() {
+    compareData = null; folderChanges = null;
+    document.getElementById('diffSummary').classList.add('hidden');
+    const ok = await loadFilesData(currentVersion);
+    if (ok) {
+      selectedPath = '';
+      _renderDirTree();
+      renderFileList(treeRoot);
     }
   }
 
@@ -565,9 +771,29 @@
     if (!resp.ok) { showError('Servidor indisponível'); return; }
     const test = await fetch('/backups', { headers: H() });
     if (test.status === 401) { showLogin(); }
-    else { loadFiles(); }
+    else { await loadFiles(); await loadVersionList(); }
   }
   init();
+
+  // -- Browser back/forward ---------------------------------------------------
+  window.addEventListener('popstate', () => {
+    const qp2 = new URLSearchParams(location.search);
+    const v   = qp2.get('version') || '';
+    if (v && v !== currentVersion) {
+      currentVersion  = v;
+      currentVerIdx   = allVersions.findIndex(v2 => v2.version_key === v);
+      compareData     = null;
+      folderChanges   = null;
+      document.getElementById('diffSummary').classList.add('hidden');
+      loadFilesData(v).then(ok => {
+        if (!ok) return;
+        selectedPath = '';
+        _renderDirTree();
+        renderFileList(treeRoot);
+        renderVerNav();
+      });
+    }
+  });
 
   function toggleTheme() {
     const isLight = document.documentElement.getAttribute('data-theme') === 'light';
