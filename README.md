@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v7.1.0`
+# 🗄️ NestVault  `v7.2.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -6,6 +6,8 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v7.2.0** — progresso em tempo real para todas as operações de manutenção: `ssd-cache-move` exibe "Movendo: X / Y arquivo(s) (Z%)" por lote; `cleanup-by-date` mostra progresso por lote de versões; `nightly-cleanup` entra em status `running` no início e reporta label-a-label; `encrypt-existing` convertido para background com "Cifrando: X / Y (Z%)". Operações que antes não apareciam no histórico (`cleanup-orphans`, `rereplicate`, `reconcile-replication`, `cleanup-versions` por label) passam a registrar `MaintenanceJob`. Labels de exibição adicionados na tela de atividade para todos os tipos de job de manutenção.
+>
 > **v7.1.0** — suporte opcional a PostgreSQL como backend de banco de dados: troque entre SQLite (padrão, ideal para Raspberry Pi e NAS) e PostgreSQL (recomendado para servidores com múltiplos uploads simultâneos) via variável `DATABASE_URL`, sem quebrar instalações existentes. Inclui script de migração SQLite → PostgreSQL com fault-tolerance para bancos corrompidos, e script reverso PostgreSQL → SQLite para quem quiser voltar ao modo leve.
 >
 > **v7.0.0** — integração rclone como opção paralela de cloud backup: elimina a necessidade de registrar app no Google Cloud Console ou Azure Portal — o usuário configura os remotes via `rclone config` e o NestVault os referencia pelo nome. Suporta todos os provedores compatíveis com rclone (Google Drive, OneDrive, S3, Backblaze B2, Dropbox e 70+ outros). O pipeline producer-consumer, deduplicação, criptografia e replicação funcionam de forma idêntica ao cloud backup OAuth nativo. Skip por `mtime` garante que syncs recorrentes só baixam arquivos novos ou alterados — sem re-download de tudo. Novos endpoints em `/rclone/*` + nova tabela `rclone_backup_jobs`.
