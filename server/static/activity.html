@@ -432,11 +432,17 @@
   }
 
   const JOB_TYPE_LABELS = {
-    'cleanup-by-date': 'Limpeza por data',
-    'auto-cleanup':    'Limpeza automática',
-    'cleanup-orphans': 'Limpeza de órfãos',
-    'disk-migration':  'Migração de Disco',
-    'ssd-cache-move':  'SSD Cache → HDD',
+    'cleanup-by-date':       'Limpeza por data',
+    'auto-cleanup':          'Limpeza automática',
+    'cleanup-orphans':       'Limpeza de órfãos',
+    'cleanup-versions':      'Limpeza de versões',
+    'disk-migration':        'Migração de Disco',
+    'ssd-cache-move':        'SSD Cache → HDD',
+    'nightly-cleanup':       'Limpeza Noturna',
+    'validate-integrity':    'Verificação de Integridade',
+    'encrypt-existing':      'Cifragem de Arquivos',
+    'rereplicate':           'Replicação',
+    'reconcile-replication': 'Reconciliação de Réplicas',
   };
 
   function renderRunning(versions, jobs, maintJobs) {
