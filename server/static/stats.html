@@ -320,10 +320,8 @@
 
 <script>
   let API_KEY = localStorage.getItem('backupApiKey') || '';
-  let _refreshTimer = null;
   let _lastUpdateTime = null;
   let _tickTimer = null;
-  const REFRESH_INTERVAL = 60000;
   const H = () => ({'X-API-Key': API_KEY});
 
   const fmtSize = b => {
@@ -365,7 +363,6 @@
   function showLogin(msg='') {
     document.getElementById('loginOverlay').style.display = 'flex';
     document.getElementById('loginError').textContent = msg;
-    clearTimeout(_refreshTimer);
   }
   function hideLogin() { document.getElementById('loginOverlay').style.display = 'none'; }
 
@@ -399,12 +396,8 @@
       clearError();
       _lastUpdateTime = Date.now();
       render(data);
-      clearTimeout(_refreshTimer);
-      _refreshTimer = setTimeout(load, REFRESH_INTERVAL);
     } catch(e) {
       showError('Não foi possível conectar: '+e.message);
-      clearTimeout(_refreshTimer);
-      _refreshTimer = setTimeout(load, 15000);
     }
   }
 

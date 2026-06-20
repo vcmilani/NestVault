@@ -259,7 +259,6 @@
   let API_KEY = localStorage.getItem('backupApiKey') || '';
   let _editingJobId = null;
   let _remotes = [];
-  let _pollTimer = null;
   let _browsePath = '';
 
   const H = () => ({'X-API-Key': API_KEY});
@@ -346,8 +345,6 @@
       const jobs = await r.json();
       jobs.forEach(j => { if (j.last_run_message) _jobsLogCache[j.id] = j.last_run_message; });
       renderJobs(jobs);
-      const hasRunning = jobs.some(j => j.last_run_status === 'running');
-      if (hasRunning) startPoll(); else stopPoll();
     } catch(e) {
       el.innerHTML = `<div class="empty">Erro: ${esc(e.message)}</div>`;
     }
@@ -422,22 +419,12 @@
   });
   let _jobsLogCache = {};
 
-  // -- Polling when running --------------------------------------------------
-  function startPoll() {
-    if (_pollTimer) return;
-    _pollTimer = setInterval(() => loadJobs(), 4000);
-  }
-  function stopPoll() {
-    if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
-  }
-
   // -- Job actions -----------------------------------------------------------
   async function runJob(id) {
     const r = await fetch(`/rclone/jobs/${id}/run`, {method:'POST', headers: H()});
     if (r.status === 409) { showError('Job já está em execução'); return; }
     if (!r.ok) { showError('Erro ao iniciar job'); return; }
     await loadJobs();
-    startPoll();
   }
 
   async function cancelJob(id) {

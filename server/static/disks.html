@@ -181,7 +181,6 @@
   let API_KEY = localStorage.getItem('backupApiKey') || '';
   let _lastLoadTime = null;
   let _tickTimer    = null;
-  let _autoRefresh  = null;
   const H = () => ({'X-API-Key': API_KEY});
 
   // Disk usage sparkline via localStorage
@@ -348,7 +347,6 @@
     if (test.status === 401) { showLogin(); }
     else {
       load();
-      _autoRefresh = setInterval(load, 30000);
     }
   }
   init();
