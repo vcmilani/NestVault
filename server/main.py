@@ -25,9 +25,9 @@ from pydantic import BaseModel, Field
 from typing import Optional, Literal
 import asyncio, os, hashlib, secrets, base64, shutil, logging, time, threading
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
-from sqlalchemy import func, select, insert, literal
+from sqlalchemy import func, select, insert, literal, case
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
@@ -83,6 +83,9 @@ _RECLAIMABLE_TTL = 60.0
 # Fallback de 5 min para não ficar preso caso alguma invalidação seja perdida.
 _historical_cache: dict = {"data": None, "ts": 0.0}
 _HISTORICAL_FALLBACK_TTL = 300.0
+
+_stats_cache: dict = {"data": None, "ts": 0.0}
+_STATS_TTL = 300.0
 
 
 def _get_reclaimable_bytes(db: Session) -> int:
@@ -609,6 +612,57 @@ class ActivityResponse(BaseModel):
     recent_versions: list[RecentVersionInfo]
     recent_jobs: list[RecentJobInfo]
     maintenance_jobs: list[MaintenanceJobInfo]
+    server_time: str
+
+
+class TrendDay(BaseModel):
+    date: str
+    version_count: int
+    total_size_bytes: int
+
+class TopBackupEntry(BaseModel):
+    label: str
+    client_name: Optional[str]
+    version_count: int
+    file_count: int
+    total_size_bytes: int
+    last_version_at: Optional[str]
+
+class MaintenanceTypeStat(BaseModel):
+    job_type: str
+    done_count: int
+    error_count: int
+    last_run_at: Optional[str]
+
+class CloudJobStat(BaseModel):
+    provider: str
+    total_jobs: int
+    enabled_jobs: int
+
+class StatsResponse(BaseModel):
+    total_backups: int
+    total_versions_done: int
+    total_versions_failed: int
+    storage_used_bytes: int
+    storage_total_bytes: int
+    storage_used_pct: float
+    storage_free_bytes: int
+    storage_reclaimable_bytes: int
+    dedup_ratio: float
+    version_success_rate: float
+    avg_duration_seconds: Optional[float]
+    stored_bytes: int
+    logical_bytes: int
+    unique_files: int
+    total_file_refs: int
+    space_saved_bytes: int
+    trend_days: list[TrendDay]
+    top_backups: list[TopBackupEntry]
+    maintenance_by_type: list[MaintenanceTypeStat]
+    last_maintenance_jobs: list[MaintenanceJobInfo]
+    cloud_jobs: list[CloudJobStat]
+    rclone_total: int
+    rclone_enabled: int
     server_time: str
 
 
@@ -1279,6 +1333,229 @@ def rclone_jobs_page():
     if not page.exists():
         return HTMLResponse("<h1>Página não encontrada</h1>", status_code=404)
     return HTMLResponse(page.read_text(encoding="utf-8"))
+
+
+@app.get("/stats", response_class=HTMLResponse, include_in_schema=False)
+def stats_page():
+    page = STATIC_DIR / "stats.html"
+    if not page.exists():
+        return HTMLResponse("<h1>Página não encontrada</h1>", status_code=404)
+    return HTMLResponse(page.read_text(encoding="utf-8"))
+
+
+def _build_stats_data(db: Session) -> StatsResponse:
+    """Agrega estatísticas globais do sistema em ~7 queries. Resultado cacheado por _STATS_TTL."""
+
+    _is_sqlite = not bool(os.getenv("DATABASE_URL"))
+
+    # --- Q1: contagens de backups e versões ---
+    counts = db.query(
+        func.count(BackupID.id.distinct()).label("total_backups"),
+        func.sum(case((BackupVersion.status == "done",   1), else_=0)).label("total_done"),
+        func.sum(case((BackupVersion.status == "failed", 1), else_=0)).label("total_failed"),
+    ).outerjoin(BackupVersion, BackupVersion.backup_label == BackupID.label
+    ).filter(BackupID.status == "active").first()
+
+    total_backups  = int(counts.total_backups  or 0)
+    total_done     = int(counts.total_done     or 0)
+    total_failed   = int(counts.total_failed   or 0)
+    total_attempted = total_done + total_failed
+    success_rate   = round(total_done / total_attempted * 100, 1) if total_attempted else 100.0
+
+    # --- Q2: duração média das versões concluídas ---
+    if _is_sqlite:
+        dur_expr = (func.julianday(BackupVersion.finished_at) - func.julianday(BackupVersion.created_at)) * 86400.0
+    else:
+        dur_expr = func.extract("epoch", BackupVersion.finished_at - BackupVersion.created_at)
+
+    avg_sec = db.query(func.avg(dur_expr)).filter(
+        BackupVersion.status == "done",
+        BackupVersion.finished_at.isnot(None),
+        BackupVersion.created_at.isnot(None),
+    ).scalar()
+    avg_duration = round(float(avg_sec), 1) if avg_sec is not None else None
+
+    # --- Q3: storage via helpers existentes ---
+    usages = [u for u in (_safe_disk_usage(v) for v in STORAGE_VOLUMES) if u]
+    storage_total      = sum(u.total for u in usages)
+    storage_used_disk  = sum(u.used  for u in usages)
+    storage_free       = sum(u.free  for u in usages)
+    storage_reclaimable = _get_reclaimable_bytes(db)
+    storage_used_pct   = round(storage_used_disk / storage_total * 100, 1) if storage_total else 0.0
+
+    # --- Q4: deduplicação ---
+    dedup_row = db.query(
+        func.count(FileContent.sha256).label("unique_files"),
+        func.coalesce(func.sum(FileContent.size), 0).label("stored_bytes"),
+    ).first()
+    unique_files  = int(dedup_row.unique_files  or 0)
+    stored_bytes  = int(dedup_row.stored_bytes  or 0)
+
+    logical_row = db.query(
+        func.count(VersionFile.id).label("total_refs"),
+        func.coalesce(func.sum(FileContent.size), 0).label("logical_bytes"),
+    ).join(FileContent, FileContent.sha256 == VersionFile.sha256).first()
+    total_refs    = int(logical_row.total_refs    or 0)
+    logical_bytes = int(logical_row.logical_bytes or 0)
+
+    space_saved   = max(0, logical_bytes - stored_bytes)
+    dedup_ratio   = round(logical_bytes / stored_bytes, 2) if stored_bytes > 0 else 1.0
+
+    # --- Q5: tendência dos últimos 30 dias (duas queries para evitar fan-out) ---
+    cutoff = datetime.now() - timedelta(days=30)
+    if _is_sqlite:
+        date_expr = func.strftime("%Y-%m-%d", BackupVersion.created_at)
+    else:
+        date_expr = func.to_char(BackupVersion.created_at, "YYYY-MM-DD")
+
+    trend_counts = db.query(
+        date_expr.label("day"),
+        func.count(BackupVersion.id).label("n"),
+    ).filter(BackupVersion.created_at >= cutoff, BackupVersion.status == "done"
+    ).group_by(date_expr).order_by(date_expr).all()
+
+    # tamanho por dia via subquery para não multiplicar linhas
+    sz_sq = db.query(
+        BackupVersion.id.label("vid"),
+        BackupVersion.created_at.label("ts"),
+        func.coalesce(func.sum(FileContent.size), 0).label("sz"),
+    ).join(VersionFile, VersionFile.version_id == BackupVersion.id
+    ).join(FileContent, FileContent.sha256 == VersionFile.sha256
+    ).filter(BackupVersion.created_at >= cutoff, BackupVersion.status == "done"
+    ).group_by(BackupVersion.id, BackupVersion.created_at).subquery()
+
+    if _is_sqlite:
+        date_sq = func.strftime("%Y-%m-%d", sz_sq.c.ts)
+    else:
+        date_sq = func.to_char(sz_sq.c.ts, "YYYY-MM-DD")
+
+    trend_sizes_rows = db.query(
+        date_sq.label("day"),
+        func.coalesce(func.sum(sz_sq.c.sz), 0).label("sz"),
+    ).group_by(date_sq).all()
+    size_by_day = {r.day: int(r.sz) for r in trend_sizes_rows}
+
+    trend_days = [TrendDay(date=r.day, version_count=r.n, total_size_bytes=size_by_day.get(r.day, 0))
+                  for r in trend_counts]
+
+    # --- Q6: top 10 backups por tamanho da versão mais recente ---
+    label_stats = db.query(
+        BackupVersion.backup_label.label("label"),
+        func.count(BackupVersion.id).label("version_count"),
+        func.max(BackupVersion.created_at).label("last_at"),
+        func.max(BackupVersion.id).label("latest_id"),
+    ).filter(BackupVersion.status == "done"
+    ).group_by(BackupVersion.backup_label).all()
+
+    latest_ids = [r.latest_id for r in label_stats]
+    if latest_ids:
+        size_rows = db.query(
+            VersionFile.version_id,
+            func.count(VersionFile.id).label("fc"),
+            func.coalesce(func.sum(FileContent.size), 0).label("sz"),
+        ).join(FileContent, FileContent.sha256 == VersionFile.sha256
+        ).filter(VersionFile.version_id.in_(latest_ids)
+        ).group_by(VersionFile.version_id).all()
+        size_map = {r.version_id: (int(r.fc), int(r.sz)) for r in size_rows}
+    else:
+        size_map = {}
+
+    all_labels = [r.label for r in label_stats]
+    if all_labels:
+        names_rows = db.query(BackupID.label, BackupID.client_name).filter(BackupID.label.in_(all_labels)).all()
+        names_map = {r.label: r.client_name for r in names_rows}
+    else:
+        names_map = {}
+
+    top_raw = sorted(
+        [(r.label, names_map.get(r.label), int(r.version_count), *size_map.get(r.latest_id, (0, 0)), str(r.last_at))
+         for r in label_stats],
+        key=lambda x: x[4], reverse=True,
+    )[:10]
+    top_backups = [TopBackupEntry(
+        label=row[0], client_name=row[1], version_count=row[2],
+        file_count=row[3], total_size_bytes=row[4], last_version_at=row[5],
+    ) for row in top_raw]
+
+    # --- Q7: manutenção por tipo ---
+    maint_stats = db.query(
+        MaintenanceJob.job_type,
+        func.sum(case((MaintenanceJob.status == "done",  1), else_=0)).label("done_count"),
+        func.sum(case((MaintenanceJob.status == "error", 1), else_=0)).label("error_count"),
+        func.max(MaintenanceJob.started_at).label("last_run_at"),
+    ).group_by(MaintenanceJob.job_type).all()
+
+    maintenance_by_type = [MaintenanceTypeStat(
+        job_type=r.job_type,
+        done_count=int(r.done_count or 0),
+        error_count=int(r.error_count or 0),
+        last_run_at=str(r.last_run_at) if r.last_run_at else None,
+    ) for r in maint_stats]
+
+    last_maint = db.query(MaintenanceJob).order_by(MaintenanceJob.started_at.desc()).limit(5).all()
+    last_maintenance_jobs = [MaintenanceJobInfo(
+        id=j.id, job_type=j.job_type, status=j.status,
+        started_at=str(j.started_at),
+        finished_at=str(j.finished_at) if j.finished_at else None,
+        summary=j.summary,
+    ) for j in last_maint]
+
+    # --- Q8: cloud e rclone ---
+    cloud_rows = db.query(
+        CloudCredential.provider,
+        func.count(CloudBackupJob.id).label("total"),
+        func.sum(case((CloudBackupJob.enabled == True, 1), else_=0)).label("enabled"),
+    ).join(CloudCredential, CloudCredential.id == CloudBackupJob.credential_id
+    ).group_by(CloudCredential.provider).all()
+
+    cloud_jobs = [CloudJobStat(
+        provider=r.provider,
+        total_jobs=int(r.total or 0),
+        enabled_jobs=int(r.enabled or 0),
+    ) for r in cloud_rows]
+
+    rclone_row = db.query(
+        func.count(RcloneBackupJob.id).label("total"),
+        func.coalesce(func.sum(case((RcloneBackupJob.enabled == True, 1), else_=0)), 0).label("enabled"),
+    ).first()
+    rclone_total   = int(rclone_row.total   or 0) if rclone_row else 0
+    rclone_enabled = int(rclone_row.enabled or 0) if rclone_row else 0
+
+    return StatsResponse(
+        total_backups=total_backups,
+        total_versions_done=total_done,
+        total_versions_failed=total_failed,
+        storage_used_bytes=storage_used_disk,
+        storage_total_bytes=storage_total,
+        storage_used_pct=storage_used_pct,
+        storage_free_bytes=storage_free,
+        storage_reclaimable_bytes=storage_reclaimable,
+        dedup_ratio=dedup_ratio,
+        version_success_rate=success_rate,
+        avg_duration_seconds=avg_duration,
+        stored_bytes=stored_bytes,
+        logical_bytes=logical_bytes,
+        unique_files=unique_files,
+        total_file_refs=total_refs,
+        space_saved_bytes=space_saved,
+        trend_days=trend_days,
+        top_backups=top_backups,
+        maintenance_by_type=maintenance_by_type,
+        last_maintenance_jobs=last_maintenance_jobs,
+        cloud_jobs=cloud_jobs,
+        rclone_total=rclone_total,
+        rclone_enabled=rclone_enabled,
+        server_time=datetime.now().isoformat(),
+    )
+
+
+@app.get("/api/stats", response_model=StatsResponse, dependencies=[Depends(require_api_key)])
+def get_stats(db: Session = Depends(get_db)):
+    data = _stats_cache["data"]
+    if data is None or time.monotonic() - _stats_cache["ts"] > _STATS_TTL:
+        data = _build_stats_data(db)
+        _stats_cache.update({"data": data, "ts": time.monotonic()})
+    return data
 
 
 def _build_fast_data(db: Session) -> tuple:
