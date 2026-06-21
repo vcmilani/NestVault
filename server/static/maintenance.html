@@ -347,6 +347,37 @@
       </div>
     </div>
 
+    <!-- Renomear Label -->
+    <div class="op-card risk-medium" style="animation-delay:.28s">
+      <div class="op-header">
+        <div class="op-title-wrap">
+          <span class="op-icon">✎</span>
+          <div>
+            <div class="op-name">Renomear Label</div>
+            <div class="op-endpoint">PATCH /backups/{label}</div>
+          </div>
+        </div>
+        <span class="risk-badge medium">Médio risco</span>
+      </div>
+      <div class="op-desc">Renomeia um label e atualiza todas as suas versões. O histórico é preservado.</div>
+      <div class="op-form">
+        <div class="form-row">
+          <span class="form-label">Label atual</span>
+          <select class="op-select" id="rename-label-select">
+            <option value="">— selecione —</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Novo nome</span>
+          <input type="text" class="op-input op-input-wide" id="rename-label-new" placeholder="novo label" autocomplete="off">
+        </div>
+      </div>
+      <div class="op-footer">
+        <button class="run-btn" id="btn-rename-label" onclick="runRenameLabel()">✎ Renomear</button>
+        <div class="op-result" id="result-rename-label"></div>
+      </div>
+    </div>
+
     <!-- Excluir Label Completo -->
     <div class="op-card risk-high" style="animation-delay:.3s">
       <div class="op-header">
@@ -717,9 +748,34 @@ async function runDeleteLabel() {
   setRunning('delete-label', false, '✕ Excluir');
 }
 
+// -- Renomear Label -----------------------------------------------------------
+async function runRenameLabel() {
+  const label  = document.getElementById('rename-label-select').value;
+  const newLbl = document.getElementById('rename-label-new').value.trim();
+  if (!label)  { showError('rename-label', 'Selecione um label.'); return; }
+  if (!newLbl) { showError('rename-label', 'Digite o novo nome.'); return; }
+  if (newLbl === label) { showError('rename-label', 'Novo nome idêntico ao atual.'); return; }
+  setRunning('rename-label', true, '✎ Renomear');
+  try {
+    const r = await apiCall('PATCH', `/backups/${encodeURIComponent(label)}`, { new_label: newLbl });
+    if (r.status === 401) { showLogin('API Key inválida.'); setRunning('rename-label', false, '✎ Renomear'); return; }
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({}));
+      showError('rename-label', data.detail || `Erro ${r.status}`);
+    } else {
+      document.getElementById('rename-label-new').value = '';
+      showSuccess('rename-label', `Label "${label}" renomeado para "${newLbl}"`);
+      loadLabels();
+    }
+  } catch(e) {
+    showError('rename-label', 'Erro de conexão: ' + e.message);
+  }
+  setRunning('rename-label', false, '✎ Renomear');
+}
+
 // -- Carregar lista de labels -------------------------------------------------
 async function loadLabels() {
-  const ids = ['cleanup-label', 'delete-label-select'];
+  const ids = ['cleanup-label', 'delete-label-select', 'rename-label-select'];
   ids.forEach(id => {
     const s = document.getElementById(id);
     s.innerHTML = '<option value="">Carregando…</option>';

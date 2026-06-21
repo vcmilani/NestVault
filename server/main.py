@@ -341,6 +341,9 @@ class BackupCreate(BaseModel):
     client_name: Optional[str] = None
     prefix: Optional[str] = None
 
+class BackupRename(BaseModel):
+    new_label: str
+
 class VersionCreate(BaseModel):
     version_key: str = Field(..., description="ISO datetime: 2026-04-25T10:42:31")
 
@@ -2161,6 +2164,26 @@ def all_backup_disk_summary(db: Session = Depends(get_db)):
 @app.get("/backups/{label}", response_model=BackupInfo, dependencies=[Depends(require_api_key)])
 def get_backup(label: str, db: Session = Depends(get_db)):
     return _backup_info(_get_backup_or_404(label, db), db)
+
+
+@app.patch("/backups/{label}", response_model=BackupInfo, dependencies=[Depends(require_api_key)])
+def rename_backup(label: str, req: BackupRename, db: Session = Depends(get_db)):
+    b = _get_backup_or_404(label, db)
+    new = req.new_label.strip()
+    if not new:
+        raise HTTPException(status_code=422, detail="new_label não pode ser vazio")
+    if new == label:
+        raise HTTPException(status_code=422, detail="Novo label idêntico ao atual")
+    if db.query(BackupID).filter(BackupID.label == new).first():
+        raise HTTPException(status_code=409, detail=f"Label '{new}' já existe")
+    db.query(BackupVersion).filter(BackupVersion.backup_label == label).update(
+        {"backup_label": new}, synchronize_session=False
+    )
+    b.label = new
+    db.commit()
+    db.refresh(b)
+    log.info(f"[rename] Label [{label}] → [{new}]")
+    return _backup_info(b, db)
 
 
 @app.get("/backups/{label}/disks", response_model=list[BackupDiskEntry], dependencies=[Depends(require_api_key)])
