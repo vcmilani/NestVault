@@ -103,9 +103,12 @@ async def list_files_recursive(
     """Lista todos os arquivos recursivamente em remote_name:remote_path."""
     src = f"{remote_name}:{remote_path}" if remote_path else f"{remote_name}:"
     for attempt in range(1, retries + 1):
+        exclude_flags: list[str] = []
+        for folder in _ONEDRIVE_PROTECTED_FOLDERS:
+            exclude_flags += ["--exclude", f"{folder}/**"]
         stdout, stderr, rc = await _rclone_run(
             "lsjson", "--recursive",
-            "--exclude", "Personal Vault/**",
+            *exclude_flags,
             "--exclude", ".DS_Store",
             "--exclude", "Thumbs.db",
             "--exclude", "desktop.ini",

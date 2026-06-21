@@ -134,6 +134,7 @@
     <a class="hbtn" href="/">← Voltar</a>
     <a class="hbtn" href="/activity">◎ Atividade</a>
     <a class="hbtn" href="/rclone-jobs">⟳ rclone</a>
+    <a class="hbtn" href="/stats">∑ Stats</a>
     <button class="hbtn always-visible" id="logoutBtn">⌀ API Key</button>
     <button class="nav-hamburger"></button>
   </div>
@@ -144,6 +145,7 @@
   <a href="/">← Voltar</a>
   <a href="/activity">◎ Atividade</a>
   <a href="/rclone-jobs">⟳ rclone</a>
+  <a href="/stats">∑ Stats</a>
 </nav>
 <div class="mobile-nav-backdrop"></div>
 
@@ -179,7 +181,6 @@
   let API_KEY = localStorage.getItem('backupApiKey') || '';
   let _lastLoadTime = null;
   let _tickTimer    = null;
-  let _autoRefresh  = null;
   const H = () => ({'X-API-Key': API_KEY});
 
   // Disk usage sparkline via localStorage
@@ -346,7 +347,6 @@
     if (test.status === 401) { showLogin(); }
     else {
       load();
-      _autoRefresh = setInterval(load, 30000);
     }
   }
   init();
