@@ -180,7 +180,12 @@
     .login-box{padding:28px 20px}
     .login-btn{min-height:48px}
     .hbtn{min-height:44px}
+    .activity-grid{grid-template-columns:1fr}
   }
+  .activity-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem}
+  .sub-title{font-size:.7rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.6rem}
+  tr.row-stale td{color:var(--amber)}
+  .badge-stale{background:rgba(245,176,65,.12);color:var(--amber);border:1px solid rgba(245,176,65,.35);border-radius:4px;padding:1px 6px;font-size:.75em;white-space:nowrap}
 </style>
 </head>
 <body>
@@ -289,7 +294,34 @@
     <div class="loading">Carregando</div>
   </div>
 
-  <!-- 5. Deduplicação -->
+  <!-- 5. Atividade por Backup -->
+  <section id="sec-activity" style="display:none;margin-bottom:28px">
+    <div class="section-head" style="margin-bottom:10px">
+      <div class="section-title">Atividade por Backup</div>
+    </div>
+    <div class="activity-grid">
+      <div>
+        <div class="sub-title">Mais tempo sem versão</div>
+        <div class="table-wrap">
+          <table id="tblStale">
+            <thead><tr><th>Backup</th><th>Cliente</th><th>Última versão</th><th>Versões</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div>
+        <div class="sub-title">Versões por backup</div>
+        <div class="table-wrap">
+          <table id="tblVersionCount">
+            <thead><tr><th>Backup</th><th>Cliente</th><th>Versões</th><th>Última versão</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 7. Deduplicação -->
   <div class="section-head" style="margin-bottom:10px">
     <div class="section-title">Deduplicação</div>
     <span class="section-sub">eficiência do armazenamento único por conteúdo (SHA-256)</span>
@@ -298,7 +330,7 @@
     <div class="loading">Carregando</div>
   </div>
 
-  <!-- 6. Manutenção -->
+  <!-- 8. Manutenção -->
   <div class="section-head" style="margin-bottom:10px">
     <div class="section-title">Manutenção</div>
   </div>
@@ -306,7 +338,7 @@
     <div class="loading">Carregando</div>
   </div>
 
-  <!-- 7. Cloud e rclone -->
+  <!-- 9. Cloud e rclone -->
   <div class="section-head" style="margin-bottom:10px">
     <div class="section-title">Cloud e rclone</div>
   </div>
@@ -348,6 +380,17 @@
     if (s < 60) return s.toFixed(0)+'s';
     if (s < 3600) return Math.floor(s/60)+'min';
     return (s/3600).toFixed(1)+'h';
+  };
+  const timeSince = d => {
+    const s = Math.floor((Date.now() - d.getTime()) / 1000);
+    if (s < 60) return 'agora';
+    if (s < 3600) return `há ${Math.floor(s/60)}min`;
+    if (s < 86400) return `há ${Math.floor(s/3600)}h`;
+    const days = Math.floor(s/86400);
+    if (days < 30) return `há ${days}d`;
+    const months = Math.floor(days/30);
+    if (months < 12) return `há ${months} ${months===1?'mês':'meses'}`;
+    return `há ${Math.floor(months/12)}a`;
   };
   const badge = (s, cls) => `<span class="badge badge-${esc(cls||s)}">${esc(s)}</span>`;
 
@@ -438,6 +481,45 @@
     document.getElementById('sVersionsCleaned').textContent = d.versions_cleaned_total.toLocaleString('pt-BR');
     if (d.bytes_freed_by_cleanup > 0) {
       document.getElementById('sVersionsCleanedSub').textContent = fmtSize(d.bytes_freed_by_cleanup)+' liberados';
+    }
+
+    // Tabelas de atividade por backup
+    const act = d.backups_activity || [];
+    if (act.length) {
+      document.getElementById('sec-activity').style.display = '';
+      const STALE_MS = 30 * 24 * 60 * 60 * 1000;
+
+      const tbStale = document.querySelector('#tblStale tbody');
+      tbStale.innerHTML = act.map(r => {
+        const isNever = !r.last_done_at;
+        const isStale = isNever || (Date.now() - new Date(r.last_done_at).getTime() > STALE_MS);
+        const when = isNever
+          ? '<span class="badge-stale">nunca</span>'
+          : isStale
+            ? `<span class="badge-stale">${timeSince(new Date(r.last_done_at))}</span>`
+            : timeSince(new Date(r.last_done_at));
+        return `<tr${isStale?' class="row-stale"':''}>
+          <td>${esc(r.label)}</td>
+          <td>${esc(r.client_name||'—')}</td>
+          <td>${when}</td>
+          <td>${r.done_count.toLocaleString('pt-BR')}</td>
+        </tr>`;
+      }).join('');
+
+      const byCount = [...act].sort((a,b) => b.done_count - a.done_count);
+      const tbCount = document.querySelector('#tblVersionCount tbody');
+      tbCount.innerHTML = byCount.map(r => {
+        const isNever = !r.last_done_at;
+        const when = isNever
+          ? '<span style="color:var(--amber)">nunca</span>'
+          : timeSince(new Date(r.last_done_at));
+        return `<tr>
+          <td>${esc(r.label)}</td>
+          <td>${esc(r.client_name||'—')}</td>
+          <td>${r.done_count.toLocaleString('pt-BR')}</td>
+          <td>${when}</td>
+        </tr>`;
+      }).join('');
     }
   }
 

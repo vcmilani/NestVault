@@ -639,6 +639,12 @@ class CloudJobStat(BaseModel):
     total_jobs: int
     enabled_jobs: int
 
+class BackupActivityEntry(BaseModel):
+    label: str
+    client_name: Optional[str]
+    last_done_at: Optional[str]
+    done_count: int
+
 class StatsResponse(BaseModel):
     total_backups: int
     total_versions_done: int
@@ -666,6 +672,7 @@ class StatsResponse(BaseModel):
     labels_created_30d: int
     versions_cleaned_total: int
     bytes_freed_by_cleanup: int
+    backups_activity: list[BackupActivityEntry]
     server_time: str
 
 
@@ -1550,6 +1557,37 @@ def _build_stats_data(db: Session) -> StatsResponse:
         if m2:
             bytes_freed_by_cleanup += int(float(m2.group(1)) * 1024 * 1024)
 
+    # --- Q10: atividade por backup (tabelas stale + versões) ---
+    _activity_rows = (
+        db.query(
+            BackupID.label,
+            BackupID.client_name,
+            func.max(
+                case((BackupVersion.status == "done", BackupVersion.finished_at), else_=None)
+            ).label("last_done_at"),
+            func.count(
+                case((BackupVersion.status == "done", BackupVersion.id), else_=None)
+            ).label("done_count"),
+        )
+        .outerjoin(BackupVersion, BackupVersion.backup_label == BackupID.label)
+        .filter(BackupID.status == "active")
+        .group_by(BackupID.label, BackupID.client_name)
+        .all()
+    )
+    _activity_sorted = sorted(
+        _activity_rows,
+        key=lambda r: (r.last_done_at is not None, r.last_done_at or datetime.min),
+    )
+    backups_activity = [
+        BackupActivityEntry(
+            label=r.label,
+            client_name=r.client_name,
+            last_done_at=r.last_done_at.isoformat() if r.last_done_at else None,
+            done_count=r.done_count or 0,
+        )
+        for r in _activity_sorted
+    ]
+
     return StatsResponse(
         total_backups=total_backups,
         total_versions_done=total_done,
@@ -1577,6 +1615,7 @@ def _build_stats_data(db: Session) -> StatsResponse:
         labels_created_30d=int(labels_created_30d),
         versions_cleaned_total=versions_cleaned_total,
         bytes_freed_by_cleanup=bytes_freed_by_cleanup,
+        backups_activity=backups_activity,
         server_time=datetime.now().isoformat(),
     )
 
