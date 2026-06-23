@@ -17,8 +17,6 @@ import httpx
 from sqlalchemy import func
 
 from database import (
-    CloudBackupJob,
-    CloudCredential,
     FileContent,
     BackupVersion,
     VersionFile,
@@ -131,16 +129,6 @@ def _collect_stats() -> dict:
             FileContent.created_at < end,
         ).first()
 
-        cloud_jobs = (
-            db.query(CloudBackupJob, CloudCredential)
-            .join(CloudCredential, CloudBackupJob.credential_id == CloudCredential.id)
-            .filter(
-                CloudBackupJob.last_run_at >= start,
-                CloudBackupJob.last_run_at < end,
-            )
-            .all()
-        )
-
         total_changes = {
             "added": sum(c["added"] for c in changes_by_label.values()),
             "modified": sum(c["modified"] for c in changes_by_label.values()),
@@ -163,17 +151,6 @@ def _collect_stats() -> dict:
                 "new_bytes": int(files_row[1] or 0),
                 "new_bytes_human": _fmt_bytes(int(files_row[1] or 0)),
             },
-            "cloud_jobs": [
-                {
-                    "folder": job.folder_name,
-                    "target": job.target_label,
-                    "provider": cred.provider,
-                    "account": cred.email,
-                    "status": job.last_run_status,
-                    "message": job.last_run_message,
-                }
-                for job, cred in cloud_jobs
-            ],
         }
     finally:
         db.close()
@@ -182,7 +159,6 @@ def _collect_stats() -> dict:
 def _fallback_message(stats: dict) -> str:
     b = stats["backups"]
     s = stats["storage"]
-    c = stats["cloud_jobs"]
     lines = [f"*NestVault — Resumo {stats['date']}*\n"]
 
     if b["total"] == 0:
@@ -208,14 +184,6 @@ def _fallback_message(stats: dict) -> str:
 
     if s["new_files"] > 0:
         lines.append(f"*Novos no store:* {s['new_files']} arquivos ({s['new_bytes_human']})")
-
-    if c:
-        lines.append("\n*Jobs Cloud:*")
-        for job in c:
-            icon = "✅" if job["status"] == "success" else "❌"
-            lines.append(f"  {icon} {job['folder']} → {job['target']} ({job['provider']})")
-    else:
-        lines.append("Nenhum job cloud executado hoje.")
 
     return "\n".join(lines)
 
