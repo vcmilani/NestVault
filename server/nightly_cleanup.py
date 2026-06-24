@@ -10,6 +10,7 @@ from cache_state import invalidate_activity
 
 log = logging.getLogger("backup-server")
 
+_SIX_HOURS  = timedelta(hours=6)
 _ONE_DAY    = timedelta(hours=24)
 _ONE_WEEK   = timedelta(days=7)
 _ONE_MONTH  = timedelta(days=30)
@@ -236,6 +237,37 @@ def run_nightly_cleanup() -> None:
 
         log.info("[nightly-cleanup] iniciando limpeza noturna")
 
+        # 0. Marcar versões "running" sem atividade de arquivos há mais de 6h como incompletas
+        _cutoff_activity = now - _SIX_HOURS
+        _last_file_subq = (
+            db.query(
+                VersionFile.version_id,
+                func.max(VersionFile.created_at).label("last_file_at"),
+            )
+            .group_by(VersionFile.version_id)
+            .subquery()
+        )
+        stale_running = (
+            db.query(BackupVersion)
+            .outerjoin(_last_file_subq, BackupVersion.id == _last_file_subq.c.version_id)
+            .filter(
+                BackupVersion.status == "running",
+                func.coalesce(_last_file_subq.c.last_file_at, BackupVersion.created_at)
+                < _cutoff_activity,
+            )
+            .all()
+        )
+        total_stale_running = len(stale_running)
+        if stale_running:
+            for v in stale_running:
+                v.status = "incomplete"
+                v.finished_at = now
+            db.commit()
+            log.info(
+                f"[nightly-cleanup] {total_stale_running} versão(ões) 'running' "
+                f"sem atividade de arquivos há 6h+ marcada(s) como 'incomplete'"
+            )
+
         labels = [row[0] for row in db.query(BackupID.label).all()]
         total_labels = len(labels)
 
@@ -331,26 +363,32 @@ def run_nightly_cleanup() -> None:
         else:
             _integrity_note = ""
 
-        summary_parts = []
+        removed_parts = []
         if total_stale:
-            summary_parts.append(f"{total_stale} stale (failed/incomplete)")
+            removed_parts.append(f"{total_stale} stale (failed/incomplete)")
         if total_day:
-            summary_parts.append(f"{total_day} done por dia")
+            removed_parts.append(f"{total_day} done por dia")
         if total_week:
-            summary_parts.append(f"{total_week} done por semana")
+            removed_parts.append(f"{total_week} done por semana")
         if total_month:
-            summary_parts.append(f"{total_month} done por mês")
+            removed_parts.append(f"{total_month} done por mês")
+
+        stale_running_note = (
+            f"; {total_stale_running} running sem atividade 6h+ → incomplete"
+            if total_stale_running else ""
+        )
 
         if total_removed:
             summary = (
                 f"{total_removed} versão(ões) removida(s) em {labels_touched} label(s)"
-                + (f": {', '.join(summary_parts)}" if summary_parts else "")
+                + (f": {', '.join(removed_parts)}" if removed_parts else "")
                 + (f"; {orphans_removed} arquivo(s) de storage liberado(s) ({round(bytes_freed/1024/1024, 1)} MB)" if orphans_removed else "")
                 + _integrity_note
+                + stale_running_note
             )
             log.info(f"[nightly-cleanup] {summary}")
         else:
-            summary = "Nenhuma versão removida — política de retenção satisfeita" + _integrity_note
+            summary = "Nenhuma versão removida — política de retenção satisfeita" + _integrity_note + stale_running_note
             log.info(f"[nightly-cleanup] {summary}")
 
         mj = db.get(MaintenanceJob, mj_id)
