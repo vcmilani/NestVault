@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v7.2.0`
+# 🗄️ NestVault  `v7.3.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -6,11 +6,13 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v7.3.0** — remoção do sistema de cloud backup OAuth direto (Google Drive e OneDrive via OAuth2 nativo). O rclone passou a ser o único backend de cloud backup, cobrindo os mesmos provedores e mais 70+ outros sem necessidade de registrar apps no Google Cloud Console ou Azure Portal. Tabelas `cloud_credentials` e `cloud_backup_jobs` podem ser dropadas manualmente com o script `tools/migrate_drop_oauth_tables.sql` (ver [⚠️ Atualizando da v7.2 para v7.3](#️-atualizando-da-v72-para-v73)).
+>
 > **v7.2.0** — progresso em tempo real para todas as operações de manutenção: `ssd-cache-move` exibe "Movendo: X / Y arquivo(s) (Z%)" por lote; `cleanup-by-date` mostra progresso por lote de versões; `nightly-cleanup` entra em status `running` no início e reporta label-a-label; `encrypt-existing` convertido para background com "Cifrando: X / Y (Z%)". Operações que antes não apareciam no histórico (`cleanup-orphans`, `rereplicate`, `reconcile-replication`, `cleanup-versions` por label) passam a registrar `MaintenanceJob`. Labels de exibição adicionados na tela de atividade para todos os tipos de job de manutenção.
 >
 > **v7.1.0** — suporte opcional a PostgreSQL como backend de banco de dados: troque entre SQLite (padrão, ideal para Raspberry Pi e NAS) e PostgreSQL (recomendado para servidores com múltiplos uploads simultâneos) via variável `DATABASE_URL`, sem quebrar instalações existentes. Inclui script de migração SQLite → PostgreSQL com fault-tolerance para bancos corrompidos, e script reverso PostgreSQL → SQLite para quem quiser voltar ao modo leve.
 >
-> **v7.0.0** — integração rclone como opção paralela de cloud backup: elimina a necessidade de registrar app no Google Cloud Console ou Azure Portal — o usuário configura os remotes via `rclone config` e o NestVault os referencia pelo nome. Suporta todos os provedores compatíveis com rclone (Google Drive, OneDrive, S3, Backblaze B2, Dropbox e 70+ outros). O pipeline producer-consumer, deduplicação, criptografia e replicação funcionam de forma idêntica ao cloud backup OAuth nativo. Skip por `mtime` garante que syncs recorrentes só baixam arquivos novos ou alterados — sem re-download de tudo. Novos endpoints em `/rclone/*` + nova tabela `rclone_backup_jobs`.
+> **v7.0.0** — integração rclone para cloud backup: elimina a necessidade de registrar app no Google Cloud Console ou Azure Portal — o usuário configura os remotes via `rclone config` e o NestVault os referencia pelo nome. Suporta todos os provedores compatíveis com rclone (Google Drive, OneDrive, S3, Backblaze B2, Dropbox e 70+ outros). O pipeline producer-consumer, deduplicação, criptografia e replicação funcionam de forma idêntica ao backup local. Skip por `mtime` garante que syncs recorrentes só baixam arquivos novos ou alterados — sem re-download de tudo. Novos endpoints em `/rclone/*` + nova tabela `rclone_backup_jobs`.
 >
 > **v6.1.0** — otimizações de performance: trabalho bloqueante (criptografia, hashing, cópias) removido do event loop via `asyncio.to_thread` — o servidor permanece responsivo durante uploads grandes e jobs cloud simultâneos. Verificação de dedup passa a ser leve (tamanho esperado calculado por fórmula AES-GCM) em vez de decifrar o arquivo inteiro a cada hit; integridade profunda fica com o job `validate-integrity`. SSD cache move reduz de 3 para 2 leituras por arquivo (`_copy_with_sha256`). Cloud runner reutiliza um único `httpx.AsyncClient` por job — elimina handshake TCP/TLS por arquivo. Cliente Python ganha pool de conexões dimensionado para alta concorrência (`pool_maxsize=32`) e retry com backoff exponencial em erros transientes.
 >
@@ -69,26 +71,29 @@ Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **com
 ```
 NestVault/
 ├── server/
-│   ├── main.py              ← API FastAPI
-│   ├── database.py          ← Modelos SQLite/SQLAlchemy
-│   ├── storage.py           ← Helpers de storage compartilhados (v4.0)
-│   ├── crypto.py            ← Criptografia AES-256-GCM (v3.1)
-│   ├── auth.py              ← Autenticação via API key
-│   ├── scheduler.py         ← APScheduler para jobs de cloud backup (v4.0)
-│   ├── cloud/               ← Módulo de cloud backup (v4.0)
-│   │   ├── base.py          ← Abstração CloudProvider
-│   │   ├── gdrive.py        ← GoogleDriveProvider
-│   │   ├── onedrive.py      ← OneDriveProvider
-│   │   ├── runner.py        ← Lógica de execução de job (OAuth)
-│   │   ├── router.py        ← Endpoints /cloud/*
-│   │   ├── rclone_runner.py ← Lógica de execução via rclone (v7.0)
-│   │   └── rclone_router.py ← Endpoints /rclone/* (v7.0)
+│   ├── main.py                  ← API FastAPI
+│   ├── database.py              ← Modelos SQLite/SQLAlchemy
+│   ├── storage.py               ← Helpers de storage (dedup, replicação, volumes)
+│   ├── crypto.py                ← Criptografia AES-256-GCM (v3.1)
+│   ├── auth.py                  ← Autenticação via API key
+│   ├── scheduler.py             ← APScheduler para jobs rclone (v4.0)
+│   ├── daily_digest.py          ← Resumo diário via Telegram (v4.5)
+│   ├── nightly_cleanup.py       ← Limpeza noturna automática (v5.2)
+│   ├── cache_state.py           ← Cache de estado para polling de atividade
+│   ├── cloud/                   ← Módulo de cloud backup via rclone (v7.0)
+│   │   ├── rclone_runner.py     ← Lógica de execução via rclone
+│   │   └── rclone_router.py     ← Endpoints /rclone/*
 │   ├── requirements.txt
+│   ├── requirements-postgres.txt ← Dependências opcionais para PostgreSQL (v7.1)
 │   └── static/
-│       └── index.html       ← Dashboard web
+│       └── index.html           ← Dashboard web
 ├── client/
-│   ├── nestvault.py         ← Cliente de backup/restore
+│   ├── nestvault.py             ← Cliente de backup/restore
 │   └── requirements.txt
+├── tools/
+│   ├── migrate_to_postgres.py       ← Migração SQLite → PostgreSQL (v7.1)
+│   ├── migrate_to_sqlite.py         ← Migração reversa PostgreSQL → SQLite (v7.1)
+│   └── migrate_drop_oauth_tables.sql ← Drop das tabelas OAuth obsoletas (v7.3)
 ├── .gitignore
 └── README.md
 ```
@@ -106,32 +111,36 @@ O servidor expõe uma API REST padrão — qualquer cliente que implemente o [co
 
 ---
 
-## ⚠️ Atualizando da v3.x para v4.0
+## ⚠️ Atualizando da v7.2 para v7.3
 
-A v4.0 adiciona duas novas tabelas ao banco: `cloud_credentials` e `cloud_backup_jobs`. O `init_db()` cria as tabelas automaticamente no startup — **sem downtime, sem intervenção manual**.
+A v7.3 **remove** o sistema de cloud backup OAuth (Google Drive e OneDrive direto). O rclone é agora o único backend. Nenhuma ação é obrigatória — o servidor simplesmente não criará mais nem acessará as tabelas `cloud_credentials` e `cloud_backup_jobs`.
 
-Nenhuma migração de dados existente é necessária. Para verificar:
+**Para limpar o banco (opcional, mas recomendado):**
 
 ```bash
-sqlite3 /mnt/hd-externo/backup.db ".tables"
-# Deve listar cloud_credentials e cloud_backup_jobs
+# Backup antes de dropar
+cp backup.db backup.db.bak
+
+# SQLite
+sqlite3 backup.db < tools/migrate_drop_oauth_tables.sql
+
+# PostgreSQL
+psql "$DATABASE_URL" -f tools/migrate_drop_oauth_tables.sql
 ```
 
-Para usar o cloud backup, adicione as credenciais OAuth ao serviço (veja [Configuração Cloud](#configuração-cloud)):
+O script já inclui instruções completas para ambos os backends.
 
-```ini
-# Google Drive (Google Cloud Console)
-Environment="GDRIVE_CLIENT_ID=<client-id>"
-Environment="GDRIVE_CLIENT_SECRET=<client-secret>"
+Se você ainda não usa o rclone, configure-o agora (veja [Cloud Backup](#️-cloud-backup)):
 
-# OneDrive (Azure Portal → App registrations — public client, sem secret)
-Environment="ONEDRIVE_CLIENT_ID=<client-id>"
-
-# URL pública do servidor (para redirect OAuth — padrão localhost:8000)
-Environment="BASE_URL=http://192.168.1.100:8000"
+```bash
+rclone config   # configure gdrive, onedrive ou qualquer outro provedor
 ```
 
-Sem essas variáveis, o servidor continua funcionando normalmente — o módulo de cloud backup simplesmente não conseguirá autenticar.
+---
+
+## ⚠️ Atualizando da v3.x para v4.0
+
+A v4.0 adicionou duas tabelas ao banco: `cloud_credentials` e `cloud_backup_jobs`. Essas tabelas existem em bancos criados entre v4.0 e v7.2 e podem ser dropadas a partir da v7.3 (ver seção acima).
 
 ---
 
@@ -338,17 +347,6 @@ export REPLICATION_FACTOR=2
 export ENCRYPTION_ENABLED=true
 export ENCRYPTION_KEY="$(python3 -c 'import os,base64; print(base64.b64encode(os.urandom(32)).decode())')"
 
-# Cloud backup — Google Drive (Google Cloud Console → APIs & Services → Credentials)
-export GDRIVE_CLIENT_ID="..."
-export GDRIVE_CLIENT_SECRET="..."
-
-# Cloud backup — OneDrive (portal.azure.com → App registrations — public client, sem secret)
-export ONEDRIVE_CLIENT_ID="..."
-
-# URL base do servidor para OAuth callback (padrão: http://localhost:8000)
-# Deve ser acessível pelo browser do usuário ao autenticar
-export BASE_URL="http://192.168.1.100:8000"
-
 # Threshold mínimo de espaço livre (GB) antes de usar o próximo disco da lista (padrão: 10)
 export STORAGE_FALLBACK_THRESHOLD_GB=10
 
@@ -373,17 +371,6 @@ export DIGEST_HOUR=18
 # rclone backup (opcional — omitir usa ~/.config/rclone/rclone.conf)
 export RCLONE_CONFIG="/etc/rclone/rclone.conf"
 ```
-
-#### Configuração Cloud (OAuth nativo)
-
-| Variável | Obrigatório | Descrição |
-|---|:-:|---|
-| `GDRIVE_CLIENT_ID` | | Client ID do app OAuth2 no Google Cloud Console |
-| `GDRIVE_CLIENT_SECRET` | | Client Secret correspondente |
-| `ONEDRIVE_CLIENT_ID` | | Application (client) ID no Azure Portal |
-| `BASE_URL` | | URL pública do servidor para callback OAuth (padrão: `http://localhost:8000`) |
-
-Sem essas variáveis o servidor funciona normalmente — apenas o cloud backup OAuth ficará indisponível.
 
 #### Configuração rclone
 
@@ -447,11 +434,6 @@ Environment="REPLICATION_FACTOR=2"
 # Criptografia em repouso — omitir se o disco já tem criptografia própria
 # Environment="ENCRYPTION_ENABLED=true"
 # Environment="ENCRYPTION_KEY=<chave-base64-32-bytes>"
-# Cloud backup — omitir se não for usar Google Drive / OneDrive
-# Environment="GDRIVE_CLIENT_ID=<id>"
-# Environment="GDRIVE_CLIENT_SECRET=<secret>"
-# Environment="ONEDRIVE_CLIENT_ID=<id>"
-# Environment="BASE_URL=http://192.168.1.100:8000"
 # SSD cache — omitir se não houver SSD interno ou ganho não for necessário
 # Environment="SSD_CACHE_ENABLED=true"
 # Environment="SSD_CACHE_DIR=/tmp/nestvault_ssd_cache"
@@ -1052,49 +1034,18 @@ pytest tests/ --cov=server --cov-report=term-missing
 
 ## ☁️ Cloud Backup
 
-Existem duas formas independentes de configurar cloud backup. Ambas podem coexistir no mesmo servidor.
+O cloud backup do NestVault usa o **rclone** como único backend. O rclone suporta 70+ provedores (Google Drive, OneDrive, S3, Backblaze B2, Dropbox e outros) e gerencia toda a autenticação localmente — sem necessidade de registrar apps no Google Cloud Console ou Azure Portal.
 
-| | OAuth nativo | Via rclone |
-|---|---|---|
-| **Provedores** | Google Drive, OneDrive | 70+ (Drive, OneDrive, S3, B2, Dropbox…) |
-| **Setup** | Registrar app no Google Cloud / Azure | Instalar rclone e rodar `rclone config` |
-| **Tokens** | Armazenados no banco (cifrados) | Gerenciados pelo rclone |
-| **Endpoints** | `/cloud/*` | `/rclone/*` |
+| | Via rclone |
+|---|---|
+| **Provedores** | 70+ (Drive, OneDrive, S3, B2, Dropbox…) |
+| **Setup** | Instalar rclone e rodar `rclone config` |
+| **Tokens** | Gerenciados pelo rclone em `~/.config/rclone/rclone.conf` |
+| **Endpoints** | `/rclone/*` |
 
----
+O NestVault não armazena tokens — o rclone gerencia autenticação externamente. Isso elimina a necessidade de registrar aplicativos OAuth nos portais dos provedores.
 
-### Opção 1 — OAuth nativo (Google Drive / OneDrive)
-
-Para ativar, registre um aplicativo OAuth2 em cada provedor:
-
-**Google Drive:**
-1. [Google Cloud Console](https://console.cloud.google.com/) → APIs & Services → Credentials → Create OAuth 2.0 Client ID
-2. Tipo: **Web application**
-3. Authorized redirect URI: `http://<ip-do-servidor>:8000/cloud/callback/gdrive`
-4. Copie Client ID e Client Secret → env vars `GDRIVE_CLIENT_ID` / `GDRIVE_CLIENT_SECRET`
-
-**OneDrive:**
-1. [Azure Portal](https://portal.azure.com/) → App registrations → New registration
-2. Authentication → Add a platform → **Mobile and desktop applications** (public client — requerido pelo PKCE)
-3. Redirect URI: `http://<ip-do-servidor>:8000/cloud/callback/onedrive`
-4. Marque "Allow public client flows" → Save
-5. Copie o Application (client) ID → env var `ONEDRIVE_CLIENT_ID` (nenhum client secret é necessário)
-
-**Fluxo de uso:**
-
-1. Abra o dashboard (`http://<ip>:8000/`) → seção **Cloud Backup**
-2. Clique em **+ Google Drive** ou **+ OneDrive** — o browser redireciona para o OAuth do provedor
-3. Após autorizar, a conta aparece na lista — pode conectar múltiplas contas de ambos os provedores
-4. Clique em **+ Job** na conta — selecione a pasta de origem e o label de destino; configure o cron (opcional)
-5. Use **▶ Run** para executar manualmente ou aguarde o próximo disparo agendado
-
----
-
-### Opção 2 — Via rclone *(v7.0)*
-
-Não requer registro de app. O rclone gerencia toda a autenticação OAuth localmente; o NestVault apenas chama o binário para listar e baixar arquivos.
-
-#### Pré-requisito: instalar o rclone
+### Pré-requisito: instalar o rclone
 
 ```bash
 # Linux / Raspberry Pi
@@ -1107,7 +1058,7 @@ brew install rclone
 curl https://rclone.org/install.sh | sudo bash
 ```
 
-#### Configurar Google Drive no rclone
+### Configurar Google Drive no rclone
 
 Execute no servidor (requer browser ou acesso ao URL exibido):
 
@@ -1146,7 +1097,7 @@ rclone lsd gdrive:              # lista pastas na raiz — confirma que funciona
 rclone ls gdrive:Fotos/2024     # lista arquivos em uma pasta
 ```
 
-#### Configurar OneDrive no rclone
+### Configurar OneDrive no rclone
 
 ```bash
 rclone config
@@ -1179,11 +1130,11 @@ rclone lsd onedrive:            # lista pastas na raiz
 rclone ls onedrive:Documentos   # lista arquivos em uma pasta
 ```
 
-#### Configurar Dropbox, S3, Backblaze B2 e outros
+### Configurar Dropbox, S3, Backblaze B2 e outros
 
 O processo é o mesmo: `rclone config` → escolher o provedor → seguir o assistente. Consulte a [documentação do rclone](https://rclone.org/docs/) para cada provedor. Após configurado, o nome do remote funciona igual no NestVault.
 
-#### Verificar remotes configurados
+### Verificar remotes configurados
 
 ```bash
 rclone listremotes
@@ -1194,7 +1145,7 @@ rclone listremotes
 
 O endpoint `GET /rclone/remotes` retorna a mesma lista via API.
 
-#### Criar um job de backup rclone
+### Criar um job de backup rclone
 
 Via API:
 
@@ -1237,7 +1188,7 @@ curl http://<ip>:8000/rclone/jobs/1/status \
   -H "X-API-Key: <sua-chave>"
 ```
 
-#### Servidor sem browser (Raspberry Pi / VPS)
+### Servidor sem browser (Raspberry Pi / VPS)
 
 O rclone tem suporte nativo para autenticação em máquinas headless. Na etapa `Use web browser to authenticate rclone?`, responda `n`. O rclone exibe uma URL — abra no seu computador pessoal, autorize, e o rclone no servidor aguarda o código ser colado no terminal.
 
@@ -1256,15 +1207,15 @@ O NestVault usa o `rclone.conf` padrão do usuário que roda o servidor. Para um
 
 ---
 
-### Funcionamento interno (ambas as opções)
+### Funcionamento interno
 
-- O servidor lista recursivamente a pasta configurada e baixa cada arquivo para storage local
+- O servidor chama `rclone lsjson --recursive` para listar a pasta e `rclone cat` para baixar cada arquivo em streaming
+- SHA-256 calculado em single-pass durante o stream — sem buffer completo em memória
 - Arquivos idênticos (mesmo SHA-256) são detectados por deduplicação — nenhum byte extra no disco
 - Criptografia e replicação funcionam normalmente — o backup cloud é tratado igual ao backup via cliente CLI
 - Arquivos com `mtime` inalterado em relação à versão anterior são ignorados sem re-download — runs recorrentes em pastas estáticas são significativamente mais rápidos
 - Erros por arquivo são tolerados — o job continua e registra o erro na última mensagem
-- *(OAuth nativo)* Tokens são renovados automaticamente; refresh_tokens são armazenados criptografados no banco via Fernet
-- *(rclone)* Tokens são gerenciados pelo rclone em `~/.config/rclone/rclone.conf` — NestVault não os armazena
+- Tokens gerenciados pelo rclone em `~/.config/rclone/rclone.conf` — NestVault não os armazena nem os acessa
 
 ### Cron
 
@@ -1299,7 +1250,7 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 - **Tabela de backups** — clique em um label para expandir as versões
 - **Versões** — clique em uma versão para ver os arquivos
 - **Comparação de versões** — selecione duas versões com as checkboxes e clique em ⇄ Comparar: veja arquivos adicionados, removidos, modificados e o delta de tamanho de cada um
-- **Cloud Backup** *(v4.0)* — conecte contas Google Drive e OneDrive, gerencie jobs de backup agendados e execute manualmente
+- **Cloud Backup (rclone)** — gerencie jobs de backup rclone agendados e execute manualmente via `/rclone-jobs`
 - **Manutenção** — página dedicada a operações administrativas de storage:
   - **Limpeza de Órfãos** — remove arquivos físicos sem referência em nenhuma versão ativa
   - **Re-replicar** — cria cópias faltantes para conteúdos com menos réplicas que `REPLICATION_FACTOR`
@@ -1327,17 +1278,30 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 | **`tools/migrate_to_sqlite.py`** | Script reverso PostgreSQL → SQLite: permite voltar ao modo leve ou criar backup portátil do banco |
 | **`README.md`** | Nova seção `## 🐘 PostgreSQL (opcional)` com instalação, configuração, migração e reversão |
 
+### v7.3.0
+
+| Componente | Mudança |
+|---|---|
+| **`cloud/base.py`, `gdrive.py`, `onedrive.py`, `router.py`, `runner.py`** | Deletados — sistema OAuth removido; rclone é o único backend de cloud backup |
+| **`cloud/rclone_runner.py`** | Absorveu `_process_file_sync` e `_register_version_file_sync` (antes importadas do deletado `runner.py`); adicionados imports de `shutil`, `crypto`, `FileContent`, `FileContentCopy` |
+| **`main.py`** | Removidos schemas `RunningJobInfo`, `RecentJobInfo`, `CloudJobStat`; removidos campos `running_jobs`, `recent_jobs` de `ActivityResponse` e `cloud_jobs` de `StatsResponse`; removido router `/cloud/*` |
+| **`scheduler.py`** | Removidas `add_or_update_job`, `remove_job`, `reload_jobs_from_db` (OAuth); mantidas apenas as variantes `rclone_*` |
+| **`database.py`** | Removidas classes `CloudCredential`, `CloudBackupJob` e funções de token encryption (`_token_cipher`, `encrypt_token`, `decrypt_token`) |
+| **`daily_digest.py`** | Removida query de cloud jobs — digest passa a reportar apenas backups locais e armazenamento |
+| **`static/index.html`** | Removidas seção "Cloud Backup" OAuth, modais de autenticação e todo o JS associado |
+| **`tools/migrate_drop_oauth_tables.sql`** | Novo script para dropar `cloud_backup_jobs` e `cloud_credentials` em bancos existentes (SQLite e PostgreSQL) |
+
 ### v7.0.0
 
 | Componente | Mudança |
 |---|---|
-| **`cloud/rclone_runner.py`** | Novo runner paralelo ao OAuth: lista via `rclone lsjson --recursive`, baixa via `rclone cat` com SHA-256 calculado em single pass durante o stream — sem buffer completo em memória |
-| **`cloud/rclone_runner.py` — skip por mtime** | Mesma lógica do runner OAuth: arquivos com `mtime` inalterado não são baixados; `prev_files` carregado da última versão `done` (+ versão `incomplete`/`failed` para resume) |
-| **`cloud/rclone_runner.py` — producer-consumer** | Reutiliza `_process_file_sync` e `_register_version_file_sync` importados de `cloud/runner.py` — deduplicação, criptografia, replicação e registro no banco idênticos ao fluxo OAuth |
+| **`cloud/rclone_runner.py`** | Novo runner: lista via `rclone lsjson --recursive`, baixa via `rclone cat` com SHA-256 calculado em single pass durante o stream — sem buffer completo em memória |
+| **`cloud/rclone_runner.py` — skip por mtime** | Arquivos com `mtime` inalterado não são baixados; `prev_files` carregado da última versão `done` (+ versão `incomplete`/`failed` para resume) |
+| **`cloud/rclone_runner.py` — producer-consumer** | Pipeline producer-consumer com `_process_file_sync` e `_register_version_file_sync` — deduplicação, criptografia, replicação e registro no banco |
 | **`cloud/rclone_runner.py` — subprocess seguro** | Todos os comandos rclone usam `asyncio.create_subprocess_exec` (lista de args, sem `shell=True`) — sem risco de injection; `remote_name` validado com regex `[a-zA-Z0-9_-]{1,64}` |
-| **`cloud/rclone_router.py`** | Novos endpoints em `/rclone/*`: `GET /remotes`, `GET /remotes/{name}/browse`, CRUD de jobs, `POST /jobs/{id}/run`, `GET /jobs/{id}/status` — mesmo padrão de lock por job do router OAuth |
-| **`database.py` — `RcloneBackupJob`** | Nova tabela `rclone_backup_jobs` sem FK para `cloud_credentials` — rclone gerencia tokens externamente; criada automaticamente pelo `init_db()` no startup |
-| **`scheduler.py`** | `add_or_update_rclone_job` / `remove_rclone_job` / `reload_rclone_jobs_from_db` — agendamento cron idêntico ao dos jobs OAuth, com prefixo de ID `rclone_job_{id}` para não colidir |
+| **`cloud/rclone_router.py`** | Endpoints em `/rclone/*`: `GET /remotes`, `GET /remotes/{name}/browse`, CRUD de jobs, `POST /jobs/{id}/run`, `GET /jobs/{id}/status` |
+| **`database.py` — `RcloneBackupJob`** | Nova tabela `rclone_backup_jobs`; rclone gerencia tokens externamente — nenhum token no banco |
+| **`scheduler.py`** | `add_or_update_rclone_job` / `remove_rclone_job` / `reload_rclone_jobs_from_db` — agendamento cron com prefixo `rclone_job_{id}` |
 
 ### v6.1.0
 
@@ -1350,7 +1314,7 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 | **`storage.py` — SSD cache move** | `_copy_with_sha256`: lê a origem uma única vez em chunks de 1 MB calculando hash e escrevendo o destino simultaneamente — 2 leituras em vez de 3 por move (~33% menos I/O) |
 | **`cloud/runner.py` — consumer** | `_process_file_sync` e `_register_version_file_sync` extraídas como funções síncronas; consumer chama ambas via `asyncio.to_thread` — downloads do producer não travam mais enquanto o consumer processa |
 | **`cloud/runner.py` — `httpx.AsyncClient`** | Um único cliente compartilhado por job via `async with httpx.AsyncClient(...)` em `run_cloud_backup_job` — elimina handshake TCP/TLS por arquivo baixado |
-| **`cloud/base.py`, `gdrive.py`, `onedrive.py`** | `download_file_to` aceita parâmetro opcional `client: httpx.AsyncClient \| None` — usa o cliente compartilhado do runner quando fornecido, cria um próprio se `None` (retrocompatível) |
+| **`cloud/gdrive.py`, `onedrive.py`** | `download_file_to` aceita parâmetro opcional `client: httpx.AsyncClient \| None` — usa o cliente compartilhado do runner quando fornecido, cria um próprio se `None` (retrocompatível) *(removido na v7.3)* |
 | **`nestvault.py` — pool HTTP** | `HTTPAdapter(pool_connections=4, pool_maxsize=32)` — pool dimensionado para `--workers` altos sem descartar conexões |
 | **`nestvault.py` — retry** | `_with_retries(fn, what)` com backoff exponencial (1 s, 2 s) aplicado em upload, register e check — tolera erros transientes (429, 5xx, falhas de rede) sem abortar o backup |
 
@@ -1661,26 +1625,21 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 | `GET` | `/maintenance/cleanup-by-date/preview` | Preview de versões elegíveis para remoção antes de uma data (`?before=YYYY-MM-DD[&label=X]`) |
 | `POST` | `/maintenance/cleanup-by-date` | Remove versões anteriores a uma data; preserva última versão `done` por label e versões `running` (`?before=YYYY-MM-DD[&label=X]`) |
 
-### Cloud Backup *(v4.0)*
+### Cloud Backup (rclone)
 
 | Método | Endpoint | Descrição |
 |--------|----------|-----------|
-| `GET` | `/cloud/accounts` | Lista contas cloud conectadas |
-| `GET` | `/cloud/accounts/{provider}/auth` | Gera URL de autenticação OAuth2 (`provider`: `gdrive` ou `onedrive`) |
-| `DELETE` | `/cloud/accounts/{id}` | Desconecta conta (remove credenciais e jobs associados) |
-| `GET` | `/cloud/accounts/{id}/folders` | Lista pastas raiz da conta |
-| `GET` | `/cloud/accounts/{id}/folders/{folder_id}` | Lista subpastas de uma pasta |
-| `GET` | `/cloud/jobs` | Lista todos os jobs de cloud backup |
-| `POST` | `/cloud/jobs` | Cria job de backup (conta, pasta, label destino, cron) |
-| `GET` | `/cloud/jobs/{id}` | Detalhes de um job |
-| `PATCH` | `/cloud/jobs/{id}` | Atualiza job (pasta, label, cron, enabled) |
-| `DELETE` | `/cloud/jobs/{id}` | Remove job |
-| `POST` | `/cloud/jobs/{id}/run` | Inicia execução manual do job (async, retorna 202 imediatamente) |
-| `GET` | `/cloud/jobs/{id}/status` | Status da última execução (last_run_at, status, message) |
+| `GET` | `/rclone/remotes` | Lista remotes configurados no rclone |
+| `GET` | `/rclone/remotes/{name}/browse` | Lista pastas de um remote (`?path=` opcional) |
+| `GET` | `/rclone/jobs` | Lista todos os jobs rclone |
+| `POST` | `/rclone/jobs` | Cria job (remote_name, remote_path, label destino, cron) |
+| `GET` | `/rclone/jobs/{id}` | Detalhes de um job |
+| `PATCH` | `/rclone/jobs/{id}` | Atualiza job (path, label, cron, enabled) |
+| `DELETE` | `/rclone/jobs/{id}` | Remove job |
+| `POST` | `/rclone/jobs/{id}/run` | Inicia execução manual (async, retorna 202 imediatamente) |
+| `GET` | `/rclone/jobs/{id}/status` | Status da última execução (last_run_at, status, message) |
 
-> O callback OAuth (`GET /cloud/callback/{provider}`) é chamado pelo provedor — não é chamado diretamente pelo usuário.
->
-> `POST /cloud/jobs/{id}/run` retorna `{ "status": "started", "job_id": N }` — a execução ocorre em background. Use `GET /cloud/jobs/{id}/status` para acompanhar.
+> `POST /rclone/jobs/{id}/run` retorna `{ "status": "started", "job_id": N }` — a execução ocorre em background. Use `GET /rclone/jobs/{id}/status` para acompanhar.
 
 > `/maintenance/cleanup-orphans` — retorna `{ "files_removed": N, "bytes_freed": N }`. Útil após deleções em massa. Operação **síncrona**.
 >

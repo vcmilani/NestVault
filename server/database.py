@@ -1,5 +1,5 @@
 """
-Models do banco de dados — v7.2.0
+Models do banco de dados — v7.3.0
 Suporte dual: SQLite (padrão) ou PostgreSQL (opcional via DATABASE_URL).
 
 SQLite:  configurado via DB_PATH (padrão ./backup.db) — ideal para uso doméstico/NAS.
@@ -15,7 +15,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.pool import NullPool
 from datetime import datetime, timezone
-import os, hashlib, base64
+import os
 
 def _utcnow():
     return datetime.now()
@@ -137,42 +137,6 @@ class VersionFile(Base):
     content = relationship("FileContent", back_populates="refs")
 
 
-class CloudCredential(Base):
-    __tablename__ = "cloud_credentials"
-
-    id           = Column(Integer, primary_key=True)
-    provider     = Column(String, nullable=False, index=True)  # "gdrive" | "onedrive"
-    email        = Column(String, nullable=False)
-    display_name = Column(String, nullable=True)
-    access_token = Column(String, nullable=True)
-    refresh_token = Column(String, nullable=False)  # armazenado criptografado
-    token_expiry = Column(DateTime, nullable=True)
-    created_at   = Column(DateTime, default=_utcnow)
-
-    jobs = relationship("CloudBackupJob", back_populates="credential", cascade="all, delete-orphan")
-
-
-class CloudBackupJob(Base):
-    __tablename__ = "cloud_backup_jobs"
-    __table_args__ = (
-        Index("idx_cbj_last_run", "last_run_at"),
-    )
-
-    id              = Column(Integer, primary_key=True)
-    credential_id   = Column(Integer, ForeignKey("cloud_credentials.id"), nullable=False, index=True)
-    folder_id       = Column(String, nullable=False)
-    folder_name     = Column(String, nullable=False)
-    target_label    = Column(String, nullable=False)
-    cron_expr       = Column(String, nullable=True)
-    enabled         = Column(Boolean, default=True, nullable=False)
-    last_run_at     = Column(DateTime, nullable=True)
-    last_run_status = Column(String, nullable=True)   # "running" | "success" | "error"
-    last_run_message = Column(String, nullable=True)
-    created_at      = Column(DateTime, default=_utcnow)
-
-    credential = relationship("CloudCredential", back_populates="jobs")
-
-
 class MaintenanceJob(Base):
     __tablename__ = "maintenance_jobs"
 
@@ -209,59 +173,6 @@ class RcloneBackupJob(Base):
     last_run_status  = Column(String, nullable=True)
     last_run_message = Column(String, nullable=True)
     created_at       = Column(DateTime, default=_utcnow)
-
-
-# -- Token encryption ---------------------------------------------------------
-import logging as _logging
-_log = _logging.getLogger("backup-server")
-
-_cipher_cache: dict[str, object] = {}
-
-
-def _token_cipher():
-    api_key = os.getenv("BACKUP_API_KEY", "")
-    if not api_key:
-        return None
-    if api_key not in _cipher_cache:
-        from cryptography.fernet import Fernet
-        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-        from cryptography.hazmat.primitives import hashes
-        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32,
-                         salt=b"nestvault-token-v1", iterations=260_000)
-        _cipher_cache[api_key] = Fernet(base64.urlsafe_b64encode(kdf.derive(api_key.encode())))
-    return _cipher_cache[api_key]
-
-
-def _token_cipher_legacy():
-    """Chave SHA-256 usada antes da migração para PBKDF2 — apenas para decrypt de fallback."""
-    api_key = os.getenv("BACKUP_API_KEY", "")
-    if not api_key:
-        return None
-    from cryptography.fernet import Fernet
-    return Fernet(base64.urlsafe_b64encode(hashlib.sha256(api_key.encode()).digest()))
-
-
-def encrypt_token(token: str) -> str:
-    cipher = _token_cipher()
-    return cipher.encrypt(token.encode()).decode() if cipher else token
-
-
-def decrypt_token(encrypted: str) -> str:
-    cipher = _token_cipher()
-    if not cipher:
-        return encrypted
-    try:
-        return cipher.decrypt(encrypted.encode()).decode()
-    except Exception:
-        # Fallback: token cifrado com chave legada (SHA-256) antes da migração para PBKDF2
-        try:
-            legacy = _token_cipher_legacy()
-            plaintext = legacy.decrypt(encrypted.encode()).decode()
-            _log.info("[token] Token legado detectado — será re-cifrado com PBKDF2 na próxima gravação")
-            return plaintext
-        except Exception:
-            _log.warning("[token] Falha ao decifrar token — pode estar em texto plano (migração sem API_KEY)")
-            return encrypted
 
 
 def init_db():

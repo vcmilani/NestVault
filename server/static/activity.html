@@ -392,7 +392,7 @@
 
   function _interval(data) {
     const hasMaintRunning = (data.maintenance_jobs || []).some(j => j.status === 'running');
-    return (data.running_versions.length + data.running_jobs.length > 0 || hasMaintRunning) ? 2000 : 5000;
+    return ((data.running_versions || []).length > 0 || hasMaintRunning) ? 2000 : 5000;
   }
 
   async function poll() {
@@ -426,9 +426,9 @@
   // Render
   function render(data) {
     _checkNotifications(data.running_versions || [], data.recent_versions || []);
-    renderRunning(data.running_versions, data.running_jobs, data.maintenance_jobs || []);
+    renderRunning(data.running_versions || [], data.maintenance_jobs || []);
     renderStorage(data.storage, data.disks);
-    renderRecent(data.recent_versions, data.recent_jobs, data.maintenance_jobs || []);
+    renderRecent(data.recent_versions || [], data.maintenance_jobs || []);
     setTimeout(applyStatusFilter, 0);
     if (typeof _updateOverflowHints === 'function') _updateOverflowHints();
   }
@@ -447,10 +447,10 @@
     'reconcile-replication': 'Reconciliação de Réplicas',
   };
 
-  function renderRunning(versions, jobs, maintJobs) {
+  function renderRunning(versions, maintJobs) {
     const el = document.getElementById('runningSection');
     const runningMaint = maintJobs.filter(m => m.status === 'running');
-    const total = versions.length + jobs.length + runningMaint.length;
+    const total = versions.length + runningMaint.length;
     document.getElementById('runningCount').textContent = total ? total+' em execução' : '';
 
     if (!total) {
@@ -472,19 +472,6 @@
         </div>
       </div>`).join('');
 
-    const jCards = jobs.map(j => `
-      <div class="running-card">
-        <div class="running-card-type">Cloud Backup — ${esc(j.provider)}</div>
-        <div class="running-card-title">
-          <span class="pulse-dot"></span>${esc(j.folder_name)}
-        </div>
-        <div class="running-card-meta">
-          <div class="running-card-row">Conta: <span>${esc(j.email)}</span></div>
-          <div class="running-card-row">Destino: <span>${esc(j.target_label)}</span></div>
-          <div class="running-card-row">Iniciado há: <span>${elapsed(j.last_run_at)}</span></div>
-        </div>
-      </div>`).join('');
-
     const mCards = runningMaint.map(m => `
       <div class="running-card maintenance">
         <div class="running-card-type">Manutenção</div>
@@ -497,7 +484,7 @@
         </div>
       </div>`).join('');
 
-    el.innerHTML = '<div class="running-grid">'+vCards+jCards+mCards+'</div>';
+    el.innerHTML = '<div class="running-grid">'+vCards+mCards+'</div>';
   }
 
   function renderStorage(storage, disks) {
@@ -555,7 +542,7 @@
       <div class="disks-mini">${diskCards||'<div class="empty-state">Nenhum volume configurado</div>'}</div>`;
   }
 
-  function renderRecent(versions, jobs, maintJobs) {
+  function renderRecent(versions, maintJobs) {
     const el = document.getElementById('recentSection');
     const recentMaint = maintJobs.filter(m => m.status !== 'running');
 
@@ -569,17 +556,6 @@
         <td class="td-r td-dim td-nb">${fmtDuration(v.duration_seconds)}</td>
         <td class="td-nb">${fmtDiff(v)}</td>
         <td class="td-dim td-nb">${window.relTime ? relTime(v.finished_at) : fmtDate(v.finished_at)}</td>
-      </tr>`).join('');
-
-    const jRows = jobs.map(j => `
-      <tr>
-        <td class="td-dim">${esc(j.provider)}</td>
-        <td class="td-dim">${esc(j.email)}</td>
-        <td>${esc(j.folder_name)}</td>
-        <td>${esc(j.target_label)}</td>
-        <td>${badge(j.last_run_status)}</td>
-        <td class="td-dim" title="${esc(j.last_run_message||'')}">${esc((j.last_run_message||'').slice(0,60)||'—')}</td>
-        <td class="td-dim td-nb">${window.relTime ? relTime(j.last_run_at) : fmtDate(j.last_run_at)}</td>
       </tr>`).join('');
 
     const mRows = recentMaint.map(m => {
@@ -607,18 +583,6 @@
             </tr></thead>
             <tbody>${vRows}</tbody>
           </table>` : '<div class="empty-state">Nenhuma versão finalizada nas últimas 24h</div>'}
-        </div>
-      </div>
-      <div class="table-section">
-        <div class="table-sub">Jobs cloud</div>
-        <div class="table-wrap">
-          ${jobs.length ? `<table>
-            <thead><tr>
-              <th>Provider</th><th>Conta</th><th>Pasta</th><th>Destino</th>
-              <th>Status</th><th>Mensagem</th><th>Executado</th>
-            </tr></thead>
-            <tbody>${jRows}</tbody>
-          </table>` : '<div class="empty-state">Nenhum job cloud executado recentemente</div>'}
         </div>
       </div>
       <div class="table-section">

@@ -1,5 +1,5 @@
 """
-NestVault  v7.2.0
+NestVault  v7.3.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -7,6 +7,12 @@ Otimizacoes de performance:
 - Indices no banco + WAL mode
 - Cleanup de orfaos em uma unica query
 - Limpeza de arquivos ao deletar label/versao feita em background (nao bloqueia o cliente)
+
+v7.3.0:
+- Remove sistema de backup cloud OAuth (Google Drive direto / OneDrive direto)
+- Mantém apenas o rclone como backend de cloud backup
+- Tabelas cloud_credentials e cloud_backup_jobs podem ser dropadas manualmente
+  (ver tools/migrate_drop_oauth_tables.sql)
 
 v7.2.0:
 - Progresso em tempo real para todas as operações de manutenção
@@ -31,11 +37,10 @@ from sqlalchemy import func, select, insert, literal, case
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
-from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, CloudBackupJob, CloudCredential, MaintenanceJob, SsdCachePendingMove, RcloneBackupJob
+from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob, SsdCachePendingMove, RcloneBackupJob
 import crypto
 import storage
 from auth import require_api_key, API_KEY, AUTH_ENABLED
-from cloud.router import router as cloud_router
 from cloud.rclone_router import router as rclone_router
 import scheduler as sched
 from cache_state import _activity_wake, invalidate_activity
@@ -137,16 +142,6 @@ def _cleanup_stale_running_states():
     """Reseta estados 'running' órfãos deixados por um reinício do servidor."""
     db = SessionLocal()
     try:
-        stale_jobs = (
-            db.query(CloudBackupJob)
-            .filter(CloudBackupJob.last_run_status == "running")
-            .all()
-        )
-        for job in stale_jobs:
-            job.last_run_status  = "error"
-            job.last_run_message = "Interrompido pelo reinício do servidor"
-            log.warning(f"[startup] Job cloud {job.id} ({job.folder_name}) estava running — marcado como error")
-
         stale_rclone_jobs = (
             db.query(RcloneBackupJob)
             .filter(RcloneBackupJob.last_run_status == "running")
@@ -178,7 +173,7 @@ def _cleanup_stale_running_states():
             m.summary     = (m.summary or "") + " [interrompido pelo reinício do servidor]"
             log.warning(f"[startup] MaintenanceJob {m.id} ({m.job_type}) estava running — marcado como error")
 
-        if stale_jobs or stale_versions or stale_maint:
+        if stale_rclone_jobs or stale_versions or stale_maint:
             db.commit()
     finally:
         db.close()
@@ -312,7 +307,6 @@ async def lifespan(_: FastAPI):
     ssd_monitor     = asyncio.create_task(_ssd_space_monitor())
     activity_refresh = asyncio.create_task(_activity_refresh_loop())
     sched.scheduler.start()
-    sched.reload_jobs_from_db()
     sched.reload_rclone_jobs_from_db()
     sched.schedule_daily_digest()
     sched.schedule_nightly_cleanup()
@@ -327,8 +321,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="7.2.0", lifespan=lifespan)
-app.include_router(cloud_router)
+app = FastAPI(title="NestVault", version="7.3.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
@@ -567,14 +560,6 @@ class RunningVersionInfo(BaseModel):
     prev_file_count: Optional[int] = None
     prev_size_bytes: Optional[int] = None
 
-class RunningJobInfo(BaseModel):
-    id: int
-    provider: str
-    email: str
-    folder_name: str
-    target_label: str
-    last_run_at: str
-
 class RecentVersionInfo(BaseModel):
     backup_label: str
     version_key: str
@@ -589,16 +574,6 @@ class RecentVersionInfo(BaseModel):
     diff_modified: Optional[int] = None
     diff_removed: Optional[int] = None
 
-class RecentJobInfo(BaseModel):
-    id: int
-    provider: str
-    email: str
-    folder_name: str
-    target_label: str
-    last_run_at: str
-    last_run_status: str
-    last_run_message: Optional[str]
-
 class MaintenanceJobInfo(BaseModel):
     id: int
     job_type: str
@@ -609,11 +584,9 @@ class MaintenanceJobInfo(BaseModel):
 
 class ActivityResponse(BaseModel):
     running_versions: list[RunningVersionInfo]
-    running_jobs: list[RunningJobInfo]
     storage: StorageInfoResponse
     disks: list[DiskVolumeInfo]
     recent_versions: list[RecentVersionInfo]
-    recent_jobs: list[RecentJobInfo]
     maintenance_jobs: list[MaintenanceJobInfo]
     server_time: str
 
@@ -636,11 +609,6 @@ class MaintenanceTypeStat(BaseModel):
     done_count: int
     error_count: int
     last_run_at: Optional[str]
-
-class CloudJobStat(BaseModel):
-    provider: str
-    total_jobs: int
-    enabled_jobs: int
 
 class BackupActivityEntry(BaseModel):
     label: str
@@ -669,7 +637,6 @@ class StatsResponse(BaseModel):
     top_backups: list[TopBackupEntry]
     maintenance_by_type: list[MaintenanceTypeStat]
     last_maintenance_jobs: list[MaintenanceJobInfo]
-    cloud_jobs: list[CloudJobStat]
     rclone_total: int
     rclone_enabled: int
     labels_created_30d: int
@@ -1513,20 +1480,7 @@ def _build_stats_data(db: Session) -> StatsResponse:
         summary=j.summary,
     ) for j in last_maint]
 
-    # --- Q8: cloud e rclone ---
-    cloud_rows = db.query(
-        CloudCredential.provider,
-        func.count(CloudBackupJob.id).label("total"),
-        func.sum(case((CloudBackupJob.enabled == True, 1), else_=0)).label("enabled"),
-    ).join(CloudCredential, CloudCredential.id == CloudBackupJob.credential_id
-    ).group_by(CloudCredential.provider).all()
-
-    cloud_jobs = [CloudJobStat(
-        provider=r.provider,
-        total_jobs=int(r.total or 0),
-        enabled_jobs=int(r.enabled or 0),
-    ) for r in cloud_rows]
-
+    # --- Q8: rclone ---
     rclone_row = db.query(
         func.count(RcloneBackupJob.id).label("total"),
         func.coalesce(func.sum(case((RcloneBackupJob.enabled == True, 1), else_=0)), 0).label("enabled"),
@@ -1612,7 +1566,6 @@ def _build_stats_data(db: Session) -> StatsResponse:
         top_backups=top_backups,
         maintenance_by_type=maintenance_by_type,
         last_maintenance_jobs=last_maintenance_jobs,
-        cloud_jobs=cloud_jobs,
         rclone_total=rclone_total,
         rclone_enabled=rclone_enabled,
         labels_created_30d=int(labels_created_30d),
@@ -1693,23 +1646,7 @@ def _build_fast_data(db: Session) -> tuple:
         for v in running_vs
     ]
 
-    # 2. Cloud jobs em execução
-    running_job_rows = (
-        db.query(CloudBackupJob, CloudCredential)
-        .join(CloudCredential, CloudCredential.id == CloudBackupJob.credential_id)
-        .filter(CloudBackupJob.last_run_status == "running")
-        .all()
-    )
-    running_job_infos = [
-        RunningJobInfo(
-            id=j.id, provider=c.provider, email=c.email,
-            folder_name=j.folder_name, target_label=j.target_label,
-            last_run_at=str(j.last_run_at),
-        )
-        for j, c in running_job_rows
-    ]
-
-    # 3. Storage — um statvfs por volume, reaproveitado no bloco de disks
+    # 2. Storage — um statvfs por volume, reaproveitado no bloco de disks
     usage_map = {v: _safe_disk_usage(v) for v in STORAGE_VOLUMES}
     usages = [u for u in usage_map.values() if u]
     usage_total = sum(u.total for u in usages)
@@ -1747,13 +1684,13 @@ def _build_fast_data(db: Session) -> tuple:
             status="degraded" if usage is None else "ok",
         ))
 
-    return running_version_infos, running_job_infos, storage_obj, disks_list
+    return running_version_infos, storage_obj, disks_list
 
 
 def _build_historical_data(db: Session) -> tuple:
-    """Queries pesadas: versões recentes com diffs, jobs e manutenções concluídos.
+    """Queries pesadas: versões recentes com diffs e manutenções concluídas.
     Só chamado quando invalidate_activity() acorda o loop histórico.
-    Retorna (recent_version_infos, recent_job_infos, maintenance_job_infos)."""
+    Retorna (recent_version_infos, maintenance_job_infos)."""
     from datetime import timedelta
     from collections import defaultdict
 
@@ -1846,30 +1783,7 @@ def _build_historical_data(db: Session) -> tuple:
             diff_removed=d["removed"] if d else None,
         ))
 
-    # 6. Jobs cloud recentes (não rodando, últimos 10)
-    recent_job_rows = (
-        db.query(CloudBackupJob, CloudCredential)
-        .join(CloudCredential, CloudCredential.id == CloudBackupJob.credential_id)
-        .filter(
-            CloudBackupJob.last_run_at.isnot(None),
-            CloudBackupJob.last_run_status != "running",
-        )
-        .order_by(CloudBackupJob.last_run_at.desc())
-        .limit(10)
-        .all()
-    )
-    recent_job_infos = [
-        RecentJobInfo(
-            id=j.id, provider=c.provider, email=c.email,
-            folder_name=j.folder_name, target_label=j.target_label,
-            last_run_at=str(j.last_run_at),
-            last_run_status=j.last_run_status or "unknown",
-            last_run_message=j.last_run_message,
-        )
-        for j, c in recent_job_rows
-    ]
-
-    # 7. Maintenance jobs (em execução + últimas 24h)
+    # 6. Maintenance jobs (em execução + últimas 24h)
     maint_rows = (
         db.query(MaintenanceJob)
         .filter(
@@ -1892,11 +1806,11 @@ def _build_historical_data(db: Session) -> tuple:
         for m in maint_rows
     ]
 
-    return recent_version_infos, recent_job_infos, maintenance_job_infos
+    return recent_version_infos, maintenance_job_infos
 
 
 async def _activity_refresh_loop() -> None:
-    """Recalcula o bloco histórico (recent_versions com diffs, recent_jobs, maint_jobs)
+    """Recalcula o bloco histórico (recent_versions com diffs, maint_jobs)
     apenas quando invalidate_activity() acorda o loop — normalmente ao fim de um backup/job.
     Fallback de 5 min para não ficar preso caso alguma invalidação seja perdida."""
     loop = asyncio.get_running_loop()
@@ -1922,24 +1836,22 @@ async def _activity_refresh_loop() -> None:
 
 @app.get("/api/activity", response_model=ActivityResponse, dependencies=[Depends(require_api_key)])
 def get_activity(db: Session = Depends(get_db)):
-    running_versions, running_jobs, storage_obj, disks = _build_fast_data(db)
+    running_versions, storage_obj, disks = _build_fast_data(db)
 
     hist = _historical_cache["data"]
     if hist is None:
         # Cold start: bloco histórico ainda não foi calculado — faz inline uma vez
-        recent_versions, recent_jobs, maint_jobs = _build_historical_data(db)
-        _historical_cache.update({"data": (recent_versions, recent_jobs, maint_jobs),
+        recent_versions, maint_jobs = _build_historical_data(db)
+        _historical_cache.update({"data": (recent_versions, maint_jobs),
                                    "ts": time.monotonic()})
     else:
-        recent_versions, recent_jobs, maint_jobs = hist
+        recent_versions, maint_jobs = hist
 
     return ActivityResponse(
         running_versions=running_versions,
-        running_jobs=running_jobs,
         storage=storage_obj,
         disks=disks,
         recent_versions=recent_versions,
-        recent_jobs=recent_jobs,
         maintenance_jobs=maint_jobs,
         server_time=datetime.now().isoformat(),
     )

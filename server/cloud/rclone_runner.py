@@ -20,11 +20,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+import shutil
+
+import crypto
 import storage
 from cache_state import invalidate_activity
-from cloud.runner import _process_file_sync, _register_version_file_sync
 from database import (
-    BackupID, BackupVersion, RcloneBackupJob, SessionLocal, VersionFile,
+    BackupID, BackupVersion, FileContent, FileContentCopy,
+    RcloneBackupJob, SessionLocal, VersionFile,
 )
 
 log = logging.getLogger("backup-server")
@@ -192,6 +195,58 @@ async def _download_to(
         )
 
     return h.hexdigest(), total
+
+
+# ---------------------------------------------------------------------------
+# Dedup, store, encrypt, replicate — funções compartilhadas pelo consumer
+# ---------------------------------------------------------------------------
+
+def _register_version_file_sync(version_id: int, entry, sha256: str, db) -> None:
+    db.add(VersionFile(
+        version_id=version_id,
+        original_path=entry.path,
+        sha256=sha256,
+        mtime=entry.mtime,
+    ))
+    db.commit()
+
+
+def _process_file_sync(
+    version_id: int,
+    entry,
+    tmp_path: Path,
+    sha256: str,
+    size: int,
+    volume: Path,
+    enc_key: bytes | None,
+    db,
+) -> None:
+    """Dedup, store, encrypt, replicate e registro no banco de um arquivo baixado.
+    Bloqueante (I/O + criptografia) — roda via asyncio.to_thread."""
+    fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+    if fc:
+        tmp_path.unlink(missing_ok=True)
+        first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).first()
+        if first_copy:
+            storage.ensure_replicas(sha256, Path(first_copy.stored_at), db)
+    else:
+        dest = storage.content_path(sha256, volume)
+        shutil.move(str(tmp_path), str(dest))
+        if enc_key:
+            tmp_enc = dest.parent / f"_enc_{os.urandom(4).hex()}"
+            try:
+                crypto.encrypt_stream(dest, tmp_enc, enc_key)
+                shutil.move(str(tmp_enc), str(dest))
+            except Exception:
+                tmp_enc.unlink(missing_ok=True)
+                raise
+        fc = FileContent(sha256=sha256, stored_at=str(dest), size=size, encrypted=bool(enc_key))
+        db.add(fc)
+        db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(volume)))
+        db.commit()
+        storage.ensure_replicas(sha256, dest, db)
+
+    _register_version_file_sync(version_id, entry, sha256, db)
 
 
 # ---------------------------------------------------------------------------
