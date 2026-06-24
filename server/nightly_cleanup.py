@@ -11,7 +11,6 @@ from cache_state import invalidate_activity
 log = logging.getLogger("backup-server")
 
 _ONE_DAY    = timedelta(hours=24)
-_ONE_WEEK   = timedelta(days=7)
 _ONE_MONTH  = timedelta(days=30)
 _SIX_MONTHS = timedelta(days=180)
 _BATCH      = 50
@@ -232,7 +231,6 @@ def run_nightly_cleanup() -> None:
     invalidate_activity()
     try:
         now = datetime.now()
-        stale_cutoff = now - _ONE_WEEK
 
         log.info("[nightly-cleanup] iniciando limpeza noturna")
 
@@ -270,8 +268,6 @@ def run_nightly_cleanup() -> None:
             # 1. Limpar stale (failed/incomplete) com mais de 1 semana que tenham done mais recente
             stale_to_delete: list[int] = []
             for v in stale_versions:
-                if v.created_at >= stale_cutoff:
-                    continue
                 if any(d > v.created_at for d in done_dates):
                     stale_to_delete.append(v.id)
 
@@ -380,11 +376,14 @@ def run_nightly_cleanup() -> None:
     # VACUUM fora de transação para compactar o arquivo SQLite.
     # O SQLite só libera espaço em disco com VACUUM — deletar linhas apenas
     # marca páginas como livres na freelist, sem encolher o arquivo.
-    try:
-        raw = engine.raw_connection()
-        raw.isolation_level = None  # autocommit — VACUUM não pode rodar dentro de transação
-        raw.execute("VACUUM")
-        raw.close()
-        log.info("[nightly-cleanup] VACUUM concluído — espaço em disco liberado")
-    except Exception:
-        log.warning("[nightly-cleanup] Falha ao executar VACUUM (não crítico)")
+    if engine.dialect.name != "sqlite":
+        log.info("[nightly-cleanup] Backend não-SQLite — VACUUM ignorado")
+    else:
+        try:
+            raw = engine.raw_connection()
+            raw.isolation_level = None  # autocommit — VACUUM não pode rodar dentro de transação
+            raw.execute("VACUUM")
+            raw.close()
+            log.info("[nightly-cleanup] VACUUM concluído — espaço em disco liberado")
+        except Exception as exc:
+            log.warning("[nightly-cleanup] Falha ao executar VACUUM (não crítico): %s", exc)
