@@ -29,6 +29,23 @@ _job_locks: dict[int, asyncio.Lock] = {}
 # Modelos Pydantic
 # ---------------------------------------------------------------------------
 
+def _parse_cron(expr: str) -> None:
+    """Valida expressão cron com 5 campos. Lança ValueError se inválida."""
+    from apscheduler.triggers.cron import CronTrigger
+    parts = expr.strip().split()
+    if len(parts) != 5:
+        raise ValueError(
+            f"cron_expr inválido: '{expr}' — esperado 5 campos (min hr day month dow)"
+        )
+    try:
+        CronTrigger(
+            minute=parts[0], hour=parts[1], day=parts[2],
+            month=parts[3], day_of_week=parts[4],
+        )
+    except Exception as e:
+        raise ValueError(f"cron_expr inválido: {e}") from e
+
+
 class RcloneJobCreate(BaseModel):
     remote_name: str
     remote_path: str = ""
@@ -46,6 +63,13 @@ class RcloneJobCreate(BaseModel):
             )
         return v
 
+    @field_validator("cron_expr")
+    @classmethod
+    def _validate_cron_expr(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            _parse_cron(v)
+        return v
+
 
 class RcloneJobUpdate(BaseModel):
     display_name: Optional[str] = None
@@ -53,6 +77,13 @@ class RcloneJobUpdate(BaseModel):
     target_label: Optional[str] = None
     cron_expr: Optional[str] = None
     enabled: Optional[bool] = None
+
+    @field_validator("cron_expr")
+    @classmethod
+    def _validate_cron_expr(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            _parse_cron(v)
+        return v
 
 
 class RcloneJobOut(BaseModel):

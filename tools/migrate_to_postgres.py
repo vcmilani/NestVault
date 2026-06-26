@@ -41,7 +41,7 @@ BATCH_SIZE = 500
 
 
 def _count(conn, table: str) -> int:
-    return conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar()
+    return conn.execute(text(f'SELECT COUNT(*) FROM "{table}"')).scalar()
 
 
 def _count_safe(conn, table: str) -> int | None:
@@ -126,7 +126,7 @@ def _try_fetch(src_conn, cols_str: str, table: str, limit: int, offset: int):
     """Tenta buscar linhas; retorna lista vazia se o range estiver corrompido."""
     try:
         return src_conn.execute(
-            text(f"SELECT {cols_str} FROM {table} LIMIT {limit} OFFSET {offset}")
+            text(f'SELECT {cols_str} FROM "{table}" LIMIT {limit} OFFSET {offset}')
         ).fetchall()
     except Exception:
         return None
@@ -148,7 +148,7 @@ def _migrate_table(src_conn, dst_conn, table: str, bool_cols: set[str]) -> tuple
     placeholders = ", ".join(f":{c}" for c in columns)
 
     insert_sql = text(
-        f"INSERT INTO {table} ({cols_str}) VALUES ({placeholders}) ON CONFLICT DO NOTHING"
+        f'INSERT INTO "{table}" ({cols_str}) VALUES ({placeholders}) ON CONFLICT DO NOTHING'
     )
 
     migrated = 0
@@ -248,7 +248,7 @@ def _reset_sequences(engine) -> None:
                 ).scalar()
                 if seq:
                     conn.execute(
-                        text(f"SELECT setval('{seq}', COALESCE((SELECT MAX(id) FROM {table}), 1))")
+                        text(f"SELECT setval('{seq}', COALESCE((SELECT MAX(id) FROM \"{table}\"), 1))")
                     )
                     conn.commit()
                     print(f"  {table:<30} OK")

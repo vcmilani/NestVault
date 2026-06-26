@@ -44,24 +44,26 @@ def _cleanup_orphan_contents(db) -> tuple[int, int]:
         failed = False
         for copy in copies:
             p = Path(copy.stored_at)
-            if p.exists():
-                try:
-                    p.unlink()
-                except OSError as e:
-                    log.warning(f"[nightly-cleanup] Não foi possível remover {p}: {e} — pulando")
-                    failed = True
-                    continue
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                log.warning(f"[nightly-cleanup] Não foi possível remover {p}: {e} — pulando")
+                failed = True
+                continue
             db.delete(copy)
         if failed:
             continue
         if not copies:
             p = Path(fc.stored_at)
-            if p.exists():
-                try:
-                    p.unlink()
-                except OSError as e:
-                    log.warning(f"[nightly-cleanup] Não foi possível remover {p}: {e} — pulando")
-                    continue
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                log.warning(f"[nightly-cleanup] Não foi possível remover {p}: {e} — pulando")
+                continue
         bytes_freed += fc.size
         safe_to_delete.append(fc)
 

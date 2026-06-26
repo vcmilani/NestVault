@@ -143,11 +143,16 @@ def rereplicate_all(db) -> tuple[int, int]:
     )
     replicated = skipped = 0
     log.info(f"[rereplicate-all] {len(underfilled)} arquivo(s) sub-replicado(s) — alvo: {target}")
+    sha256_list = [sha256 for sha256, _ in underfilled]
+    copy_query = db.query(FileContentCopy).filter(FileContentCopy.sha256.in_(sha256_list))
+    if degraded_strs:
+        copy_query = copy_query.filter(~FileContentCopy.volume_path.in_(degraded_strs))
+    source_map: dict[str, FileContentCopy] = {}
+    for copy in copy_query.all():
+        if copy.sha256 not in source_map:
+            source_map[copy.sha256] = copy
     for sha256, _ in underfilled:
-        q = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256)
-        if degraded_strs:
-            q = q.filter(~FileContentCopy.volume_path.in_(degraded_strs))
-        source = q.first()
+        source = source_map.get(sha256)
         if not source:
             log.warning(f"[rereplicate-all] {sha256[:8]}… sem fonte acessível — pulando")
             skipped += 1
@@ -162,6 +167,7 @@ def rereplicate_all(db) -> tuple[int, int]:
 def cleanup_excess_copies(db) -> int:
     from database import FileContent, FileContentCopy
     from sqlalchemy import func
+    from collections import defaultdict
     target = target_replicas()
     overfilled = (
         db.query(FileContent.sha256, func.count(FileContentCopy.id).label("cnt"))
@@ -172,10 +178,18 @@ def cleanup_excess_copies(db) -> int:
     )
     removed = 0
     log.info(f"[cleanup-excess] {len(overfilled)} arquivo(s) com cópias excedentes — alvo: {target}")
+    sha256_list = [sha256 for sha256, _ in overfilled]
+    fc_map = {
+        fc.sha256: fc
+        for fc in db.query(FileContent).filter(FileContent.sha256.in_(sha256_list)).all()
+    }
+    copies_map: dict[str, list] = defaultdict(list)
+    for copy in db.query(FileContentCopy).filter(FileContentCopy.sha256.in_(sha256_list)).all():
+        copies_map[copy.sha256].append(copy)
     for sha256, _ in overfilled:
-        primary = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+        primary = fc_map.get(sha256)
         primary_path = primary.stored_at if primary else None
-        copies = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).all()
+        copies = copies_map.get(sha256, [])
 
         def _sort_key(c: FileContentCopy):
             is_primary = c.stored_at == primary_path

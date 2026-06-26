@@ -52,7 +52,7 @@ def _apply_wal_pragmas(dst_engine):
 
 
 def _count(conn, table: str) -> int:
-    return conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar()
+    return conn.execute(text(f'SELECT COUNT(*) FROM "{table}"')).scalar()
 
 
 def _migrate_table(src_conn, dst_conn, table: str) -> int:
@@ -64,13 +64,13 @@ def _migrate_table(src_conn, dst_conn, table: str) -> int:
         return 0
 
     # Descobre colunas via SELECT * LIMIT 0
-    result = src_conn.execute(text(f"SELECT * FROM {table} LIMIT 0"))
+    result = src_conn.execute(text(f'SELECT * FROM "{table}" LIMIT 0'))
     columns = list(result.keys())
     cols_str = ", ".join(f'"{c}"' for c in columns)
     placeholders = ", ".join(f":{c}" for c in columns)
 
     insert_sql = text(
-        f"INSERT OR IGNORE INTO {table} ({cols_str}) VALUES ({placeholders})"
+        f'INSERT OR IGNORE INTO "{table}" ({cols_str}) VALUES ({placeholders})'
     )
 
     migrated = 0

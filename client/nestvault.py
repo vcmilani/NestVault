@@ -975,8 +975,16 @@ def restore(destination, label, version_key, server=DEFAULT_SERVER,
                 _err(f"{relative}: {e}")
                 stats["errors"] += 1
 
-    status_color = GREEN if not stats["errors"] else RED
-    status_text  = "concluido" if not stats["errors"] else "com erros"
+    total_attempted = stats["restored"] + stats["errors"]
+    if not stats["errors"]:
+        status_color = GREEN
+        status_text  = "concluido"
+    elif stats["restored"] == 0:
+        status_color = RED
+        status_text  = "falhou (nenhum arquivo restaurado)"
+    else:
+        status_color = AMBER
+        status_text  = f"parcial ({stats['restored']}/{total_attempted} restaurados)"
 
     lines = [
         f"[{DIM}]Versao[/{DIM}]       [{TEXT}]{version_key}[/{TEXT}]",
@@ -985,6 +993,10 @@ def restore(destination, label, version_key, server=DEFAULT_SERVER,
     ]
     if stats["errors"]:
         lines.append(f"[bold {RED}]Erros[/bold {RED}]        [{RED}]{stats['errors']}[/{RED}]")
+        if stats["restored"] > 0:
+            lines.append(
+                f"[{DIM}]Dados[/{DIM}]        [{AMBER}]arquivos restaurados podem ser usados normalmente[/{AMBER}]"
+            )
 
     console.print()
     console.print(Panel(
@@ -1030,6 +1042,22 @@ def cleanup(label=None, keep=5, server=DEFAULT_SERVER):
             _info("Nenhum backup encontrado.")
             return
         _kv("Cleanup", f"todos os labels ({len(labels)} encontrados)  keep={keep}")
+
+    console.print()
+    if label:
+        console.print(
+            f"  [{AMBER}]Label:[/{AMBER}]  [{TEXT}]{label}[/{TEXT}]  "
+            f"[{DIM}]manter as {keep} versoes mais recentes[/{DIM}]\n"
+        )
+    else:
+        console.print(
+            f"  [{AMBER}]Labels:[/{AMBER}]  [{TEXT}]{len(labels)} label(s)[/{TEXT}]  "
+            f"[{DIM}]manter as {keep} versoes mais recentes por label[/{DIM}]\n"
+        )
+    confirm = input("  Confirmar limpeza? [s/N] ")
+    if confirm.strip().lower() not in ("s", "sim"):
+        _info("Operacao cancelada.")
+        return
 
     console.print()
     total_versions = 0
@@ -1078,7 +1106,8 @@ def delete_label(label, server=DEFAULT_SERVER, force=False):
 def cleanup_orphans(server=DEFAULT_SERVER):
     _info("Iniciando limpeza de arquivos orfaos...")
     try:
-        result = force_cleanup_orphans_api(server)
+        with console.status(f"[{DIM}]Aguardando servidor (pode demorar alguns minutos)...[/{DIM}]"):
+            result = force_cleanup_orphans_api(server)
         files  = result.get("files_removed", 0)
         freed  = result.get("bytes_freed", 0)
         _ok(f"Limpeza concluida: {files} arquivo(s) removido(s), {fmt_size(freed)} liberados")
@@ -1091,7 +1120,8 @@ def cleanup_orphans(server=DEFAULT_SERVER):
 def rereplicate(server=DEFAULT_SERVER):
     _info("Iniciando re-replicacao de conteudos sub-replicados...")
     try:
-        result     = force_rereplicate_api(server)
+        with console.status(f"[{DIM}]Replicando (pode demorar varios minutos dependendo do volume)...[/{DIM}]"):
+            result     = force_rereplicate_api(server)
         replicated = result.get("replicated", 0)
         skipped    = result.get("skipped", 0)
         target     = result.get("target_copies", 0)
@@ -1113,7 +1143,8 @@ def rereplicate(server=DEFAULT_SERVER):
 def reconcile_replication(server=DEFAULT_SERVER):
     _info("Reconciliando replicacao (limpeza de excesso + re-replicacao de faltantes)...")
     try:
-        result     = force_reconcile_api(server)
+        with console.status(f"[{DIM}]Reconciliando (pode demorar varios minutos dependendo do volume)...[/{DIM}]"):
+            result     = force_reconcile_api(server)
         replicated = result.get("replicated", 0)
         skipped    = result.get("skipped", 0)
         cleaned    = result.get("cleaned", 0)
@@ -1135,6 +1166,14 @@ def reconcile_replication(server=DEFAULT_SERVER):
 
 # -- Encrypt existing ---------------------------------------------------------
 def encrypt_existing(server=DEFAULT_SERVER):
+    console.print(
+        f"\n  [{RED}]Atenção:[/{RED}] isso cifra [{AMBER}]TODOS[/{AMBER}] os arquivos "
+        f"não cifrados no storage. [{RED}]Esta operação é irreversível.[/{RED}]\n"
+    )
+    confirm = input("  Confirmar? [s/N] ")
+    if confirm.strip().lower() not in ("s", "sim"):
+        _info("Operacao cancelada.")
+        return
     _info("Iniciando criptografia de arquivos existentes...")
     try:
         import time
@@ -1181,7 +1220,7 @@ def main():
 
     # backup
     pb = sub.add_parser("backup", help="Cria nova versao de backup")
-    pb.add_argument("directory")
+    pb.add_argument("directory", help="Diretório a fazer backup")
     pb.add_argument("--label", required=True)
     pb.add_argument("--server", default=DEFAULT_SERVER)
     pb.add_argument("--prefix", default=None)
@@ -1210,7 +1249,7 @@ def main():
 
     # restore
     pr = sub.add_parser("restore", help="Restaura uma versao especifica")
-    pr.add_argument("destination")
+    pr.add_argument("destination", help="Diretório de destino para restauração")
     pr.add_argument("--label", required=True)
     pr.add_argument("--version", required=True, dest="version_key",
                     help="Chave da versao (ex: 2026-04-25T10:42:31)")

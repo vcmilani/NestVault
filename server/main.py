@@ -29,7 +29,7 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
-import asyncio, os, hashlib, secrets, base64, shutil, logging, time, threading, re
+import asyncio, os, tempfile, hashlib, secrets, base64, shutil, logging, time, threading, re
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
@@ -706,7 +706,9 @@ async def _stream_request_to_disk(request: Request, volume: Path) -> tuple[str, 
     """
     h    = hashlib.sha256()
     size = 0
-    tmp_path = volume / f"_tmp_{os.urandom(8).hex()}"
+    fd, _tmp = tempfile.mkstemp(dir=volume, prefix="_tmp_")
+    os.close(fd)
+    tmp_path = Path(_tmp)
     try:
         with open(tmp_path, "wb", buffering=0) as f:
             async for chunk in request.stream():
@@ -926,25 +928,27 @@ def _cleanup_orphan_contents_no_commit(db: Session, limit: int | None = None) ->
         failed = False
         for copy in copies:
             p = Path(copy.stored_at)
-            if p.exists():
-                try:
-                    p.unlink()
-                except OSError as e:
-                    log.warning(f"[cleanup-orphans] Não foi possível remover {p}: {e} — pulando")
-                    failed = True
-                    continue
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                log.warning(f"[cleanup-orphans] Não foi possível remover {p}: {e} — pulando")
+                failed = True
+                continue
             db.delete(copy)
         if failed:
             continue
         # fallback: se não havia cópias na nova tabela, tenta o stored_at legado
         if not copies:
             p = Path(fc.stored_at)
-            if p.exists():
-                try:
-                    p.unlink()
-                except OSError as e:
-                    log.warning(f"[cleanup-orphans] Não foi possível remover {p}: {e} — pulando")
-                    continue
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                log.warning(f"[cleanup-orphans] Não foi possível remover {p}: {e} — pulando")
+                continue
         bytes_freed += fc.size
         safe_to_delete.append(fc)
 
@@ -2386,7 +2390,9 @@ def _store_new_content(
     shutil.move(str(tmp_path), str(dest))
     if ENCRYPTION_ENABLED:
         log.info(f"[upload] cifrando {original_path!r} ({size / 1024 / 1024:.2f} MB) — sha256={sha256[:8]}…")
-        tmp_enc = dest.parent / f"_enc_{os.urandom(4).hex()}"
+        _fd, _tmp_enc = tempfile.mkstemp(dir=dest.parent, prefix="_enc_")
+        os.close(_fd)
+        tmp_enc = Path(_tmp_enc)
         try:
             crypto.encrypt_stream(dest, tmp_enc, storage.encryption_key)
             shutil.move(str(tmp_enc), str(dest))
@@ -2446,8 +2452,8 @@ async def upload_file(
 
     try:
         original_path = base64.b64decode(original_path.encode("ascii")).decode("utf-8")
-    except Exception:
-        pass
+    except Exception as _e:
+        log.warning(f"[upload] path não é base64 válido ({original_path!r}): {_e} — usando como plain text")
 
     replica_source: Optional[Path] = None
 
@@ -2603,20 +2609,21 @@ def download_file(file_id: int, db: Session = Depends(get_db)):
     for copy in copies:
         p = Path(copy.stored_at)
         try:
-            if p.exists():
-                log.info(f"[download] {row.sha256[:8]}… encontrado no disco em {p}")
-                if is_encrypted:
-                    return StreamingResponse(
-                        crypto.decrypt_chunks(p, storage.encryption_key),
-                        media_type="application/octet-stream",
-                        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-                    )
-                return FileResponse(p, filename=filename)
-            else:
-                log.error(f"[download] {row.sha256[:8]}… ausente no disco em {p}")
+            p.stat()
+        except FileNotFoundError:
+            log.error(f"[download] {row.sha256[:8]}… ausente no disco em {p}")
+            continue
         except OSError as exc:
             log.error(f"[download] {row.sha256[:8]}… erro ao acessar {p}: {exc}")
             continue
+        log.info(f"[download] {row.sha256[:8]}… encontrado no disco em {p}")
+        if is_encrypted:
+            return StreamingResponse(
+                crypto.decrypt_chunks(p, storage.encryption_key),
+                media_type="application/octet-stream",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+        return FileResponse(p, filename=filename)
 
     # 503 apenas se há cópias em volumes degraded (recuperáveis); 410 se o dado sumiu mesmo
     degraded_str = [str(v) for v in _degraded_volumes]
