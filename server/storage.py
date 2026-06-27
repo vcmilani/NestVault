@@ -538,7 +538,19 @@ def process_ssd_pending_moves(db) -> int:
             except IntegrityError:
                 db.rollback()
                 dest_path.unlink(missing_ok=True)
-                log.debug(f"[ssd-cache] {move.sha256[:8]}… já processado por worker concorrente — OK")
+                # Distingue "worker concorrente venceu" (FileContent existe, SsdCachePendingMove
+                # já foi removido pelo vencedor) de "orphan cleanup deletou FileContent"
+                # (FileContent sumiu mas SsdCachePendingMove ainda existe → loop infinito).
+                fc_exists = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+                if fc_exists is None:
+                    stale = db.query(SsdCachePendingMove).filter(SsdCachePendingMove.sha256 == sha256).first()
+                    if stale:
+                        db.delete(stale)
+                        db.commit()
+                    ssd_path.unlink(missing_ok=True)
+                    log.info(f"[ssd-cache] {sha256[:8]}… FileContent removido pelo orphan cleanup — move cancelado, arquivo SSD removido")
+                else:
+                    log.debug(f"[ssd-cache] {sha256[:8]}… já processado por worker concorrente — OK")
                 break
             except OSError as e:
                 dest_path.unlink(missing_ok=True)

@@ -935,6 +935,10 @@ def _cleanup_orphan_contents_no_commit(db: Session, limit: int | None = None) ->
     copies_by_sha: dict[str, list[dict]] = {}
     for c in db.query(FileContentCopy).filter(FileContentCopy.sha256.in_(orphan_shas)).all():
         copies_by_sha.setdefault(c.sha256, []).append({"id": c.id, "stored_at": c.stored_at})
+    # SsdCachePendingMove é FK child de FileContent — deve ser deletado antes do parent.
+    ssd_moves_by_sha: dict[str, str] = {}
+    for m in db.query(SsdCachePendingMove).filter(SsdCachePendingMove.sha256.in_(orphan_shas)).all():
+        ssd_moves_by_sha[m.sha256] = m.ssd_path
 
     # Encerra a transação de leitura (inclusive quaisquer pendências do caller, ex: deleções de
     # VersionFile em _auto_cleanup_if_needed) para que as mini-transações por sha256 enxerguem
@@ -948,6 +952,11 @@ def _cleanup_orphan_contents_no_commit(db: Session, limit: int | None = None) ->
         copies   = copies_by_sha.get(sha256, [])
         copy_ids = [c["id"] for c in copies]
         try:
+            # FK children de FileContent: deletar antes do parent (respeita PRAGMA foreign_keys=ON).
+            if sha256 in ssd_moves_by_sha:
+                db.query(SsdCachePendingMove).filter(
+                    SsdCachePendingMove.sha256 == sha256
+                ).delete(synchronize_session=False)
             if copy_ids:
                 db.query(FileContentCopy).filter(
                     FileContentCopy.id.in_(copy_ids)
@@ -970,6 +979,11 @@ def _cleanup_orphan_contents_no_commit(db: Session, limit: int | None = None) ->
             raise
 
         # Deleção física (best-effort): falha deixa arquivo órfão no disco, mas o DB é consistente.
+        if sha256 in ssd_moves_by_sha:
+            try:
+                Path(ssd_moves_by_sha[sha256]).unlink()
+            except (FileNotFoundError, OSError):
+                pass
         for c in copies:
             try:
                 Path(c["stored_at"]).unlink()

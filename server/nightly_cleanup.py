@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from database import SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob, engine
+from database import SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob, SsdCachePendingMove, engine
 from sqlalchemy import func, select, text, delete, exists
 from cache_state import invalidate_activity
 
@@ -46,6 +46,10 @@ def _cleanup_orphan_contents(db) -> tuple[int, int]:
     copies_by_sha: dict[str, list[dict]] = {}
     for c in db.query(FileContentCopy).filter(FileContentCopy.sha256.in_(orphan_shas)).all():
         copies_by_sha.setdefault(c.sha256, []).append({"id": c.id, "stored_at": c.stored_at})
+    # SsdCachePendingMove é FK child de FileContent — deve ser deletado antes do parent.
+    ssd_moves_by_sha: dict[str, str] = {}
+    for m in db.query(SsdCachePendingMove).filter(SsdCachePendingMove.sha256.in_(orphan_shas)).all():
+        ssd_moves_by_sha[m.sha256] = m.ssd_path
 
     # Encerra a transação de leitura: próximas operações enxergam o estado mais recente do DB,
     # inclusive VersionFiles commitados por uploads concorrentes desde o snapshot acima.
@@ -58,6 +62,11 @@ def _cleanup_orphan_contents(db) -> tuple[int, int]:
         copies   = copies_by_sha.get(sha256, [])
         copy_ids = [c["id"] for c in copies]
         try:
+            # FK children de FileContent: deletar antes do parent (respeita PRAGMA foreign_keys=ON).
+            if sha256 in ssd_moves_by_sha:
+                db.query(SsdCachePendingMove).filter(
+                    SsdCachePendingMove.sha256 == sha256
+                ).delete(synchronize_session=False)
             if copy_ids:
                 db.query(FileContentCopy).filter(
                     FileContentCopy.id.in_(copy_ids)
@@ -80,6 +89,11 @@ def _cleanup_orphan_contents(db) -> tuple[int, int]:
             raise
 
         # Deleção física (best-effort): falha deixa arquivo órfão no disco, mas o DB é consistente.
+        if sha256 in ssd_moves_by_sha:
+            try:
+                Path(ssd_moves_by_sha[sha256]).unlink()
+            except (FileNotFoundError, OSError):
+                pass
         for c in copies:
             try:
                 Path(c["stored_at"]).unlink()
