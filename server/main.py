@@ -1,5 +1,5 @@
 """
-NestVault  v7.3.0
+NestVault  v7.3.1
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -7,6 +7,11 @@ Otimizacoes de performance:
 - Indices no banco + WAL mode
 - Cleanup de orfaos em uma unica query
 - Limpeza de arquivos ao deletar label/versao feita em background (nao bloqueia o cliente)
+
+v7.3.1:
+- Corrige race condition TOCTOU no orphan cleanup (DELETE condicional por sha256 com NOT EXISTS)
+- Corrige FK violation e retry infinito quando SsdCachePendingMove existe para FileContent orfao
+- Corrige fixture de testes que nao propagava storage volume correto para storage.py
 
 v7.3.0:
 - Remove sistema de backup cloud OAuth (Google Drive direto / OneDrive direto)
