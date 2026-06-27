@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from database import SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob, engine
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, delete, exists
 from cache_state import invalidate_activity
 
 log = logging.getLogger("backup-server")
@@ -27,52 +27,78 @@ def _delete_versions(db, version_ids: list[int]) -> None:
 
 
 def _cleanup_orphan_contents(db) -> tuple[int, int]:
-    """Remove FileContents sem referência e seus arquivos físicos. Retorna (removidos, bytes_liberados)."""
+    """Remove FileContents sem referência e seus arquivos físicos. Retorna (removidos, bytes_liberados).
+
+    Usa DELETE condicional por sha256 para eliminar a race condition TOCTOU: o banco
+    re-verifica no momento da deleção se o sha256 ainda está sem referência, protegendo
+    arquivos que foram re-referenciados por uploads concorrentes após o snapshot inicial.
+    """
     used_shas = db.query(VersionFile.sha256).distinct().subquery()
-    orphans = db.query(FileContent).filter(~FileContent.sha256.in_(select(used_shas))).all()
+    candidates = db.query(FileContent).filter(~FileContent.sha256.in_(select(used_shas))).all()
+
+    if not candidates:
+        return 0, 0
+
+    # Extrai dados antes do commit (objetos expiram após db.commit())
+    orphan_shas   = [fc.sha256 for fc in candidates]
+    size_by_sha   = {fc.sha256: fc.size      for fc in candidates}
+    stored_by_sha = {fc.sha256: fc.stored_at for fc in candidates}
+    copies_by_sha: dict[str, list[dict]] = {}
+    for c in db.query(FileContentCopy).filter(FileContentCopy.sha256.in_(orphan_shas)).all():
+        copies_by_sha.setdefault(c.sha256, []).append({"id": c.id, "stored_at": c.stored_at})
+
+    # Encerra a transação de leitura: próximas operações enxergam o estado mais recente do DB,
+    # inclusive VersionFiles commitados por uploads concorrentes desde o snapshot acima.
+    db.commit()
 
     bytes_freed = 0
-    safe_to_delete: list[FileContent] = []
-    orphan_shas = [fc.sha256 for fc in orphans]
-    copies_by_sha: dict[str, list] = {}
-    if orphan_shas:
-        for c in db.query(FileContentCopy).filter(FileContentCopy.sha256.in_(orphan_shas)).all():
-            copies_by_sha.setdefault(c.sha256, []).append(c)
+    removed = 0
 
-    for fc in orphans:
-        copies = copies_by_sha.get(fc.sha256, [])
-        failed = False
-        for copy in copies:
-            p = Path(copy.stored_at)
+    for sha256 in orphan_shas:
+        copies   = copies_by_sha.get(sha256, [])
+        copy_ids = [c["id"] for c in copies]
+        try:
+            if copy_ids:
+                db.query(FileContentCopy).filter(
+                    FileContentCopy.id.in_(copy_ids)
+                ).delete(synchronize_session=False)
+
+            # DELETE atômico: só remove se realmente não há VersionFile apontando para este sha256.
+            result = db.execute(
+                delete(FileContent).where(
+                    (FileContent.sha256 == sha256) &
+                    ~exists().where(VersionFile.sha256 == sha256)
+                )
+            )
+            if result.rowcount == 0:
+                # Re-referenciado por upload concurrent — desfaz deleção das cópias e segue.
+                db.rollback()
+                continue
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+        # Deleção física (best-effort): falha deixa arquivo órfão no disco, mas o DB é consistente.
+        for c in copies:
             try:
-                p.unlink()
+                Path(c["stored_at"]).unlink()
             except FileNotFoundError:
                 pass
             except OSError as e:
-                log.warning(f"[nightly-cleanup] Não foi possível remover {p}: {e} — pulando")
-                failed = True
-                continue
-            db.delete(copy)
-        if failed:
-            continue
+                log.warning(f"[nightly-cleanup] Não foi possível remover {c['stored_at']}: {e}")
         if not copies:
-            p = Path(fc.stored_at)
             try:
-                p.unlink()
+                Path(stored_by_sha[sha256]).unlink()
             except FileNotFoundError:
                 pass
             except OSError as e:
-                log.warning(f"[nightly-cleanup] Não foi possível remover {p}: {e} — pulando")
-                continue
-        bytes_freed += fc.size
-        safe_to_delete.append(fc)
+                log.warning(f"[nightly-cleanup] Não foi possível remover {stored_by_sha[sha256]}: {e}")
 
-    if safe_to_delete:
-        db.flush()
-        for fc in safe_to_delete:
-            db.delete(fc)
-    db.commit()
-    return len(safe_to_delete), bytes_freed
+        bytes_freed += size_by_sha.get(sha256, 0)
+        removed += 1
+
+    return removed, bytes_freed
 
 
 def _versions_to_keep(done_versions: list[BackupVersion], now: datetime) -> set[int]:

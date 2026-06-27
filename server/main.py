@@ -33,7 +33,7 @@ import asyncio, os, tempfile, hashlib, secrets, base64, shutil, logging, time, t
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
-from sqlalchemy import func, select, insert, literal, case
+from sqlalchemy import func, select, insert, literal, case, delete, exists
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
@@ -908,57 +908,86 @@ def _cleanup_orphan_contents(db: Session) -> tuple[int, int]:
 
 
 def _cleanup_orphan_contents_no_commit(db: Session, limit: int | None = None) -> tuple[int, int]:
-    """Variante sem db.commit() — para uso em loops onde o commit é controlado pelo caller."""
+    """Remove FileContents órfãos usando DELETE condicional por sha256.
+
+    Cada sha256 é deletado em sua própria mini-transação que re-verifica no banco se o
+    conteúdo ainda está sem referência. Isso elimina a race condition TOCTOU onde uploads
+    concorrentes commitam VersionFiles para sha256s identificados como órfãos no snapshot
+    inicial mas antes da deleção ser efetivada.
+
+    O 'no_commit' no nome indica que não há um commit final agregado — cada sha256 deletado
+    é commitado individualmente. Callers que fazem db.commit() após esta função executam um
+    no-op se algum sha256 foi processado.
+    """
     used_shas = db.query(VersionFile.sha256).distinct().subquery()
     q = db.query(FileContent).filter(~FileContent.sha256.in_(select(used_shas)))
     if limit is not None:
         q = q.limit(limit)
-    orphans = q.all()
+    candidates = q.all()
+
+    if not candidates:
+        return 0, 0
+
+    # Extrai dados antes do commit (objetos expiram após db.commit())
+    orphan_shas   = [fc.sha256 for fc in candidates]
+    size_by_sha   = {fc.sha256: fc.size      for fc in candidates}
+    stored_by_sha = {fc.sha256: fc.stored_at for fc in candidates}
+    copies_by_sha: dict[str, list[dict]] = {}
+    for c in db.query(FileContentCopy).filter(FileContentCopy.sha256.in_(orphan_shas)).all():
+        copies_by_sha.setdefault(c.sha256, []).append({"id": c.id, "stored_at": c.stored_at})
+
+    # Encerra a transação de leitura (inclusive quaisquer pendências do caller, ex: deleções de
+    # VersionFile em _auto_cleanup_if_needed) para que as mini-transações por sha256 enxerguem
+    # o estado mais recente do DB.
+    db.commit()
+
     bytes_freed = 0
-    safe_to_delete: list[FileContent] = []
+    removed = 0
 
-    orphan_shas = [fc.sha256 for fc in orphans]
-    copies_by_sha: dict[str, list] = {}
-    if orphan_shas:
-        for c in db.query(FileContentCopy).filter(FileContentCopy.sha256.in_(orphan_shas)).all():
-            copies_by_sha.setdefault(c.sha256, []).append(c)
+    for sha256 in orphan_shas:
+        copies   = copies_by_sha.get(sha256, [])
+        copy_ids = [c["id"] for c in copies]
+        try:
+            if copy_ids:
+                db.query(FileContentCopy).filter(
+                    FileContentCopy.id.in_(copy_ids)
+                ).delete(synchronize_session=False)
 
-    for fc in orphans:
-        copies = copies_by_sha.get(fc.sha256, [])
-        failed = False
-        for copy in copies:
-            p = Path(copy.stored_at)
+            # DELETE atômico: só remove se ainda não há VersionFile apontando para este sha256.
+            result = db.execute(
+                delete(FileContent).where(
+                    (FileContent.sha256 == sha256) &
+                    ~exists().where(VersionFile.sha256 == sha256)
+                )
+            )
+            if result.rowcount == 0:
+                # Re-referenciado por upload concurrent — desfaz deleção das cópias e segue.
+                db.rollback()
+                continue
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+        # Deleção física (best-effort): falha deixa arquivo órfão no disco, mas o DB é consistente.
+        for c in copies:
             try:
-                p.unlink()
+                Path(c["stored_at"]).unlink()
             except FileNotFoundError:
                 pass
             except OSError as e:
-                log.warning(f"[cleanup-orphans] Não foi possível remover {p}: {e} — pulando")
-                failed = True
-                continue
-            db.delete(copy)
-        if failed:
-            continue
-        # fallback: se não havia cópias na nova tabela, tenta o stored_at legado
+                log.warning(f"[cleanup-orphans] Não foi possível remover {c['stored_at']}: {e}")
         if not copies:
-            p = Path(fc.stored_at)
             try:
-                p.unlink()
+                Path(stored_by_sha[sha256]).unlink()
             except FileNotFoundError:
                 pass
             except OSError as e:
-                log.warning(f"[cleanup-orphans] Não foi possível remover {p}: {e} — pulando")
-                continue
-        bytes_freed += fc.size
-        safe_to_delete.append(fc)
+                log.warning(f"[cleanup-orphans] Não foi possível remover {stored_by_sha[sha256]}: {e}")
 
-    # flush das cópias antes de deletar file_contents (respeita FK)
-    if safe_to_delete:
-        db.flush()
-        for fc in safe_to_delete:
-            db.delete(fc)
+        bytes_freed += size_by_sha.get(sha256, 0)
+        removed += 1
 
-    removed = len(safe_to_delete)
     if removed:
         log.debug(f"[cleanup-orphans] {removed} arquivo(s) — {bytes_freed / 1024:.1f} KB liberados")
     return removed, bytes_freed
