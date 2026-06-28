@@ -197,6 +197,17 @@ def _cleanup_stale_running_states():
         db.close()
 
 
+def _backup_labels_for_sha256s(db, sha256s: list[str]) -> list[str]:
+    if not sha256s:
+        return []
+    rows = (db.query(BackupVersion.backup_label)
+              .join(VersionFile, VersionFile.version_id == BackupVersion.id)
+              .filter(VersionFile.sha256.in_(sha256s))
+              .distinct()
+              .all())
+    return sorted(r[0] for r in rows)
+
+
 def _bg_process_ssd_pending_moves():
     if not _ssd_move_lock.acquire(blocking=False):
         log.debug("[ssd-cache] worker já em execução — ignorando chamada duplicada")
@@ -211,15 +222,17 @@ def _bg_process_ssd_pending_moves():
         from database import SsdCachePendingMove
         total_pending = db.query(SsdCachePendingMove).count()
         processed = 0
+        all_moved: list[str] = []
         if total_pending:
             job.summary = f"Movendo: 0 / {total_pending} arquivo(s) (0%)"
             db.commit()
             invalidate_activity()
         while True:
-            done = storage.process_ssd_pending_moves(db)
+            done, sha256s = storage.process_ssd_pending_moves(db)
             if done == 0:
                 break
             processed += done
+            all_moved.extend(sha256s)
             if total_pending:
                 pct = round(processed / total_pending * 100)
                 job = db.get(MaintenanceJob, job_id)
@@ -227,10 +240,12 @@ def _bg_process_ssd_pending_moves():
                 db.commit()
                 invalidate_activity()
         storage.reconcile_orphaned_ssd_copies(db)
+        labels = _backup_labels_for_sha256s(db, all_moved)
+        label_str = ", ".join(labels) if labels else "—"
         job = db.get(MaintenanceJob, job_id)
         job.status = "done"
         job.finished_at = datetime.now()
-        job.summary = f"{processed} arquivo(s) movidos SSD → HDD"
+        job.summary = f"{processed} arquivo(s) movidos SSD → HDD — backups: {label_str}"
     except Exception as e:
         log.error(f"[ssd-cache] Erro no worker de move: {e}")
         job = db.get(MaintenanceJob, job_id)
@@ -265,11 +280,13 @@ def _resume_ssd_pending_moves():
         db.refresh(job)
         job_id = job.id
         processed = 0
+        all_moved: list[str] = []
         while True:
-            done = storage.process_ssd_pending_moves(db)
+            done, sha256s = storage.process_ssd_pending_moves(db)
             if done == 0:
                 break
             processed += done
+            all_moved.extend(sha256s)
             pct = round(processed / total_pending * 100)
             job = db.get(MaintenanceJob, job_id)
             if job:
@@ -277,11 +294,13 @@ def _resume_ssd_pending_moves():
                 db.commit()
                 invalidate_activity()
         storage.reconcile_orphaned_ssd_copies(db)
+        labels = _backup_labels_for_sha256s(db, all_moved)
+        label_str = ", ".join(labels) if labels else "—"
         job = db.get(MaintenanceJob, job_id)
         if job:
             job.status = "done"
             job.finished_at = datetime.now()
-            job.summary = f"Recovery: {processed} arquivo(s) movidos SSD → HDD"
+            job.summary = f"Recovery: {processed} arquivo(s) movidos SSD → HDD — backups: {label_str}"
         log.info(f"[ssd-cache] recovery concluída — {processed} arquivo(s) movidos para HDD")
     except Exception as e:
         log.error(f"[ssd-cache] Erro na recovery de moves pendentes: {e}")
