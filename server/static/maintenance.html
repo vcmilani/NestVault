@@ -480,6 +480,25 @@
       </div>
     </div>
 
+    <!-- Backup do Banco de Dados -->
+    <div class="op-card" style="animation-delay:.5s">
+      <div class="op-header">
+        <div class="op-title-wrap">
+          <span class="op-icon">⛁</span>
+          <div>
+            <div class="op-name">Backup do Banco de Dados</div>
+            <div class="op-endpoint">POST /maintenance/db-backup</div>
+          </div>
+        </div>
+        <span class="risk-badge low">Baixo risco</span>
+      </div>
+      <div class="op-desc">Exporta o banco de dados (PostgreSQL ou SQLite) para o diretório <code>_db_backups/</code> em cada volume de storage saudável. Mantém os últimos <strong>7</strong> backups por volume (configurável via <code>DB_BACKUP_RETENTION</code>). Executa automaticamente todo dia às 01:00 — use este botão para acionar manualmente. Sem o backup, uma falha no SSD tornaria os arquivos dos HDDs irrecuperáveis.</div>
+      <div class="op-footer">
+        <button class="run-btn" id="btn-dbbackup" onclick="runOp('dbbackup')">▶ Executar agora</button>
+        <div class="op-result" id="result-dbbackup"></div>
+      </div>
+    </div>
+
   </div>
 </main>
 
@@ -588,6 +607,7 @@ const OPS = {
   rereplicate:{endpoint: '/maintenance/rereplicate',           confirm: false},
   reconcile:  {endpoint: '/maintenance/reconcile-replication', confirm: false},
   integrity:  {endpoint: '/maintenance/validate-integrity',    confirm: false},
+  dbbackup:   {endpoint: '/maintenance/db-backup',             confirm: false},
   encrypt:    {endpoint: '/maintenance/encrypt-existing',      confirm: true,
                confirmMsg: 'Esta operação cifrará permanentemente todos os arquivos não cifrados.\n\nEssa ação é IRREVERSÍVEL. Deseja continuar?',
                confirmWord: 'CIFRAR'},

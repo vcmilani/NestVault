@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v7.3.1`
+# 🗄️ NestVault  `v7.4.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -6,6 +6,8 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v7.4.0** — backup automático do banco de dados (PostgreSQL ou SQLite) para os volumes de storage: exporta para `_db_backups/` em cada volume saudável, com rotação que mantém os últimos `DB_BACKUP_RETENTION` (padrão: 7) backups por volume. Agendado automaticamente às 01:00 via APScheduler e acionável manualmente em `POST /maintenance/db-backup` ou pela tela de manutenção. Resolve o cenário em que uma falha no SSD tornaria os arquivos dos HDDs irrecuperáveis — mesmo com os dados físicos intactos, sem o banco (mapa sha256 → caminho) não haveria como reconstruir as versões. Configurável via `DB_BACKUP_ENABLED`, `DB_BACKUP_HOUR`, `DB_BACKUP_MINUTE` e `DB_BACKUP_RETENTION`.
+>
 > **v7.3.1** — corrige race condition TOCTOU no orphan cleanup (DELETE condicional atômico por sha256 com `NOT EXISTS`), FK violation quando `SsdCachePendingMove` existe para `FileContent` órfão, e retry infinito no SSD→HDD move quando o `FileContent` já foi removido.
 >
 > **v7.3.0** — remoção do sistema de cloud backup OAuth direto (Google Drive e OneDrive via OAuth2 nativo). O rclone passou a ser o único backend de cloud backup, cobrindo os mesmos provedores e mais 70+ outros sem necessidade de registrar apps no Google Cloud Console ou Azure Portal. Tabelas `cloud_credentials` e `cloud_backup_jobs` podem ser dropadas manualmente com o script `tools/migrate_drop_oauth_tables.sql` (ver [⚠️ Atualizando da v7.2 para v7.3](#️-atualizando-da-v72-para-v73)).

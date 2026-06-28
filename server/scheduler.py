@@ -69,6 +69,24 @@ def remove_rclone_job(job_id: int) -> None:
         pass
 
 
+def schedule_db_backup() -> None:
+    """Agenda o backup do banco de dados. Hora/minuto configuráveis via DB_BACKUP_HOUR/DB_BACKUP_MINUTE."""
+    from db_backup import run_db_backup, DB_BACKUP_ENABLED, DB_BACKUP_HOUR, DB_BACKUP_MINUTE
+    from datetime import datetime as _dt
+    if not DB_BACKUP_ENABLED:
+        log.info("[scheduler] Backup do banco desabilitado (DB_BACKUP_ENABLED=false)")
+        return
+    local_tz = _dt.now().astimezone().tzinfo
+    scheduler.add_job(
+        run_db_backup,
+        CronTrigger(hour=DB_BACKUP_HOUR, minute=DB_BACKUP_MINUTE, timezone=local_tz),
+        id="db_backup",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    log.info(f"[scheduler] Backup do banco agendado para {DB_BACKUP_HOUR:02d}:{DB_BACKUP_MINUTE:02d} (hora local)")
+
+
 def reload_rclone_jobs_from_db() -> None:
     """Restaura todos os rclone jobs habilitados ao iniciar o servidor."""
     from database import SessionLocal, RcloneBackupJob

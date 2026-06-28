@@ -1,5 +1,5 @@
 """
-NestVault  v7.3.1
+NestVault  v7.4.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -7,6 +7,13 @@ Otimizacoes de performance:
 - Indices no banco + WAL mode
 - Cleanup de orfaos em uma unica query
 - Limpeza de arquivos ao deletar label/versao feita em background (nao bloqueia o cliente)
+
+v7.4.0:
+- Backup automático do banco de dados (PostgreSQL ou SQLite) para os volumes de storage
+- Exporta para _db_backups/ em cada volume saudável; rotação mantém últimos DB_BACKUP_RETENTION (padrão 7) backups
+- Agendado automaticamente às 01:00 via APScheduler; acionável manualmente via POST /maintenance/db-backup
+- Novo card "Backup do Banco de Dados" na tela de manutenção (baixo risco)
+- Variáveis: DB_BACKUP_ENABLED, DB_BACKUP_HOUR, DB_BACKUP_MINUTE, DB_BACKUP_RETENTION
 
 v7.3.1:
 - Corrige race condition TOCTOU no orphan cleanup (DELETE condicional por sha256 com NOT EXISTS)
@@ -315,6 +322,7 @@ async def lifespan(_: FastAPI):
     sched.reload_rclone_jobs_from_db()
     sched.schedule_daily_digest()
     sched.schedule_nightly_cleanup()
+    sched.schedule_db_backup()
     log.info(f"Servidor iniciado — {len(STORAGE_VOLUMES)} volume(s): {[str(v) for v in STORAGE_VOLUMES]}")
     if storage.SSD_CACHE_ENABLED and storage.SSD_CACHE_DIR:
         log.info(f"SSD cache: habilitado — {storage.SSD_CACHE_DIR} (max {storage.SSD_CACHE_MAX_GB} GB)")
@@ -326,7 +334,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="7.3.1", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="7.4.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
@@ -2858,6 +2866,18 @@ def validate_integrity(background_tasks: BackgroundTasks, db: Session = Depends(
     db.refresh(mj)
     background_tasks.add_task(_bg_validate_integrity, mj.id)
     return {"scheduled": True, "job_id": mj.id}
+
+
+def _bg_run_db_backup() -> None:
+    from db_backup import run_db_backup
+    run_db_backup()
+
+
+@app.post("/maintenance/db-backup", dependencies=[Depends(require_api_key)])
+def force_db_backup(background_tasks: BackgroundTasks):
+    """Exporta o banco de dados para os volumes de storage e aplica rotação de backups."""
+    background_tasks.add_task(_bg_run_db_backup)
+    return {"status": "started"}
 
 
 def _bg_encrypt_existing(job_id: int) -> None:
