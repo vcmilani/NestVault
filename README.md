@@ -372,9 +372,28 @@ export OLLAMA_MODEL="llama3"                       # modelo Ollama a usar
 # Horário de envio do digest em horário local (padrão: 18h)
 export DIGEST_HOUR=18
 
+# Backup do banco de dados para os volumes de storage (padrão: habilitado, às 01:00)
+export DB_BACKUP_ENABLED=true
+export DB_BACKUP_HOUR=1          # hora de execução (0-23)
+export DB_BACKUP_MINUTE=0        # minuto de execução
+export DB_BACKUP_RETENTION=7     # quantos backups manter por volume
+
 # rclone backup (opcional — omitir usa ~/.config/rclone/rclone.conf)
 export RCLONE_CONFIG="/etc/rclone/rclone.conf"
 ```
+
+#### Configuração Backup do Banco de Dados
+
+| Variável | Obrigatório | Padrão | Descrição |
+|---|:-:|---|---|
+| `DB_BACKUP_ENABLED` | | `true` | Habilita o backup automático do banco |
+| `DB_BACKUP_HOUR` | | `1` | Hora de execução do backup (0–23, horário local) |
+| `DB_BACKUP_MINUTE` | | `0` | Minuto de execução do backup |
+| `DB_BACKUP_RETENTION` | | `7` | Número máximo de backups mantidos por volume |
+
+O backup exporta o banco para `_db_backups/` em **cada volume saudável** listado em `STORAGE_DIRS`. Para PostgreSQL usa `pg_dump --format=custom` (requer `pg_dump` no PATH); para SQLite usa `sqlite3.backup()` — cópia consistente sem travar leituras em andamento. Cada arquivo recebe timestamp no nome (`nestvault_db_YYYYMMDD_HHMMSS.dump|db`). Backups além do limite de retenção são removidos automaticamente.
+
+> **Por que isso importa?** Com 1 SSD + N HDDs, o SSD guarda o banco (mapa sha256 → caminhos físicos, versões, labels). Se o SSD falhar, os arquivos dos HDDs ficam intactos mas irrecuperáveis sem o banco. O backup automático resolve isso exportando o banco para os próprios HDDs.
 
 #### Configuração rclone
 
@@ -442,6 +461,10 @@ Environment="REPLICATION_FACTOR=2"
 # Environment="SSD_CACHE_ENABLED=true"
 # Environment="SSD_CACHE_DIR=/tmp/nestvault_ssd_cache"
 # Environment="SSD_CACHE_MAX_GB=20"
+# Backup do banco de dados — habilitado por padrão; ajuste horário se necessário
+# Environment="DB_BACKUP_HOUR=1"
+# Environment="DB_BACKUP_MINUTE=0"
+# Environment="DB_BACKUP_RETENTION=7"
 ExecStart=/home/pi/backup_system/server/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
 Restart=always
 
