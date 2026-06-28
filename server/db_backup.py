@@ -2,6 +2,7 @@
 
 import logging
 import os
+import shutil
 import sqlite3
 import subprocess
 from datetime import datetime
@@ -10,6 +11,7 @@ from urllib.parse import urlparse
 
 from cache_state import invalidate_activity
 from database import DATABASE_URL, DB_PATH, SessionLocal, MaintenanceJob, engine
+from sqlalchemy import text
 from storage import healthy_volumes
 
 log = logging.getLogger("backup-server")
@@ -62,6 +64,32 @@ def _rotate(backup_dir: Path, pattern: str, retention: int) -> int:
     return len(excess)
 
 
+def _estimate_db_size() -> int:
+    """Retorna estimativa do tamanho do banco em bytes (0 se não for possível calcular)."""
+    if DATABASE_URL:
+        try:
+            with engine.connect() as conn:
+                return conn.execute(text("SELECT pg_database_size(current_database())")).scalar() or 0
+        except Exception as e:
+            log.warning(f"[db-backup] Não foi possível estimar tamanho do banco PostgreSQL: {e}")
+            return 0
+    else:
+        try:
+            return Path(DB_PATH).stat().st_size
+        except OSError:
+            return 0
+
+
+def _fmt_bytes(n: int) -> str:
+    if n >= 1 << 30:
+        return f"{n / (1 << 30):.1f} GB"
+    if n >= 1 << 20:
+        return f"{n / (1 << 20):.1f} MB"
+    if n >= 1 << 10:
+        return f"{n / (1 << 10):.1f} KB"
+    return f"{n} B"
+
+
 def run_db_backup() -> dict:
     """Exporta o banco de dados para todos os volumes saudáveis e aplica rotação de backups."""
     db = SessionLocal()
@@ -97,6 +125,7 @@ def run_db_backup() -> dict:
         db.close()
         return {"db_type": db_type, "files": [], "removed": 0, "error": summary}
 
+    db_size = _estimate_db_size()
     saved: list[str] = []
     total_removed = 0
     errors: list[str] = []
@@ -109,6 +138,20 @@ def run_db_backup() -> dict:
             log.warning(f"[db-backup] Não foi possível criar {backup_dir}: {e}")
             errors.append(f"{vol.name}: {e}")
             continue
+
+        if db_size > 0:
+            try:
+                free = shutil.disk_usage(backup_dir).free
+            except OSError as e:
+                log.warning(f"[db-backup] Não foi possível verificar espaço em {vol}: {e}")
+                errors.append(f"{vol.name}: não foi possível verificar espaço — {e}")
+                continue
+            if free < db_size:
+                msg = f"espaço insuficiente em {vol.name}: {_fmt_bytes(free)} livres, estimativa {_fmt_bytes(db_size)}"
+                log.warning(f"[db-backup] {msg}")
+                errors.append(msg)
+                continue
+            log.debug(f"[db-backup] {vol.name}: {_fmt_bytes(free)} livres, estimativa {_fmt_bytes(db_size)} — OK")
 
         dest = backup_dir / filename
         mj = db.get(MaintenanceJob, mj_id)
@@ -127,6 +170,12 @@ def run_db_backup() -> dict:
         except Exception as e:
             log.error(f"[db-backup] Falha ao gravar em {dest}: {e}")
             errors.append(f"{vol.name}: {e}")
+            if dest.exists():
+                try:
+                    dest.unlink()
+                    log.info(f"[db-backup] Arquivo parcial removido: {dest}")
+                except OSError as ue:
+                    log.warning(f"[db-backup] Não foi possível remover arquivo parcial {dest}: {ue}")
             continue
 
         removed = _rotate(backup_dir, pattern, DB_BACKUP_RETENTION)
