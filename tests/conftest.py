@@ -6,6 +6,7 @@ from sqlalchemy.pool import StaticPool
 
 import database as db_mod
 import main as m
+import storage as storage_mod
 
 
 def _make_engine():
@@ -39,6 +40,8 @@ def client(tmp_vol, monkeypatch):
 
     monkeypatch.setattr(m, "STORAGE_VOLUMES", [tmp_vol])
     monkeypatch.setattr(m, "STORAGE_DIR", tmp_vol)
+    monkeypatch.setattr(storage_mod, "STORAGE_VOLUMES", [tmp_vol])
+    monkeypatch.setattr(storage_mod, "STORAGE_DIR", tmp_vol)
 
     def override_get_db():
         db = Session()
@@ -62,6 +65,8 @@ def auth_client(tmp_vol, monkeypatch):
 
     monkeypatch.setattr(m, "STORAGE_VOLUMES", [tmp_vol])
     monkeypatch.setattr(m, "STORAGE_DIR", tmp_vol)
+    monkeypatch.setattr(storage_mod, "STORAGE_VOLUMES", [tmp_vol])
+    monkeypatch.setattr(storage_mod, "STORAGE_DIR", tmp_vol)
     monkeypatch.setattr(m, "API_KEY", "testkey")
     monkeypatch.setattr(m, "AUTH_ENABLED", True)
 

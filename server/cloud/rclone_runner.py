@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -39,7 +40,7 @@ _QUEUE_SIZE = 6
 def _fmt_size(n: int) -> str:
     """Formata bytes em string legível (ex: 12.3 MB)."""
     for unit in ("B", "KB", "MB", "GB", "TB"):
-        if abs(n) < 1024:
+        if n < 1024:
             return f"{n:.1f} {unit}"
         n /= 1024
     return f"{n:.1f} PB"
@@ -233,7 +234,9 @@ def _process_file_sync(
         dest = storage.content_path(sha256, volume)
         shutil.move(str(tmp_path), str(dest))
         if enc_key:
-            tmp_enc = dest.parent / f"_enc_{os.urandom(4).hex()}"
+            _fd, _tmp_enc = tempfile.mkstemp(dir=dest.parent, prefix="_enc_")
+            os.close(_fd)
+            tmp_enc = Path(_tmp_enc)
             try:
                 crypto.encrypt_stream(dest, tmp_enc, enc_key)
                 shutil.move(str(tmp_enc), str(dest))
@@ -281,7 +284,9 @@ async def _producer(
             f"({_fmt_size(entry.size)})"
         )
         volume = storage.pick_volume()
-        tmp_path = volume / f"_rclone_tmp_{os.urandom(8).hex()}"
+        _fd, _tmp = tempfile.mkstemp(dir=volume, prefix="_rclone_tmp_")
+        os.close(_fd)
+        tmp_path = Path(_tmp)
 
         async with semaphore:
             if abort.is_set():

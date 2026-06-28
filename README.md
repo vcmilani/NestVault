@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v7.3.0`
+# 🗄️ NestVault  `v7.3.1`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -6,6 +6,8 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v7.3.1** — corrige race condition TOCTOU no orphan cleanup (DELETE condicional atômico por sha256 com `NOT EXISTS`), FK violation quando `SsdCachePendingMove` existe para `FileContent` órfão, e retry infinito no SSD→HDD move quando o `FileContent` já foi removido.
+>
 > **v7.3.0** — remoção do sistema de cloud backup OAuth direto (Google Drive e OneDrive via OAuth2 nativo). O rclone passou a ser o único backend de cloud backup, cobrindo os mesmos provedores e mais 70+ outros sem necessidade de registrar apps no Google Cloud Console ou Azure Portal. Tabelas `cloud_credentials` e `cloud_backup_jobs` podem ser dropadas manualmente com o script `tools/migrate_drop_oauth_tables.sql` (ver [⚠️ Atualizando da v7.2 para v7.3](#️-atualizando-da-v72-para-v73)).
 >
 > **v7.2.0** — progresso em tempo real para todas as operações de manutenção: `ssd-cache-move` exibe "Movendo: X / Y arquivo(s) (Z%)" por lote; `cleanup-by-date` mostra progresso por lote de versões; `nightly-cleanup` entra em status `running` no início e reporta label-a-label; `encrypt-existing` convertido para background com "Cifrando: X / Y (Z%)". Operações que antes não apareciam no histórico (`cleanup-orphans`, `rereplicate`, `reconcile-replication`, `cleanup-versions` por label) passam a registrar `MaintenanceJob`. Labels de exibição adicionados na tela de atividade para todos os tipos de job de manutenção.

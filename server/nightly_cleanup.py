@@ -4,14 +4,14 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from database import SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob, engine
-from sqlalchemy import func, select, text
+from database import SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob, SsdCachePendingMove, engine
+from sqlalchemy import func, select, text, delete, exists
 from cache_state import invalidate_activity
 
 log = logging.getLogger("backup-server")
 
+_SIX_HOURS  = timedelta(hours=6)
 _ONE_DAY    = timedelta(hours=24)
-_ONE_WEEK   = timedelta(days=7)
 _ONE_MONTH  = timedelta(days=30)
 _SIX_MONTHS = timedelta(days=180)
 _BATCH      = 50
@@ -27,50 +27,92 @@ def _delete_versions(db, version_ids: list[int]) -> None:
 
 
 def _cleanup_orphan_contents(db) -> tuple[int, int]:
-    """Remove FileContents sem referência e seus arquivos físicos. Retorna (removidos, bytes_liberados)."""
+    """Remove FileContents sem referência e seus arquivos físicos. Retorna (removidos, bytes_liberados).
+
+    Usa DELETE condicional por sha256 para eliminar a race condition TOCTOU: o banco
+    re-verifica no momento da deleção se o sha256 ainda está sem referência, protegendo
+    arquivos que foram re-referenciados por uploads concorrentes após o snapshot inicial.
+    """
     used_shas = db.query(VersionFile.sha256).distinct().subquery()
-    orphans = db.query(FileContent).filter(~FileContent.sha256.in_(select(used_shas))).all()
+    candidates = db.query(FileContent).filter(~FileContent.sha256.in_(select(used_shas))).all()
+
+    if not candidates:
+        return 0, 0
+
+    # Extrai dados antes do commit (objetos expiram após db.commit())
+    orphan_shas   = [fc.sha256 for fc in candidates]
+    size_by_sha   = {fc.sha256: fc.size      for fc in candidates}
+    stored_by_sha = {fc.sha256: fc.stored_at for fc in candidates}
+    copies_by_sha: dict[str, list[dict]] = {}
+    for c in db.query(FileContentCopy).filter(FileContentCopy.sha256.in_(orphan_shas)).all():
+        copies_by_sha.setdefault(c.sha256, []).append({"id": c.id, "stored_at": c.stored_at})
+    # SsdCachePendingMove é FK child de FileContent — deve ser deletado antes do parent.
+    ssd_moves_by_sha: dict[str, str] = {}
+    for m in db.query(SsdCachePendingMove).filter(SsdCachePendingMove.sha256.in_(orphan_shas)).all():
+        ssd_moves_by_sha[m.sha256] = m.ssd_path
+
+    # Encerra a transação de leitura: próximas operações enxergam o estado mais recente do DB,
+    # inclusive VersionFiles commitados por uploads concorrentes desde o snapshot acima.
+    db.commit()
 
     bytes_freed = 0
-    safe_to_delete: list[FileContent] = []
-    orphan_shas = [fc.sha256 for fc in orphans]
-    copies_by_sha: dict[str, list] = {}
-    if orphan_shas:
-        for c in db.query(FileContentCopy).filter(FileContentCopy.sha256.in_(orphan_shas)).all():
-            copies_by_sha.setdefault(c.sha256, []).append(c)
+    removed = 0
 
-    for fc in orphans:
-        copies = copies_by_sha.get(fc.sha256, [])
-        failed = False
-        for copy in copies:
-            p = Path(copy.stored_at)
-            if p.exists():
-                try:
-                    p.unlink()
-                except OSError as e:
-                    log.warning(f"[nightly-cleanup] Não foi possível remover {p}: {e} — pulando")
-                    failed = True
-                    continue
-            db.delete(copy)
-        if failed:
-            continue
+    for sha256 in orphan_shas:
+        copies   = copies_by_sha.get(sha256, [])
+        copy_ids = [c["id"] for c in copies]
+        try:
+            # FK children de FileContent: deletar antes do parent (respeita PRAGMA foreign_keys=ON).
+            if sha256 in ssd_moves_by_sha:
+                db.query(SsdCachePendingMove).filter(
+                    SsdCachePendingMove.sha256 == sha256
+                ).delete(synchronize_session=False)
+            if copy_ids:
+                db.query(FileContentCopy).filter(
+                    FileContentCopy.id.in_(copy_ids)
+                ).delete(synchronize_session=False)
+
+            # DELETE atômico: só remove se realmente não há VersionFile apontando para este sha256.
+            result = db.execute(
+                delete(FileContent).where(
+                    (FileContent.sha256 == sha256) &
+                    ~exists().where(VersionFile.sha256 == sha256)
+                )
+            )
+            if result.rowcount == 0:
+                # Re-referenciado por upload concurrent — desfaz deleção das cópias e segue.
+                db.rollback()
+                continue
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+        # Deleção física (best-effort): falha deixa arquivo órfão no disco, mas o DB é consistente.
+        if sha256 in ssd_moves_by_sha:
+            try:
+                Path(ssd_moves_by_sha[sha256]).unlink()
+            except (FileNotFoundError, OSError):
+                pass
+        for c in copies:
+            try:
+                Path(c["stored_at"]).unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                log.warning(f"[nightly-cleanup] Não foi possível remover {c['stored_at']}: {e}")
         if not copies:
-            p = Path(fc.stored_at)
-            if p.exists():
-                try:
-                    p.unlink()
-                except OSError as e:
-                    log.warning(f"[nightly-cleanup] Não foi possível remover {p}: {e} — pulando")
-                    continue
-        bytes_freed += fc.size
-        safe_to_delete.append(fc)
+            try:
+                Path(stored_by_sha[sha256]).unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                log.warning(f"[nightly-cleanup] Não foi possível remover {stored_by_sha[sha256]}: {e}")
 
-    if safe_to_delete:
-        db.flush()
-        for fc in safe_to_delete:
-            db.delete(fc)
-    db.commit()
-    return len(safe_to_delete), bytes_freed
+        bytes_freed += size_by_sha.get(sha256, 0)
+        removed += 1
+
+    return removed, bytes_freed
 
 
 def _versions_to_keep(done_versions: list[BackupVersion], now: datetime) -> set[int]:
@@ -232,9 +274,39 @@ def run_nightly_cleanup() -> None:
     invalidate_activity()
     try:
         now = datetime.now()
-        stale_cutoff = now - _ONE_WEEK
 
         log.info("[nightly-cleanup] iniciando limpeza noturna")
+
+        # 0. Marcar versões "running" sem atividade de arquivos há mais de 6h como incompletas
+        _cutoff_activity = now - _SIX_HOURS
+        _last_file_subq = (
+            db.query(
+                VersionFile.version_id,
+                func.max(VersionFile.created_at).label("last_file_at"),
+            )
+            .group_by(VersionFile.version_id)
+            .subquery()
+        )
+        stale_running = (
+            db.query(BackupVersion)
+            .outerjoin(_last_file_subq, BackupVersion.id == _last_file_subq.c.version_id)
+            .filter(
+                BackupVersion.status == "running",
+                func.coalesce(_last_file_subq.c.last_file_at, BackupVersion.created_at)
+                < _cutoff_activity,
+            )
+            .all()
+        )
+        total_stale_running = len(stale_running)
+        if stale_running:
+            for v in stale_running:
+                v.status = "incomplete"
+                v.finished_at = now
+            db.commit()
+            log.info(
+                f"[nightly-cleanup] {total_stale_running} versão(ões) 'running' "
+                f"sem atividade de arquivos há 6h+ marcada(s) como 'incomplete'"
+            )
 
         labels = [row[0] for row in db.query(BackupID.label).all()]
         total_labels = len(labels)
@@ -270,8 +342,6 @@ def run_nightly_cleanup() -> None:
             # 1. Limpar stale (failed/incomplete) com mais de 1 semana que tenham done mais recente
             stale_to_delete: list[int] = []
             for v in stale_versions:
-                if v.created_at >= stale_cutoff:
-                    continue
                 if any(d > v.created_at for d in done_dates):
                     stale_to_delete.append(v.id)
 
@@ -331,26 +401,32 @@ def run_nightly_cleanup() -> None:
         else:
             _integrity_note = ""
 
-        summary_parts = []
+        removed_parts = []
         if total_stale:
-            summary_parts.append(f"{total_stale} stale (failed/incomplete)")
+            removed_parts.append(f"{total_stale} stale (failed/incomplete)")
         if total_day:
-            summary_parts.append(f"{total_day} done por dia")
+            removed_parts.append(f"{total_day} done por dia")
         if total_week:
-            summary_parts.append(f"{total_week} done por semana")
+            removed_parts.append(f"{total_week} done por semana")
         if total_month:
-            summary_parts.append(f"{total_month} done por mês")
+            removed_parts.append(f"{total_month} done por mês")
+
+        stale_running_note = (
+            f"; {total_stale_running} running sem atividade 6h+ → incomplete"
+            if total_stale_running else ""
+        )
 
         if total_removed:
             summary = (
                 f"{total_removed} versão(ões) removida(s) em {labels_touched} label(s)"
-                + (f": {', '.join(summary_parts)}" if summary_parts else "")
+                + (f": {', '.join(removed_parts)}" if removed_parts else "")
                 + (f"; {orphans_removed} arquivo(s) de storage liberado(s) ({round(bytes_freed/1024/1024, 1)} MB)" if orphans_removed else "")
                 + _integrity_note
+                + stale_running_note
             )
             log.info(f"[nightly-cleanup] {summary}")
         else:
-            summary = "Nenhuma versão removida — política de retenção satisfeita" + _integrity_note
+            summary = "Nenhuma versão removida — política de retenção satisfeita" + _integrity_note + stale_running_note
             log.info(f"[nightly-cleanup] {summary}")
 
         mj = db.get(MaintenanceJob, mj_id)
@@ -380,11 +456,14 @@ def run_nightly_cleanup() -> None:
     # VACUUM fora de transação para compactar o arquivo SQLite.
     # O SQLite só libera espaço em disco com VACUUM — deletar linhas apenas
     # marca páginas como livres na freelist, sem encolher o arquivo.
-    try:
-        raw = engine.raw_connection()
-        raw.isolation_level = None  # autocommit — VACUUM não pode rodar dentro de transação
-        raw.execute("VACUUM")
-        raw.close()
-        log.info("[nightly-cleanup] VACUUM concluído — espaço em disco liberado")
-    except Exception:
-        log.warning("[nightly-cleanup] Falha ao executar VACUUM (não crítico)")
+    if engine.dialect.name != "sqlite":
+        log.info("[nightly-cleanup] Backend não-SQLite — VACUUM ignorado")
+    else:
+        try:
+            raw = engine.raw_connection()
+            raw.isolation_level = None  # autocommit — VACUUM não pode rodar dentro de transação
+            raw.execute("VACUUM")
+            raw.close()
+            log.info("[nightly-cleanup] VACUUM concluído — espaço em disco liberado")
+        except Exception as exc:
+            log.warning("[nightly-cleanup] Falha ao executar VACUUM (não crítico): %s", exc)
