@@ -1,6 +1,7 @@
 """Rotina de limpeza noturna com política de retenção progressiva de versões."""
 
 import logging
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -15,6 +16,8 @@ _ONE_DAY    = timedelta(hours=24)
 _ONE_MONTH  = timedelta(days=30)
 _SIX_MONTHS = timedelta(days=180)
 _BATCH      = 50
+
+_TMP_PREFIXES = ("_cloud_tmp_", "_rclone_tmp_", "_tmp_", "_enc_")
 
 
 def _delete_versions(db, version_ids: list[int]) -> None:
@@ -112,6 +115,30 @@ def _cleanup_orphan_contents(db) -> tuple[int, int]:
         bytes_freed += size_by_sha.get(sha256, 0)
         removed += 1
 
+    return removed, bytes_freed
+
+
+def _cleanup_stale_tmp_files(volumes: list[Path], max_age_hours: float = 24.0) -> tuple[int, int]:
+    """Remove arquivos temporários órfãos com mais de max_age_hours horas. Retorna (removidos, bytes_liberados)."""
+    cutoff = time.time() - max_age_hours * 3600
+    removed = 0
+    bytes_freed = 0
+    for vol in volumes:
+        for prefix in _TMP_PREFIXES:
+            for f in vol.glob(f"{prefix}*"):
+                if not f.is_file():
+                    continue
+                try:
+                    st = f.stat()
+                    if st.st_mtime < cutoff:
+                        bytes_freed += st.st_size
+                        f.unlink()
+                        removed += 1
+                        log.info(f"[cleanup-tmp] removido {f.name} ({st.st_size} bytes)")
+                except FileNotFoundError:
+                    pass
+                except OSError as e:
+                    log.warning(f"[cleanup-tmp] não foi possível remover {f}: {e}")
     return removed, bytes_freed
 
 
@@ -384,6 +411,15 @@ def run_nightly_cleanup() -> None:
             invalidate_activity()
         orphans_removed, bytes_freed = _cleanup_orphan_contents(db)
 
+        # Limpeza de arquivos temporários órfãos (mais de 24h)
+        mj = db.get(MaintenanceJob, mj_id)
+        if mj:
+            mj.summary = "Limpando arquivos temporários órfãos..."
+            db.commit()
+            invalidate_activity()
+        from storage import STORAGE_VOLUMES
+        tmp_removed, tmp_bytes = _cleanup_stale_tmp_files(STORAGE_VOLUMES, max_age_hours=24.0)
+
         # Validação de integridade das últimas versões done
         mj = db.get(MaintenanceJob, mj_id)
         if mj:
@@ -400,6 +436,11 @@ def run_nightly_cleanup() -> None:
             _integrity_note = f"; integridade: {integrity['checked']} versões OK"
         else:
             _integrity_note = ""
+
+        _tmp_note = (
+            f"; {tmp_removed} arquivo(s) temporário(s) removido(s) ({round(tmp_bytes/1024/1024, 1)} MB)"
+            if tmp_removed else ""
+        )
 
         removed_parts = []
         if total_stale:
@@ -421,12 +462,13 @@ def run_nightly_cleanup() -> None:
                 f"{total_removed} versão(ões) removida(s) em {labels_touched} label(s)"
                 + (f": {', '.join(removed_parts)}" if removed_parts else "")
                 + (f"; {orphans_removed} arquivo(s) de storage liberado(s) ({round(bytes_freed/1024/1024, 1)} MB)" if orphans_removed else "")
+                + _tmp_note
                 + _integrity_note
                 + stale_running_note
             )
             log.info(f"[nightly-cleanup] {summary}")
         else:
-            summary = "Nenhuma versão removida — política de retenção satisfeita" + _integrity_note + stale_running_note
+            summary = "Nenhuma versão removida — política de retenção satisfeita" + _tmp_note + _integrity_note + stale_running_note
             log.info(f"[nightly-cleanup] {summary}")
 
         mj = db.get(MaintenanceJob, mj_id)

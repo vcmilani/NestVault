@@ -196,6 +196,17 @@ def _cleanup_stale_running_states():
     finally:
         db.close()
 
+    from nightly_cleanup import _TMP_PREFIXES
+    for vol in storage.STORAGE_VOLUMES:
+        for prefix in _TMP_PREFIXES:
+            for f in vol.glob(f"{prefix}*"):
+                if f.is_file():
+                    try:
+                        f.unlink()
+                        log.info(f"[startup] arquivo temporário órfão removido: {f.name}")
+                    except OSError as e:
+                        log.warning(f"[startup] não foi possível remover {f}: {e}")
+
 
 def _backup_labels_for_sha256s(db, sha256s: list[str]) -> list[str]:
     if not sha256s:
