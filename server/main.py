@@ -629,6 +629,12 @@ class BackupActivityEntry(BaseModel):
     last_done_at: Optional[str]
     done_count: int
 
+class ReclaimableLabelEntry(BaseModel):
+    label: str
+    client_name: Optional[str]
+    old_version_count: int
+    old_versions_size_bytes: int
+
 class StatsResponse(BaseModel):
     total_backups: int
     total_versions_done: int
@@ -656,6 +662,7 @@ class StatsResponse(BaseModel):
     versions_cleaned_total: int
     bytes_freed_by_cleanup: int
     backups_activity: list[BackupActivityEntry]
+    reclaimable_by_label: list[ReclaimableLabelEntry]
     server_time: str
 
 
@@ -1605,6 +1612,33 @@ def _build_stats_data(db: Session) -> StatsResponse:
         for r in _activity_sorted
     ]
 
+    # --- Q11: espaço liberável por label (versões done não-mais-recentes) ---
+    reclaimable_by_label: list[ReclaimableLabelEntry] = []
+    if latest_ids:
+        old_size_rows = db.query(
+            BackupVersion.backup_label.label("label"),
+            func.count(BackupVersion.id.distinct()).label("old_version_count"),
+            func.coalesce(func.sum(FileContent.size), 0).label("old_versions_size_bytes"),
+        ).join(VersionFile, VersionFile.version_id == BackupVersion.id
+        ).join(FileContent, FileContent.sha256 == VersionFile.sha256
+        ).filter(
+            BackupVersion.status == "done",
+            BackupVersion.id.notin_(latest_ids),
+        ).group_by(BackupVersion.backup_label
+        ).order_by(func.coalesce(func.sum(FileContent.size), 0).desc()
+        ).all()
+
+        reclaimable_by_label = [
+            ReclaimableLabelEntry(
+                label=row.label,
+                client_name=names_map.get(row.label),
+                old_version_count=int(row.old_version_count),
+                old_versions_size_bytes=int(row.old_versions_size_bytes),
+            )
+            for row in old_size_rows
+            if row.old_versions_size_bytes > 0
+        ]
+
     return StatsResponse(
         total_backups=total_backups,
         total_versions_done=total_done,
@@ -1632,6 +1666,7 @@ def _build_stats_data(db: Session) -> StatsResponse:
         versions_cleaned_total=versions_cleaned_total,
         bytes_freed_by_cleanup=bytes_freed_by_cleanup,
         backups_activity=backups_activity,
+        reclaimable_by_label=reclaimable_by_label,
         server_time=datetime.now().isoformat(),
     )
 

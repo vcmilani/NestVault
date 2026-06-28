@@ -276,7 +276,22 @@
     <div class="loading">Carregando</div>
   </div>
 
-  <!-- 3. Tendência -->
+  <!-- 3. Espaço liberável por backup -->
+  <section id="sec-reclaimable" style="display:none;margin-bottom:28px">
+    <div class="section-head" style="margin-bottom:10px">
+      <div class="section-title">Espaço liberável por backup</div>
+      <span class="section-sub">versões antigas acumuladas por label</span>
+    </div>
+    <div class="table-wrap">
+      <table id="tblReclaimable">
+        <thead><tr><th>Backup</th><th>Cliente</th><th>Versões antigas</th><th style="text-align:right">Tamanho acumulado</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div style="font-size:10px;color:var(--text-mute);margin-top:6px;letter-spacing:.04em">Estimativa antes de deduplicação cross-label — o espaço efetivamente liberado pode ser menor.</div>
+  </section>
+
+  <!-- 4. Tendência -->
   <div class="section-head" style="margin-bottom:10px">
     <div class="section-title">Tendência — últimos 30 dias</div>
     <span class="section-sub">versões concluídas e volume de dados por dia</span>
@@ -458,6 +473,7 @@
   function render(data) {
     renderSummary(data);
     renderStorage(data);
+    renderReclaimableByLabel(data.reclaimable_by_label || []);
     renderTrend(data.trend_days);
     renderTopBackups(data.top_backups);
     renderDedup(data);
@@ -553,6 +569,20 @@
           <div class="snum"><div class="snum-label">Livre</div><div class="snum-value green">${esc(fmtSize(d.storage_free_bytes))}</div></div>
         </div>
       </div>`;
+  }
+
+  function renderReclaimableByLabel(entries) {
+    const sec = document.getElementById('sec-reclaimable');
+    const filtered = (entries || []).filter(e => e.old_versions_size_bytes > 0);
+    if (!filtered.length) { sec.style.display = 'none'; return; }
+    sec.style.display = '';
+    const tbody = document.querySelector('#tblReclaimable tbody');
+    tbody.innerHTML = filtered.map(e => `<tr>
+      <td>${esc(e.label)}</td>
+      <td>${esc(e.client_name || '—')}</td>
+      <td>${e.old_version_count.toLocaleString('pt-BR')}</td>
+      <td style="text-align:right;color:var(--amber)">${esc(fmtSize(e.old_versions_size_bytes))}</td>
+    </tr>`).join('');
   }
 
   function renderTrend(days) {
