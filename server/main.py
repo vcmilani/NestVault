@@ -1,5 +1,5 @@
 """
-NestVault  v7.4.0
+NestVault  v7.5.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -7,6 +7,12 @@ Otimizacoes de performance:
 - Indices no banco + WAL mode
 - Cleanup de orfaos em uma unica query
 - Limpeza de arquivos ao deletar label/versao feita em background (nao bloqueia o cliente)
+
+v7.5.0:
+- STORAGE_FALLBACK_THRESHOLD_GB agora é respeitado como piso mínimo de espaço por disco
+- Quando todos os volumes estão abaixo do limiar, aciona cleanup automático de versões antigas antes de continuar
+- Apenas se cleanup não liberar espaço suficiente, usa o volume com mais espaço livre como último recurso (log CRITICAL)
+- Alerta via Telegram quando todos os volumes ultrapassam o limiar (se TELEGRAM_BOT_TOKEN/CHAT_ID configurados)
 
 v7.4.0:
 - Backup automático do banco de dados (PostgreSQL ou SQLite) para os volumes de storage
@@ -334,7 +340,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="7.4.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="7.5.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
@@ -1613,26 +1619,57 @@ def _build_stats_data(db: Session) -> StatsResponse:
     ]
 
     # --- Q11: espaço liberável por label (versões done não-mais-recentes) ---
+    # Exclui sha256s presentes em qualquer versão keeper e usa DISTINCT para não
+    # inflar pelo mesmo arquivo aparecendo em múltiplas versões antigas.
     reclaimable_by_label: list[ReclaimableLabelEntry] = []
     if latest_ids:
-        old_size_rows = db.query(
-            BackupVersion.backup_label.label("label"),
-            func.count(BackupVersion.id.distinct()).label("old_version_count"),
-            func.coalesce(func.sum(FileContent.size), 0).label("old_versions_size_bytes"),
-        ).join(VersionFile, VersionFile.version_id == BackupVersion.id
-        ).join(FileContent, FileContent.sha256 == VersionFile.sha256
-        ).filter(
-            BackupVersion.status == "done",
-            BackupVersion.id.notin_(latest_ids),
-        ).group_by(BackupVersion.backup_label
-        ).order_by(func.coalesce(func.sum(FileContent.size), 0).desc()
-        ).all()
+        keeper_sq = (
+            db.query(VersionFile.sha256.label("sha256"))
+            .filter(VersionFile.version_id.in_(latest_ids))
+            .distinct()
+            .subquery()
+        )
+        old_exclusive_sq = (
+            db.query(
+                BackupVersion.backup_label.label("label"),
+                VersionFile.sha256.label("sha256"),
+            )
+            .join(VersionFile, VersionFile.version_id == BackupVersion.id)
+            .outerjoin(keeper_sq, VersionFile.sha256 == keeper_sq.c.sha256)
+            .filter(
+                BackupVersion.status == "done",
+                BackupVersion.id.notin_(latest_ids),
+                keeper_sq.c.sha256.is_(None),
+            )
+            .distinct()
+            .subquery()
+        )
+        old_size_rows = (
+            db.query(
+                old_exclusive_sq.c.label.label("label"),
+                func.coalesce(func.sum(FileContent.size), 0).label("old_versions_size_bytes"),
+            )
+            .join(FileContent, FileContent.sha256 == old_exclusive_sq.c.sha256)
+            .group_by(old_exclusive_sq.c.label)
+            .order_by(func.coalesce(func.sum(FileContent.size), 0).desc())
+            .all()
+        )
+        old_cnt_rows = (
+            db.query(
+                BackupVersion.backup_label.label("label"),
+                func.count(BackupVersion.id.distinct()).label("cnt"),
+            )
+            .filter(BackupVersion.status == "done", BackupVersion.id.notin_(latest_ids))
+            .group_by(BackupVersion.backup_label)
+            .all()
+        )
+        old_cnt_map = {r.label: int(r.cnt) for r in old_cnt_rows}
 
         reclaimable_by_label = [
             ReclaimableLabelEntry(
                 label=row.label,
                 client_name=names_map.get(row.label),
-                old_version_count=int(row.old_version_count),
+                old_version_count=old_cnt_map.get(row.label, 0),
                 old_versions_size_bytes=int(row.old_versions_size_bytes),
             )
             for row in old_size_rows
@@ -2559,8 +2596,23 @@ async def upload_file(
             await asyncio.to_thread(_ensure_replicas, sha256, Path(first_copy.stored_at), db)
         log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — registrada sha256={sha256[:8]}…")
     else:
-        # Escolhe volume HDD de destino final; decide se usa SSD como staging
-        volume    = _pick_volume()
+        # Escolhe volume HDD de destino final; decide se usa SSD como staging.
+        # Se todos os volumes estiverem abaixo do limiar, aciona cleanup antes de desistir.
+        try:
+            volume = _pick_volume()
+        except storage.StorageThresholdExceeded as _exc:
+            log.warning("[upload] Todos os volumes abaixo do limiar — acionando limpeza automática antes de continuar...")
+            from daily_digest import _send_telegram
+            await _send_telegram(
+                f"⚠️ *NestVault — Alerta de Armazenamento*\n\n"
+                f"{_exc}\n\n"
+                f"Iniciando limpeza automática de versões antigas..."
+            )
+            await asyncio.to_thread(_auto_cleanup_if_needed, db)
+            try:
+                volume = _pick_volume()
+            except storage.StorageThresholdExceeded:
+                volume = storage.pick_volume_last_resort()
         ssd_dir   = _ssd_cache_write_dir(db)
         write_dir = ssd_dir if ssd_dir else volume
         sha256, size, tmp_path = await _stream_request_to_disk(request, write_dir)

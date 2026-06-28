@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v7.4.0`
+# 🗄️ NestVault  `v7.5.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -6,6 +6,8 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v7.5.0** — `STORAGE_FALLBACK_THRESHOLD_GB` agora é respeitado como piso mínimo de espaço por disco. Quando todos os volumes ficam abaixo do limiar, o sistema aciona automaticamente o cleanup de versões antigas antes de continuar escrevendo; apenas se o cleanup não liberar espaço suficiente é que usa o volume com mais espaço livre como último recurso (log CRITICAL). Alerta via Telegram enviado no momento em que o limiar é ultrapassado, se `TELEGRAM_BOT_TOKEN` e `TELEGRAM_CHAT_ID` estiverem configurados.
+>
 > **v7.4.0** — backup automático do banco de dados (PostgreSQL ou SQLite) para os volumes de storage: exporta para `_db_backups/` em cada volume saudável, com rotação que mantém os últimos `DB_BACKUP_RETENTION` (padrão: 7) backups por volume. Agendado automaticamente às 01:00 via APScheduler e acionável manualmente em `POST /maintenance/db-backup` ou pela tela de manutenção. Resolve o cenário em que uma falha no SSD tornaria os arquivos dos HDDs irrecuperáveis — mesmo com os dados físicos intactos, sem o banco (mapa sha256 → caminho) não haveria como reconstruir as versões. Configurável via `DB_BACKUP_ENABLED`, `DB_BACKUP_HOUR`, `DB_BACKUP_MINUTE` e `DB_BACKUP_RETENTION`.
 >
 > **v7.3.1** — corrige race condition TOCTOU no orphan cleanup (DELETE condicional atômico por sha256 com `NOT EXISTS`), FK violation quando `SsdCachePendingMove` existe para `FileContent` órfão, e retry infinito no SSD→HDD move quando o `FileContent` já foi removido.
