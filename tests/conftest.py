@@ -4,6 +4,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+import auth as auth_mod
 import database as db_mod
 import main as m
 import storage as storage_mod
@@ -21,8 +22,19 @@ def _make_engine():
 @pytest.fixture(autouse=True)
 def reset_degraded_volumes():
     m._degraded_volumes.clear()
+    _reset_module_caches()
     yield
     m._degraded_volumes.clear()
+    _reset_module_caches()
+
+
+def _reset_module_caches():
+    """Zera caches/sinais de módulo que persistem entre testes (isolamento)."""
+    m._reclaimable_cache.update({"value": 0, "ts": 0.0})
+    m._stats_cache.update({"data": None, "ts": 0.0})
+    m._historical_cache.update({"data": None, "ts": 0.0})
+    m._activity_wake.clear()
+    m._activity_loop_stop.clear()
 
 
 @pytest.fixture
@@ -67,6 +79,9 @@ def auth_client(tmp_vol, monkeypatch):
     monkeypatch.setattr(m, "STORAGE_DIR", tmp_vol)
     monkeypatch.setattr(storage_mod, "STORAGE_VOLUMES", [tmp_vol])
     monkeypatch.setattr(storage_mod, "STORAGE_DIR", tmp_vol)
+    # require_api_key (auth.py) lê os globais do módulo auth, não os aliases em main.
+    monkeypatch.setattr(auth_mod, "API_KEY", "testkey")
+    monkeypatch.setattr(auth_mod, "AUTH_ENABLED", True)
     monkeypatch.setattr(m, "API_KEY", "testkey")
     monkeypatch.setattr(m, "AUTH_ENABLED", True)
 

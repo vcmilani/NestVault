@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 import database as db_mod
 import main as m
+import storage as storage_mod
 
 DiskUsage = namedtuple("DiskUsage", ["total", "used", "free"])
 
@@ -22,6 +23,9 @@ def _make_client(monkeypatch, volumes, disk_usage_fn):
 
     monkeypatch.setattr(m, "STORAGE_VOLUMES", volumes)
     monkeypatch.setattr(m, "STORAGE_DIR", volumes[0])
+    # storage.py lê os globais do próprio módulo — propaga os patches para lá.
+    monkeypatch.setattr(storage_mod, "STORAGE_VOLUMES", volumes)
+    monkeypatch.setattr(storage_mod, "STORAGE_DIR", volumes[0])
 
     def override_get_db():
         db = Session()
@@ -86,8 +90,10 @@ def test_storage_info_reclaimable(tmp_path, monkeypatch):
 
     vol = tmp_path / "vol"; vol.mkdir()
 
+    GB = 1024 ** 3
     def fake_usage(path):
-        return DiskUsage(total=10000, used=100, free=9900)
+        # Acima de STORAGE_FALLBACK_THRESHOLD_GB para o upload usar o volume direto.
+        return DiskUsage(total=100 * GB, used=10 * GB, free=90 * GB)
 
     for c in _make_client(monkeypatch, [vol], fake_usage):
         # Cria backup com duas versões, cada uma com arquivo único

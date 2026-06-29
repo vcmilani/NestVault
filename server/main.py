@@ -47,9 +47,10 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
-import asyncio, os, tempfile, hashlib, secrets, base64, shutil, logging, time, threading, re
+import asyncio, os, tempfile, hashlib, base64, shutil, logging, time, threading, re
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+from urllib.parse import quote
 
 from sqlalchemy import func, select, insert, literal, case, delete, exists
 from sqlalchemy.orm import Session
@@ -97,6 +98,12 @@ _ssd_content_path        = storage.ssd_content_path
 
 
 _ssd_move_lock = threading.Lock()
+
+# Sinaliza o desligamento ao _activity_refresh_loop. Necessário porque o loop
+# espera em _activity_wake.wait() dentro de uma thread do executor: cancelar a
+# task asyncio não interrompe essa thread, então o fechamento do event loop
+# bloquearia no join do executor por até _HISTORICAL_FALLBACK_TTL.
+_activity_loop_stop = threading.Event()
 
 _reclaimable_cache: dict = {"value": 0, "ts": 0.0}
 _RECLAIMABLE_TTL = 60.0
@@ -351,6 +358,8 @@ async def lifespan(_: FastAPI):
         log.info("Criptografia: desabilitada")
     asyncio.get_running_loop().run_in_executor(None, _backfill_content_copies)
     asyncio.get_running_loop().run_in_executor(None, _resume_ssd_pending_moves)
+    _activity_loop_stop.clear()
+    _activity_wake.clear()
     monitor         = asyncio.create_task(_volume_health_monitor())
     ssd_monitor     = asyncio.create_task(_ssd_space_monitor())
     activity_refresh = asyncio.create_task(_activity_refresh_loop())
@@ -364,6 +373,10 @@ async def lifespan(_: FastAPI):
         log.info(f"SSD cache: habilitado — {storage.SSD_CACHE_DIR} (max {storage.SSD_CACHE_MAX_GB} GB)")
     log.info(f"Auth: {'habilitada' if AUTH_ENABLED else 'desabilitada'}")
     yield
+    # Libera a thread do executor presa em _activity_wake.wait() antes de cancelar,
+    # senão o fechamento do event loop bloqueia no join do executor (até 5 min).
+    _activity_loop_stop.set()
+    _activity_wake.set()
     monitor.cancel()
     ssd_monitor.cancel()
     activity_refresh.cancel()
@@ -1748,8 +1761,8 @@ def get_stats(db: Session = Depends(get_db)):
 
 
 def _build_fast_data(db: Session) -> tuple:
-    """Queries leves para dados em tempo real: versões/jobs em execução, storage e discos.
-    Chamado inline a cada request — retorna (running_version_infos, running_job_infos, storage_obj, disks_list)."""
+    """Queries leves para dados em tempo real: versões em execução, storage e discos.
+    Chamado inline a cada request — retorna (running_version_infos, storage_obj, disks_list)."""
 
     # 1. Versões de backup em execução
     running_vs = (
@@ -1774,26 +1787,43 @@ def _build_fast_data(db: Session) -> tuple:
         ):
             stats_map[row.version_id] = (row.fc, int(row.sz))
 
+    # prev_stats: stats da última versão "done" de cada label em execução.
+    # Resolvido em queries agregadas (sem N+1 por label).
     prev_stats: dict[str, tuple[int, int]] = {}
-    for label in {v.backup_label for v in running_vs}:
-        last_done = (
-            db.query(BackupVersion)
-            .filter(BackupVersion.backup_label == label, BackupVersion.status == "done")
-            .order_by(BackupVersion.created_at.desc())
-            .first()
+    labels = {v.backup_label for v in running_vs}
+    if labels:
+        latest_done_sq = (
+            db.query(
+                BackupVersion.backup_label.label("label"),
+                func.max(BackupVersion.created_at).label("ts"),
+            )
+            .filter(BackupVersion.status == "done", BackupVersion.backup_label.in_(labels))
+            .group_by(BackupVersion.backup_label)
+            .subquery()
         )
-        if last_done:
-            row = (
+        id_to_label = {
+            vid: lbl
+            for vid, lbl in (
+                db.query(BackupVersion.id, BackupVersion.backup_label)
+                .join(latest_done_sq,
+                      (BackupVersion.backup_label == latest_done_sq.c.label) &
+                      (BackupVersion.created_at == latest_done_sq.c.ts))
+                .all()
+            )
+        }
+        if id_to_label:
+            for row in (
                 db.query(
+                    VersionFile.version_id,
                     func.count(VersionFile.id).label("fc"),
                     func.coalesce(func.sum(FileContent.size), 0).label("sz"),
                 )
                 .outerjoin(FileContent, FileContent.sha256 == VersionFile.sha256)
-                .filter(VersionFile.version_id == last_done.id)
-                .first()
-            )
-            if row:
-                prev_stats[label] = (row.fc, int(row.sz))
+                .filter(VersionFile.version_id.in_(list(id_to_label.keys())))
+                .group_by(VersionFile.version_id)
+                .all()
+            ):
+                prev_stats[id_to_label[row.version_id]] = (row.fc, int(row.sz))
 
     running_version_infos = [
         RunningVersionInfo(
@@ -1976,9 +2006,11 @@ async def _activity_refresh_loop() -> None:
     apenas quando invalidate_activity() acorda o loop — normalmente ao fim de um backup/job.
     Fallback de 5 min para não ficar preso caso alguma invalidação seja perdida."""
     loop = asyncio.get_running_loop()
-    while True:
+    while not _activity_loop_stop.is_set():
         await loop.run_in_executor(None, lambda: _activity_wake.wait(timeout=_HISTORICAL_FALLBACK_TTL))
         _activity_wake.clear()
+        if _activity_loop_stop.is_set():
+            break
 
         try:
             def _do_hist():
@@ -2791,10 +2823,13 @@ def download_file(file_id: int, db: Session = Depends(get_db)):
             continue
         log.info(f"[download] {row.sha256[:8]}… encontrado no disco em {p}")
         if is_encrypted:
+            # filename* (RFC 5987) evita quebra de header / injecao via aspas ou
+            # caracteres nao-ASCII no nome do arquivo.
+            disposition = f"attachment; filename*=UTF-8''{quote(filename)}"
             return StreamingResponse(
                 crypto.decrypt_chunks(p, storage.encryption_key),
                 media_type="application/octet-stream",
-                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+                headers={"Content-Disposition": disposition},
             )
         return FileResponse(p, filename=filename)
 
