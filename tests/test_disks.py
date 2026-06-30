@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import database as db_mod
 import main as m
+import storage as storage_mod
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -31,6 +32,9 @@ def _client_ctx(monkeypatch, volumes, disk_usage_fn=None):
 
     monkeypatch.setattr(m, "STORAGE_VOLUMES", volumes)
     monkeypatch.setattr(m, "STORAGE_DIR", volumes[0])
+    # storage.py lê os globais do próprio módulo — propaga os patches para lá.
+    monkeypatch.setattr(storage_mod, "STORAGE_VOLUMES", volumes)
+    monkeypatch.setattr(storage_mod, "STORAGE_DIR", volumes[0])
 
     def override_get_db():
         db = Session()

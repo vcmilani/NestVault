@@ -226,6 +226,10 @@ def delete_job(job_id: int, db: Session = Depends(get_db)):
     sched.remove_rclone_job(job.id)
     db.delete(job)
     db.commit()
+    # Evita acúmulo de locks órfãos (um por job_id que já rodou).
+    lock = _job_locks.get(job_id)
+    if lock is None or not lock.locked():
+        _job_locks.pop(job_id, None)
 
 
 # ---------------------------------------------------------------------------

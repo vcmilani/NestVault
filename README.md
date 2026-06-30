@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v7.3.1`
+# 🗄️ NestVault  `v7.6.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -6,6 +6,12 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v7.6.0** — backup incremental e resumível para iCloud Photos: walk descendente diretório a diretório com checkpoint em `BackupVersion.progress_json` — retomadas continuam na mesma versão a partir de onde pararam, sem re-baixar o já processado. Bibliotecas de 5k–50k fotos que não completavam listagem recursiva nem em 4 horas agora fazem backup progressivo sem perder progresso em caso de falha. Para os demais backends (OneDrive, Google Drive, iCloud Drive normal), o caminho rápido original (uma listagem recursiva única + download em lote na raiz) é preservado; o dispatch é automático via `rclone config dump` — `service=photos` aciona o walk, todo o resto usa o caminho rápido. Corrigido: download agora usa `rclone copy --files-from` em vez de `rclone cat`, resolvendo "directory not found" para nomes unicode/acentuados em todos os backends. Corrigido: dangling shortcuts do Google Drive não causam mais abort do job (`--drive-skip-dangling-shortcuts`). Corrigido: diretórios de staging órfãos (`_rclone_stage_*`) são removidos no startup e na limpeza noturna. Corrigido: path traversal e deadlock no shutdown.
+>
+> **v7.5.0** — `STORAGE_FALLBACK_THRESHOLD_GB` agora é respeitado como piso mínimo de espaço por disco. Quando todos os volumes ficam abaixo do limiar, o sistema aciona automaticamente o cleanup de versões antigas antes de continuar escrevendo; apenas se o cleanup não liberar espaço suficiente é que usa o volume com mais espaço livre como último recurso (log CRITICAL). Alerta via Telegram enviado no momento em que o limiar é ultrapassado, se `TELEGRAM_BOT_TOKEN` e `TELEGRAM_CHAT_ID` estiverem configurados.
+>
+> **v7.4.0** — backup automático do banco de dados (PostgreSQL ou SQLite) para os volumes de storage: exporta para `_db_backups/` em cada volume saudável, com rotação que mantém os últimos `DB_BACKUP_RETENTION` (padrão: 7) backups por volume. Agendado automaticamente às 01:00 via APScheduler e acionável manualmente em `POST /maintenance/db-backup` ou pela tela de manutenção. Resolve o cenário em que uma falha no SSD tornaria os arquivos dos HDDs irrecuperáveis — mesmo com os dados físicos intactos, sem o banco (mapa sha256 → caminho) não haveria como reconstruir as versões. Configurável via `DB_BACKUP_ENABLED`, `DB_BACKUP_HOUR`, `DB_BACKUP_MINUTE` e `DB_BACKUP_RETENTION`.
+>
 > **v7.3.1** — corrige race condition TOCTOU no orphan cleanup (DELETE condicional atômico por sha256 com `NOT EXISTS`), FK violation quando `SsdCachePendingMove` existe para `FileContent` órfão, e retry infinito no SSD→HDD move quando o `FileContent` já foi removido.
 >
 > **v7.3.0** — remoção do sistema de cloud backup OAuth direto (Google Drive e OneDrive via OAuth2 nativo). O rclone passou a ser o único backend de cloud backup, cobrindo os mesmos provedores e mais 70+ outros sem necessidade de registrar apps no Google Cloud Console ou Azure Portal. Tabelas `cloud_credentials` e `cloud_backup_jobs` podem ser dropadas manualmente com o script `tools/migrate_drop_oauth_tables.sql` (ver [⚠️ Atualizando da v7.2 para v7.3](#️-atualizando-da-v72-para-v73)).
@@ -370,9 +376,28 @@ export OLLAMA_MODEL="llama3"                       # modelo Ollama a usar
 # Horário de envio do digest em horário local (padrão: 18h)
 export DIGEST_HOUR=18
 
+# Backup do banco de dados para os volumes de storage (padrão: habilitado, às 01:00)
+export DB_BACKUP_ENABLED=true
+export DB_BACKUP_HOUR=1          # hora de execução (0-23)
+export DB_BACKUP_MINUTE=0        # minuto de execução
+export DB_BACKUP_RETENTION=7     # quantos backups manter por volume
+
 # rclone backup (opcional — omitir usa ~/.config/rclone/rclone.conf)
 export RCLONE_CONFIG="/etc/rclone/rclone.conf"
 ```
+
+#### Configuração Backup do Banco de Dados
+
+| Variável | Obrigatório | Padrão | Descrição |
+|---|:-:|---|---|
+| `DB_BACKUP_ENABLED` | | `true` | Habilita o backup automático do banco |
+| `DB_BACKUP_HOUR` | | `1` | Hora de execução do backup (0–23, horário local) |
+| `DB_BACKUP_MINUTE` | | `0` | Minuto de execução do backup |
+| `DB_BACKUP_RETENTION` | | `7` | Número máximo de backups mantidos por volume |
+
+O backup exporta o banco para `_db_backups/` em **cada volume saudável** listado em `STORAGE_DIRS`. Para PostgreSQL usa `pg_dump --format=custom` (requer `pg_dump` no PATH); para SQLite usa `sqlite3.backup()` — cópia consistente sem travar leituras em andamento. Cada arquivo recebe timestamp no nome (`nestvault_db_YYYYMMDD_HHMMSS.dump|db`). Backups além do limite de retenção são removidos automaticamente.
+
+> **Por que isso importa?** Com 1 SSD + N HDDs, o SSD guarda o banco (mapa sha256 → caminhos físicos, versões, labels). Se o SSD falhar, os arquivos dos HDDs ficam intactos mas irrecuperáveis sem o banco. O backup automático resolve isso exportando o banco para os próprios HDDs.
 
 #### Configuração rclone
 
@@ -440,6 +465,10 @@ Environment="REPLICATION_FACTOR=2"
 # Environment="SSD_CACHE_ENABLED=true"
 # Environment="SSD_CACHE_DIR=/tmp/nestvault_ssd_cache"
 # Environment="SSD_CACHE_MAX_GB=20"
+# Backup do banco de dados — habilitado por padrão; ajuste horário se necessário
+# Environment="DB_BACKUP_HOUR=1"
+# Environment="DB_BACKUP_MINUTE=0"
+# Environment="DB_BACKUP_RETENTION=7"
 ExecStart=/home/pi/backup_system/server/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
 Restart=always
 

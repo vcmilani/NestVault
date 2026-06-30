@@ -929,6 +929,16 @@ def restore(destination, label, version_key, server=DEFAULT_SERVER,
                         else original_path.lstrip("/"))
             dest_file = dest_root / relative
 
+            # Defesa contra path traversal (zip-slip): garante que o destino
+            # resolvido permanece dentro de dest_root, mesmo se o servidor enviar
+            # um original_path com segmentos ".." que escapariam do diretorio.
+            try:
+                dest_file.resolve().relative_to(dest_root.resolve())
+            except ValueError:
+                _err(f"Caminho inseguro ignorado: {original_path!r}")
+                stats["errors"] += 1
+                continue
+
             if Path(relative).name in IGNORED_NAMES:
                 stats["skipped"] += 1
                 continue

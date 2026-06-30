@@ -1,5 +1,5 @@
 """
-Models do banco de dados — v7.3.1
+Models do banco de dados — v7.6.0
 Suporte dual: SQLite (padrão) ou PostgreSQL (opcional via DATABASE_URL).
 
 SQLite:  configurado via DB_PATH (padrão ./backup.db) — ideal para uso doméstico/NAS.
@@ -9,7 +9,7 @@ PostgreSQL: configurado via DATABASE_URL (ex: postgresql://user:pass@host/db) �
 
 from sqlalchemy import (
     create_engine, Column, Integer, BigInteger, String, Float, Boolean,
-    DateTime, ForeignKey, UniqueConstraint, Index, event, text
+    DateTime, ForeignKey, UniqueConstraint, Index, event, text, Text
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
@@ -88,6 +88,9 @@ class BackupVersion(Base):
     finished_at    = Column(DateTime, nullable=True)
     status         = Column(String, default="running")
     absorbed_count = Column(Integer, nullable=False, default=0, server_default="0")
+    # Checkpoint de progresso para jobs rclone resumíveis: JSON com
+    # {"done_dirs": [...]} dos diretórios já totalmente processados.
+    progress_json  = Column(Text, nullable=True)
 
     backup = relationship("BackupID", back_populates="versions")
     files  = relationship("VersionFile", back_populates="version", lazy="dynamic",
@@ -181,7 +184,27 @@ def init_db():
 
     Base.metadata.create_all(bind=engine)
 
-    # Migrações manuais apenas para SQLite — no PostgreSQL o create_all já cria o schema completo
+    # Migração que precisa rodar em QUALQUER backend (create_all não adiciona
+    # colunas a tabelas já existentes). Em bancos Postgres pré-existentes a
+    # coluna progress_json não seria criada de outra forma.
+    with engine.connect() as conn:
+        try:
+            if engine.dialect.name == "sqlite":
+                conn.execute(text(
+                    "ALTER TABLE backup_versions ADD COLUMN progress_json TEXT"
+                ))
+            else:
+                conn.execute(text(
+                    "ALTER TABLE backup_versions ADD COLUMN IF NOT EXISTS progress_json TEXT"
+                ))
+            conn.commit()
+            _log_init.info("[db-migrate] Coluna backup_versions.progress_json garantida")
+        except Exception as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+
+    # Demais migrações manuais apenas para SQLite — no PostgreSQL o schema é
+    # criado via create_all (bancos novos) ou migração externa.
     if engine.dialect.name != "sqlite":
         _log_init.info(f"[db] Backend: {engine.dialect.name} — migrações SQLite ignoradas")
         return
@@ -210,6 +233,8 @@ def init_db():
         except Exception as e:
             if "duplicate column" not in str(e).lower():
                 raise
+
+        # (progress_json já é garantida acima para todos os backends)
 
         # Migração de índices: remove redundantes, cria composto otimizado
         _index_migrations = [

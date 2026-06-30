@@ -1,5 +1,5 @@
 """
-NestVault  v7.3.1
+NestVault  v7.6.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -7,6 +7,31 @@ Otimizacoes de performance:
 - Indices no banco + WAL mode
 - Cleanup de orfaos em uma unica query
 - Limpeza de arquivos ao deletar label/versao feita em background (nao bloqueia o cliente)
+
+v7.6.0:
+- Backup incremental e resumível para iCloud Photos: walk descendente dir a dir
+  com checkpoint em BackupVersion.progress_json — resume sem re-baixar o já processado
+- Dispatch por backend: service=photos usa walk, outros usam caminho rápido
+  (listagem recursiva única + download em lote) — sem regressão de performance
+- Fix: download via rclone copy --files-from — resolve "directory not found" para
+  nomes unicode/acentuados em todos os backends (iCloud, OneDrive, GDrive)
+- Fix: --drive-skip-dangling-shortcuts ignora shortcuts GDrive para arquivos deletados
+- Fix: startup e nightly-cleanup removem diretórios staging órfãos _rclone_stage_*
+- Fix: path traversal, Content-Disposition e deadlock no shutdown
+- Fix: coluna progress_json garantida no PostgreSQL (ADD COLUMN IF NOT EXISTS)
+
+v7.5.0:
+- STORAGE_FALLBACK_THRESHOLD_GB agora é respeitado como piso mínimo de espaço por disco
+- Quando todos os volumes estão abaixo do limiar, aciona cleanup automático de versões antigas antes de continuar
+- Apenas se cleanup não liberar espaço suficiente, usa o volume com mais espaço livre como último recurso (log CRITICAL)
+- Alerta via Telegram quando todos os volumes ultrapassam o limiar (se TELEGRAM_BOT_TOKEN/CHAT_ID configurados)
+
+v7.4.0:
+- Backup automático do banco de dados (PostgreSQL ou SQLite) para os volumes de storage
+- Exporta para _db_backups/ em cada volume saudável; rotação mantém últimos DB_BACKUP_RETENTION (padrão 7) backups
+- Agendado automaticamente às 01:00 via APScheduler; acionável manualmente via POST /maintenance/db-backup
+- Novo card "Backup do Banco de Dados" na tela de manutenção (baixo risco)
+- Variáveis: DB_BACKUP_ENABLED, DB_BACKUP_HOUR, DB_BACKUP_MINUTE, DB_BACKUP_RETENTION
 
 v7.3.1:
 - Corrige race condition TOCTOU no orphan cleanup (DELETE condicional por sha256 com NOT EXISTS)
@@ -34,9 +59,10 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
-import asyncio, os, tempfile, hashlib, secrets, base64, shutil, logging, time, threading, re
+import asyncio, os, tempfile, hashlib, base64, shutil, logging, time, threading, re
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+from urllib.parse import quote
 
 from sqlalchemy import func, select, insert, literal, case, delete, exists
 from sqlalchemy.orm import Session
@@ -84,6 +110,12 @@ _ssd_content_path        = storage.ssd_content_path
 
 
 _ssd_move_lock = threading.Lock()
+
+# Sinaliza o desligamento ao _activity_refresh_loop. Necessário porque o loop
+# espera em _activity_wake.wait() dentro de uma thread do executor: cancelar a
+# task asyncio não interrompe essa thread, então o fechamento do event loop
+# bloquearia no join do executor por até _HISTORICAL_FALLBACK_TTL.
+_activity_loop_stop = threading.Event()
 
 _reclaimable_cache: dict = {"value": 0, "ts": 0.0}
 _RECLAIMABLE_TTL = 60.0
@@ -183,6 +215,39 @@ def _cleanup_stale_running_states():
     finally:
         db.close()
 
+    import shutil as _shutil
+    from nightly_cleanup import _TMP_PREFIXES, _TMP_DIR_PREFIXES
+    for vol in storage.STORAGE_VOLUMES:
+        for prefix in _TMP_PREFIXES:
+            for f in vol.glob(f"{prefix}*"):
+                if f.is_file():
+                    try:
+                        f.unlink()
+                        log.info(f"[startup] arquivo temporário órfão removido: {f.name}")
+                    except OSError as e:
+                        log.warning(f"[startup] não foi possível remover {f}: {e}")
+        for prefix in _TMP_DIR_PREFIXES:
+            for d in vol.glob(f"{prefix}*"):
+                try:
+                    if d.is_dir():
+                        _shutil.rmtree(d, ignore_errors=True)
+                    else:
+                        d.unlink()
+                    log.info(f"[startup] staging temporário órfão removido: {d.name}")
+                except OSError as e:
+                    log.warning(f"[startup] não foi possível remover {d}: {e}")
+
+
+def _backup_labels_for_sha256s(db, sha256s: list[str]) -> list[str]:
+    if not sha256s:
+        return []
+    rows = (db.query(BackupVersion.backup_label)
+              .join(VersionFile, VersionFile.version_id == BackupVersion.id)
+              .filter(VersionFile.sha256.in_(sha256s))
+              .distinct()
+              .all())
+    return sorted(r[0] for r in rows)
+
 
 def _bg_process_ssd_pending_moves():
     if not _ssd_move_lock.acquire(blocking=False):
@@ -198,15 +263,17 @@ def _bg_process_ssd_pending_moves():
         from database import SsdCachePendingMove
         total_pending = db.query(SsdCachePendingMove).count()
         processed = 0
+        all_moved: list[str] = []
         if total_pending:
             job.summary = f"Movendo: 0 / {total_pending} arquivo(s) (0%)"
             db.commit()
             invalidate_activity()
         while True:
-            done = storage.process_ssd_pending_moves(db)
+            done, sha256s = storage.process_ssd_pending_moves(db)
             if done == 0:
                 break
             processed += done
+            all_moved.extend(sha256s)
             if total_pending:
                 pct = round(processed / total_pending * 100)
                 job = db.get(MaintenanceJob, job_id)
@@ -214,10 +281,12 @@ def _bg_process_ssd_pending_moves():
                 db.commit()
                 invalidate_activity()
         storage.reconcile_orphaned_ssd_copies(db)
+        labels = _backup_labels_for_sha256s(db, all_moved)
+        label_str = ", ".join(labels) if labels else "—"
         job = db.get(MaintenanceJob, job_id)
         job.status = "done"
         job.finished_at = datetime.now()
-        job.summary = f"{processed} arquivo(s) movidos SSD → HDD"
+        job.summary = f"{processed} arquivo(s) movidos SSD → HDD — backups: {label_str}"
     except Exception as e:
         log.error(f"[ssd-cache] Erro no worker de move: {e}")
         job = db.get(MaintenanceJob, job_id)
@@ -252,11 +321,13 @@ def _resume_ssd_pending_moves():
         db.refresh(job)
         job_id = job.id
         processed = 0
+        all_moved: list[str] = []
         while True:
-            done = storage.process_ssd_pending_moves(db)
+            done, sha256s = storage.process_ssd_pending_moves(db)
             if done == 0:
                 break
             processed += done
+            all_moved.extend(sha256s)
             pct = round(processed / total_pending * 100)
             job = db.get(MaintenanceJob, job_id)
             if job:
@@ -264,11 +335,13 @@ def _resume_ssd_pending_moves():
                 db.commit()
                 invalidate_activity()
         storage.reconcile_orphaned_ssd_copies(db)
+        labels = _backup_labels_for_sha256s(db, all_moved)
+        label_str = ", ".join(labels) if labels else "—"
         job = db.get(MaintenanceJob, job_id)
         if job:
             job.status = "done"
             job.finished_at = datetime.now()
-            job.summary = f"Recovery: {processed} arquivo(s) movidos SSD → HDD"
+            job.summary = f"Recovery: {processed} arquivo(s) movidos SSD → HDD — backups: {label_str}"
         log.info(f"[ssd-cache] recovery concluída — {processed} arquivo(s) movidos para HDD")
     except Exception as e:
         log.error(f"[ssd-cache] Erro na recovery de moves pendentes: {e}")
@@ -308,6 +381,8 @@ async def lifespan(_: FastAPI):
         log.info("Criptografia: desabilitada")
     asyncio.get_running_loop().run_in_executor(None, _backfill_content_copies)
     asyncio.get_running_loop().run_in_executor(None, _resume_ssd_pending_moves)
+    _activity_loop_stop.clear()
+    _activity_wake.clear()
     monitor         = asyncio.create_task(_volume_health_monitor())
     ssd_monitor     = asyncio.create_task(_ssd_space_monitor())
     activity_refresh = asyncio.create_task(_activity_refresh_loop())
@@ -315,18 +390,23 @@ async def lifespan(_: FastAPI):
     sched.reload_rclone_jobs_from_db()
     sched.schedule_daily_digest()
     sched.schedule_nightly_cleanup()
+    sched.schedule_db_backup()
     log.info(f"Servidor iniciado — {len(STORAGE_VOLUMES)} volume(s): {[str(v) for v in STORAGE_VOLUMES]}")
     if storage.SSD_CACHE_ENABLED and storage.SSD_CACHE_DIR:
         log.info(f"SSD cache: habilitado — {storage.SSD_CACHE_DIR} (max {storage.SSD_CACHE_MAX_GB} GB)")
     log.info(f"Auth: {'habilitada' if AUTH_ENABLED else 'desabilitada'}")
     yield
+    # Libera a thread do executor presa em _activity_wake.wait() antes de cancelar,
+    # senão o fechamento do event loop bloqueia no join do executor (até 5 min).
+    _activity_loop_stop.set()
+    _activity_wake.set()
     monitor.cancel()
     ssd_monitor.cancel()
     activity_refresh.cancel()
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="7.3.1", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="7.5.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
@@ -621,6 +701,12 @@ class BackupActivityEntry(BaseModel):
     last_done_at: Optional[str]
     done_count: int
 
+class ReclaimableLabelEntry(BaseModel):
+    label: str
+    client_name: Optional[str]
+    old_version_count: int
+    old_versions_size_bytes: int
+
 class StatsResponse(BaseModel):
     total_backups: int
     total_versions_done: int
@@ -648,6 +734,7 @@ class StatsResponse(BaseModel):
     versions_cleaned_total: int
     bytes_freed_by_cleanup: int
     backups_activity: list[BackupActivityEntry]
+    reclaimable_by_label: list[ReclaimableLabelEntry]
     server_time: str
 
 
@@ -1597,6 +1684,64 @@ def _build_stats_data(db: Session) -> StatsResponse:
         for r in _activity_sorted
     ]
 
+    # --- Q11: espaço liberável por label (versões done não-mais-recentes) ---
+    # Exclui sha256s presentes em qualquer versão keeper e usa DISTINCT para não
+    # inflar pelo mesmo arquivo aparecendo em múltiplas versões antigas.
+    reclaimable_by_label: list[ReclaimableLabelEntry] = []
+    if latest_ids:
+        keeper_sq = (
+            db.query(VersionFile.sha256.label("sha256"))
+            .filter(VersionFile.version_id.in_(latest_ids))
+            .distinct()
+            .subquery()
+        )
+        old_exclusive_sq = (
+            db.query(
+                BackupVersion.backup_label.label("label"),
+                VersionFile.sha256.label("sha256"),
+            )
+            .join(VersionFile, VersionFile.version_id == BackupVersion.id)
+            .outerjoin(keeper_sq, VersionFile.sha256 == keeper_sq.c.sha256)
+            .filter(
+                BackupVersion.status == "done",
+                BackupVersion.id.notin_(latest_ids),
+                keeper_sq.c.sha256.is_(None),
+            )
+            .distinct()
+            .subquery()
+        )
+        old_size_rows = (
+            db.query(
+                old_exclusive_sq.c.label.label("label"),
+                func.coalesce(func.sum(FileContent.size), 0).label("old_versions_size_bytes"),
+            )
+            .join(FileContent, FileContent.sha256 == old_exclusive_sq.c.sha256)
+            .group_by(old_exclusive_sq.c.label)
+            .order_by(func.coalesce(func.sum(FileContent.size), 0).desc())
+            .all()
+        )
+        old_cnt_rows = (
+            db.query(
+                BackupVersion.backup_label.label("label"),
+                func.count(BackupVersion.id.distinct()).label("cnt"),
+            )
+            .filter(BackupVersion.status == "done", BackupVersion.id.notin_(latest_ids))
+            .group_by(BackupVersion.backup_label)
+            .all()
+        )
+        old_cnt_map = {r.label: int(r.cnt) for r in old_cnt_rows}
+
+        reclaimable_by_label = [
+            ReclaimableLabelEntry(
+                label=row.label,
+                client_name=names_map.get(row.label),
+                old_version_count=old_cnt_map.get(row.label, 0),
+                old_versions_size_bytes=int(row.old_versions_size_bytes),
+            )
+            for row in old_size_rows
+            if row.old_versions_size_bytes > 0
+        ]
+
     return StatsResponse(
         total_backups=total_backups,
         total_versions_done=total_done,
@@ -1624,6 +1769,7 @@ def _build_stats_data(db: Session) -> StatsResponse:
         versions_cleaned_total=versions_cleaned_total,
         bytes_freed_by_cleanup=bytes_freed_by_cleanup,
         backups_activity=backups_activity,
+        reclaimable_by_label=reclaimable_by_label,
         server_time=datetime.now().isoformat(),
     )
 
@@ -1638,8 +1784,8 @@ def get_stats(db: Session = Depends(get_db)):
 
 
 def _build_fast_data(db: Session) -> tuple:
-    """Queries leves para dados em tempo real: versões/jobs em execução, storage e discos.
-    Chamado inline a cada request — retorna (running_version_infos, running_job_infos, storage_obj, disks_list)."""
+    """Queries leves para dados em tempo real: versões em execução, storage e discos.
+    Chamado inline a cada request — retorna (running_version_infos, storage_obj, disks_list)."""
 
     # 1. Versões de backup em execução
     running_vs = (
@@ -1664,26 +1810,43 @@ def _build_fast_data(db: Session) -> tuple:
         ):
             stats_map[row.version_id] = (row.fc, int(row.sz))
 
+    # prev_stats: stats da última versão "done" de cada label em execução.
+    # Resolvido em queries agregadas (sem N+1 por label).
     prev_stats: dict[str, tuple[int, int]] = {}
-    for label in {v.backup_label for v in running_vs}:
-        last_done = (
-            db.query(BackupVersion)
-            .filter(BackupVersion.backup_label == label, BackupVersion.status == "done")
-            .order_by(BackupVersion.created_at.desc())
-            .first()
+    labels = {v.backup_label for v in running_vs}
+    if labels:
+        latest_done_sq = (
+            db.query(
+                BackupVersion.backup_label.label("label"),
+                func.max(BackupVersion.created_at).label("ts"),
+            )
+            .filter(BackupVersion.status == "done", BackupVersion.backup_label.in_(labels))
+            .group_by(BackupVersion.backup_label)
+            .subquery()
         )
-        if last_done:
-            row = (
+        id_to_label = {
+            vid: lbl
+            for vid, lbl in (
+                db.query(BackupVersion.id, BackupVersion.backup_label)
+                .join(latest_done_sq,
+                      (BackupVersion.backup_label == latest_done_sq.c.label) &
+                      (BackupVersion.created_at == latest_done_sq.c.ts))
+                .all()
+            )
+        }
+        if id_to_label:
+            for row in (
                 db.query(
+                    VersionFile.version_id,
                     func.count(VersionFile.id).label("fc"),
                     func.coalesce(func.sum(FileContent.size), 0).label("sz"),
                 )
                 .outerjoin(FileContent, FileContent.sha256 == VersionFile.sha256)
-                .filter(VersionFile.version_id == last_done.id)
-                .first()
-            )
-            if row:
-                prev_stats[label] = (row.fc, int(row.sz))
+                .filter(VersionFile.version_id.in_(list(id_to_label.keys())))
+                .group_by(VersionFile.version_id)
+                .all()
+            ):
+                prev_stats[id_to_label[row.version_id]] = (row.fc, int(row.sz))
 
     running_version_infos = [
         RunningVersionInfo(
@@ -1866,9 +2029,11 @@ async def _activity_refresh_loop() -> None:
     apenas quando invalidate_activity() acorda o loop — normalmente ao fim de um backup/job.
     Fallback de 5 min para não ficar preso caso alguma invalidação seja perdida."""
     loop = asyncio.get_running_loop()
-    while True:
+    while not _activity_loop_stop.is_set():
         await loop.run_in_executor(None, lambda: _activity_wake.wait(timeout=_HISTORICAL_FALLBACK_TTL))
         _activity_wake.clear()
+        if _activity_loop_stop.is_set():
+            break
 
         try:
             def _do_hist():
@@ -2516,8 +2681,23 @@ async def upload_file(
             await asyncio.to_thread(_ensure_replicas, sha256, Path(first_copy.stored_at), db)
         log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — registrada sha256={sha256[:8]}…")
     else:
-        # Escolhe volume HDD de destino final; decide se usa SSD como staging
-        volume    = _pick_volume()
+        # Escolhe volume HDD de destino final; decide se usa SSD como staging.
+        # Se todos os volumes estiverem abaixo do limiar, aciona cleanup antes de desistir.
+        try:
+            volume = _pick_volume()
+        except storage.StorageThresholdExceeded as _exc:
+            log.warning("[upload] Todos os volumes abaixo do limiar — acionando limpeza automática antes de continuar...")
+            from daily_digest import _send_telegram
+            await _send_telegram(
+                f"⚠️ *NestVault — Alerta de Armazenamento*\n\n"
+                f"{_exc}\n\n"
+                f"Iniciando limpeza automática de versões antigas..."
+            )
+            await asyncio.to_thread(_auto_cleanup_if_needed, db)
+            try:
+                volume = _pick_volume()
+            except storage.StorageThresholdExceeded:
+                volume = storage.pick_volume_last_resort()
         ssd_dir   = _ssd_cache_write_dir(db)
         write_dir = ssd_dir if ssd_dir else volume
         sha256, size, tmp_path = await _stream_request_to_disk(request, write_dir)
@@ -2666,10 +2846,13 @@ def download_file(file_id: int, db: Session = Depends(get_db)):
             continue
         log.info(f"[download] {row.sha256[:8]}… encontrado no disco em {p}")
         if is_encrypted:
+            # filename* (RFC 5987) evita quebra de header / injecao via aspas ou
+            # caracteres nao-ASCII no nome do arquivo.
+            disposition = f"attachment; filename*=UTF-8''{quote(filename)}"
             return StreamingResponse(
                 crypto.decrypt_chunks(p, storage.encryption_key),
                 media_type="application/octet-stream",
-                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+                headers={"Content-Disposition": disposition},
             )
         return FileResponse(p, filename=filename)
 
@@ -2858,6 +3041,18 @@ def validate_integrity(background_tasks: BackgroundTasks, db: Session = Depends(
     db.refresh(mj)
     background_tasks.add_task(_bg_validate_integrity, mj.id)
     return {"scheduled": True, "job_id": mj.id}
+
+
+def _bg_run_db_backup() -> None:
+    from db_backup import run_db_backup
+    run_db_backup()
+
+
+@app.post("/maintenance/db-backup", dependencies=[Depends(require_api_key)])
+def force_db_backup(background_tasks: BackgroundTasks):
+    """Exporta o banco de dados para os volumes de storage e aplica rotação de backups."""
+    background_tasks.add_task(_bg_run_db_backup)
+    return {"status": "started"}
 
 
 def _bg_encrypt_existing(job_id: int) -> None:

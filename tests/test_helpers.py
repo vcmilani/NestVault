@@ -11,11 +11,14 @@ import storage
 DiskUsage = namedtuple("DiskUsage", ["total", "used", "free"])
 
 
+GB = 1024 ** 3
+
+
 def test_pick_volume_single(tmp_path):
     vol = tmp_path / "vol"
     vol.mkdir()
     with patch.object(storage, "STORAGE_VOLUMES", [vol]):
-        with patch("storage.shutil.disk_usage", return_value=DiskUsage(total=1000, used=500, free=500)):
+        with patch("storage.shutil.disk_usage", return_value=DiskUsage(total=100*GB, used=50*GB, free=50*GB)):
             assert m._pick_volume() == vol
 
 
@@ -74,12 +77,12 @@ def test_pick_volume_fallback_disk_skipped_when_primary_available(tmp_path):
 
 
 def test_pick_volume_all_exhausted_fallback_to_most_free(tmp_path):
-    """Quando todos estão esgotados, usa o com mais espaço livre (último recurso)."""
+    """Com todos abaixo do limiar (v7.5.0), pick_volume sinaliza StorageThresholdExceeded;
+    o fallback 'mais espaço livre' passou a ser pick_volume_last_resort."""
     v1 = tmp_path / "v1"
     v2 = tmp_path / "v2"
     v1.mkdir(); v2.mkdir()
 
-    GB = 1024 ** 3
     def fake_usage(path):
         # Ambos abaixo do threshold de 10 GB (3 GB e 5 GB)
         if path == v1:
@@ -88,8 +91,10 @@ def test_pick_volume_all_exhausted_fallback_to_most_free(tmp_path):
 
     with patch.object(storage, "STORAGE_VOLUMES", [v1, v2]):
         with patch("storage.shutil.disk_usage", side_effect=fake_usage):
-            # v2 tem mais espaço → deve ser escolhido como último recurso
-            assert m._pick_volume() == v2
+            with pytest.raises(storage.StorageThresholdExceeded):
+                storage.pick_volume()
+            # v2 tem mais espaço livre → escolhido como último recurso
+            assert storage.pick_volume_last_resort() == v2
 
 
 def test_content_path_structure(tmp_path):
@@ -134,7 +139,7 @@ def test_pick_volume_skips_degraded(tmp_path):
     m._degraded_volumes.add(v1)
 
     def fake_usage(_):
-        return DiskUsage(total=1000, used=200, free=800)
+        return DiskUsage(total=100*GB, used=20*GB, free=80*GB)
 
     with patch.object(storage, "STORAGE_VOLUMES", [v1, v2]):
         with patch("storage.shutil.disk_usage", side_effect=fake_usage):

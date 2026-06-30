@@ -35,6 +35,11 @@ SSD_CACHE_DIR: Path | None = Path(_ssd_cache_raw) if _ssd_cache_raw else None
 if SSD_CACHE_DIR:
     (SSD_CACHE_DIR / "_content").mkdir(parents=True, exist_ok=True)
 
+# -- Exceptions ---------------------------------------------------------------
+
+class StorageThresholdExceeded(Exception):
+    """Todos os volumes estão abaixo de STORAGE_FALLBACK_THRESHOLD_GB."""
+
 # -- Volume health ------------------------------------------------------------
 _degraded_volumes: set[Path] = set()
 _deg_lock = threading.Lock()
@@ -80,8 +85,31 @@ def pick_volume() -> Path:
         if usage and usage.free > STORAGE_FALLBACK_THRESHOLD_GB * 1024 ** 3:
             return vol
 
-    # Todos os volumes estão esgotados — último recurso: o com mais espaço livre.
-    return max(hvols_set, key=lambda v: (safe_disk_usage(v) or type("_", (), {"free": 0})()).free)
+    # Todos os volumes abaixo do limiar — sinaliza para o call site tentar cleanup primeiro.
+    free_info = ", ".join(
+        f"{v.name}: {safe_disk_usage(v).free / 1024**3:.1f} GB"
+        for v in sorted(hvols_set)
+        if safe_disk_usage(v)
+    )
+    raise StorageThresholdExceeded(
+        f"Todos os volumes abaixo de {STORAGE_FALLBACK_THRESHOLD_GB:.0f} GB ({free_info})"
+    )
+
+
+def pick_volume_last_resort() -> Path:
+    """Usado apenas quando cleanup não liberou espaço suficiente. Loga CRITICAL."""
+    hvols_set = set(healthy_volumes())
+    if not hvols_set:
+        raise RuntimeError("Nenhum volume de storage disponível")
+    vol = max(hvols_set, key=lambda v: (safe_disk_usage(v) or type("_", (), {"free": 0})()).free)
+    usage = safe_disk_usage(vol)
+    free_gb = usage.free / 1024**3 if usage else 0
+    log.critical(
+        f"[storage] ÚLTIMO RECURSO: escrevendo em {vol.name} ({free_gb:.2f} GB livres) "
+        f"abaixo do limiar de {STORAGE_FALLBACK_THRESHOLD_GB:.0f} GB — "
+        f"considere aumentar o storage ou reduzir STORAGE_FALLBACK_THRESHOLD_GB"
+    )
+    return vol
 
 
 def content_path(sha256: str, volume: Path) -> Path:
@@ -478,14 +506,15 @@ def reconcile_orphaned_ssd_copies(db) -> int:
     return fixed
 
 
-def process_ssd_pending_moves(db) -> int:
-    """Move up to 10 pending SSD-cached files to their HDD destination. Returns count moved."""
+def process_ssd_pending_moves(db) -> tuple[int, list[str]]:
+    """Move up to 10 pending SSD-cached files to their HDD destination. Returns (count, sha256s) moved."""
     from database import SsdCachePendingMove, FileContent, FileContentCopy
     from sqlalchemy.exc import IntegrityError
     # Collect only sha256 keys upfront; commits inside the loop expire session objects,
     # so we re-query each row fresh to avoid "Instance has been deleted" errors.
     pending_sha256s = [m.sha256 for m in db.query(SsdCachePendingMove).limit(10).all()]
     completed = 0
+    moved_sha256s: list[str] = []
     for sha256 in pending_sha256s:
         move = db.query(SsdCachePendingMove).filter(SsdCachePendingMove.sha256 == sha256).first()
         if move is None:
@@ -533,6 +562,7 @@ def process_ssd_pending_moves(db) -> int:
                 db.commit()
                 ssd_path.unlink(missing_ok=True)
                 completed += 1
+                moved_sha256s.append(sha256)
                 log.info(f"[ssd-cache] {move.sha256[:8]}… movido SSD → {dest_path}")
                 break
             except IntegrityError:
@@ -583,4 +613,4 @@ def process_ssd_pending_moves(db) -> int:
                     db.delete(move)
                 db.commit()
                 break
-    return completed
+    return completed, moved_sha256s
