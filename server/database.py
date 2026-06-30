@@ -9,7 +9,7 @@ PostgreSQL: configurado via DATABASE_URL (ex: postgresql://user:pass@host/db) �
 
 from sqlalchemy import (
     create_engine, Column, Integer, BigInteger, String, Float, Boolean,
-    DateTime, ForeignKey, UniqueConstraint, Index, event, text
+    DateTime, ForeignKey, UniqueConstraint, Index, event, text, Text
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
@@ -88,6 +88,9 @@ class BackupVersion(Base):
     finished_at    = Column(DateTime, nullable=True)
     status         = Column(String, default="running")
     absorbed_count = Column(Integer, nullable=False, default=0, server_default="0")
+    # Checkpoint de progresso para jobs rclone resumíveis: JSON com
+    # {"done_dirs": [...]} dos diretórios já totalmente processados.
+    progress_json  = Column(Text, nullable=True)
 
     backup = relationship("BackupID", back_populates="versions")
     files  = relationship("VersionFile", back_populates="version", lazy="dynamic",
@@ -207,6 +210,17 @@ def init_db():
             ))
             conn.commit()
             _log_init.info("[db-migrate] Coluna backup_versions.absorbed_count adicionada")
+        except Exception as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+
+        # Migração: adiciona progress_json (checkpoint de jobs rclone resumíveis)
+        try:
+            conn.execute(text(
+                "ALTER TABLE backup_versions ADD COLUMN progress_json TEXT"
+            ))
+            conn.commit()
+            _log_init.info("[db-migrate] Coluna backup_versions.progress_json adicionada")
         except Exception as e:
             if "duplicate column" not in str(e).lower():
                 raise
