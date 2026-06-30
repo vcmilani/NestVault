@@ -1,5 +1,5 @@
 """
-NestVault  v7.5.0
+NestVault  v7.6.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -7,6 +7,18 @@ Otimizacoes de performance:
 - Indices no banco + WAL mode
 - Cleanup de orfaos em uma unica query
 - Limpeza de arquivos ao deletar label/versao feita em background (nao bloqueia o cliente)
+
+v7.6.0:
+- Backup incremental e resumível para iCloud Photos: walk descendente dir a dir
+  com checkpoint em BackupVersion.progress_json — resume sem re-baixar o já processado
+- Dispatch por backend: service=photos usa walk, outros usam caminho rápido
+  (listagem recursiva única + download em lote) — sem regressão de performance
+- Fix: download via rclone copy --files-from — resolve "directory not found" para
+  nomes unicode/acentuados em todos os backends (iCloud, OneDrive, GDrive)
+- Fix: --drive-skip-dangling-shortcuts ignora shortcuts GDrive para arquivos deletados
+- Fix: startup e nightly-cleanup removem diretórios staging órfãos _rclone_stage_*
+- Fix: path traversal, Content-Disposition e deadlock no shutdown
+- Fix: coluna progress_json garantida no PostgreSQL (ADD COLUMN IF NOT EXISTS)
 
 v7.5.0:
 - STORAGE_FALLBACK_THRESHOLD_GB agora é respeitado como piso mínimo de espaço por disco
