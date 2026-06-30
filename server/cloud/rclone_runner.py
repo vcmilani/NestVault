@@ -158,44 +158,65 @@ async def list_files_recursive(
 
 
 async def _download_to(
-    remote_name: str, remote_path: str, file_path: str, dest: Path
+    remote_name: str, remote_path: str, file_path: str, dest: Path,
+    *, retries: int = 3,
 ) -> tuple[str, int]:
     """Baixa arquivo via `rclone cat` e calcula SHA-256 em single pass."""
     full_remote_path = f"{remote_path}/{file_path}" if remote_path else file_path
     src = f"{remote_name}:{full_remote_path}"
-    proc = await asyncio.create_subprocess_exec(
-        "rclone", "cat", src,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
 
-    h = hashlib.sha256()
-    total = 0
-    try:
-        with open(dest, "wb") as f:
-            while True:
-                chunk = await asyncio.wait_for(
-                    proc.stdout.read(storage.CHUNK_SIZE), timeout=300
-                )
-                if not chunk:
-                    break
-                f.write(chunk)
-                h.update(chunk)
-                total += len(chunk)
-    except Exception:
-        proc.kill()
-        await proc.wait()
+    last_err: Exception | None = None
+    for attempt in range(1, retries + 1):
         dest.unlink(missing_ok=True)
-        raise
-
-    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-    if proc.returncode != 0:
-        dest.unlink(missing_ok=True)
-        raise RuntimeError(
-            f"rclone cat falhou ({proc.returncode}): {stderr.decode().strip()}"
+        proc = await asyncio.create_subprocess_exec(
+            "rclone", "cat", src,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
 
-    return h.hexdigest(), total
+        h = hashlib.sha256()
+        total = 0
+        try:
+            with open(dest, "wb") as f:
+                while True:
+                    chunk = await asyncio.wait_for(
+                        proc.stdout.read(storage.CHUNK_SIZE), timeout=300
+                    )
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    h.update(chunk)
+                    total += len(chunk)
+        except Exception as e:
+            proc.kill()
+            await proc.wait()
+            dest.unlink(missing_ok=True)
+            last_err = e
+            if attempt < retries:
+                log.warning(
+                    f"[rclone-runner] cat tentativa {attempt}/{retries} falhou "
+                    f"({file_path}): {e} — retentando em 5s"
+                )
+                await asyncio.sleep(5)
+            continue
+
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        if proc.returncode != 0:
+            dest.unlink(missing_ok=True)
+            last_err = RuntimeError(
+                f"rclone cat falhou ({proc.returncode}): {stderr.decode().strip()}"
+            )
+            if attempt < retries:
+                log.warning(
+                    f"[rclone-runner] cat tentativa {attempt}/{retries} falhou "
+                    f"({file_path}): {last_err} — retentando em 5s"
+                )
+                await asyncio.sleep(5)
+            continue
+
+        return h.hexdigest(), total
+
+    raise last_err  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
