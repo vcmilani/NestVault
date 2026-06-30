@@ -3,24 +3,30 @@
 Diferença em relação ao runner.py padrão: não há tokens OAuth — o rclone
 gerencia autenticação internamente via ~/.config/rclone/rclone.conf.
 
-Fluxo por job (walk incremental e resumível):
-  1. Walk descendente: lista UM diretório por vez (`rclone lsjson` não recursivo),
-     enfileirando subdiretórios. Nunca faz uma listagem monolítica do remote
-     inteiro — essencial para backends lentos/rate-limited como iCloud Photos.
-  2. Por diretório: skip de arquivos com mtime inalterado vs. última versão done,
-     ou já registrados nesta versão (resume).
-  3. Download por diretório: um único `rclone copy --max-depth 1 --files-from`
-     (lista o diretório só uma vez) com ingester concorrente que processa cada
-     arquivo concluído (SHA-256 → dedup → store → encrypt → replicate → VersionFile)
-     e o remove do staging — disco limitado mesmo em diretórios flat enormes.
-  4. Checkpoint: cada diretório concluído é gravado em BackupVersion.progress_json;
-     o resume continua na MESMA versão, pulando diretórios já concluídos sem
-     re-listar. A versão só vira `done` quando o walk termina.
+A estratégia é escolhida por backend (`run_rclone_backup_job` → `_uses_walk`):
 
-Nota: o download usa `rclone copy` escopado ao diretório (`--max-depth 1`) em vez
-de `cat`/`copyto` por arquivo, porque a resolução de paths explícitos com nomes
+CAMINHO RÁPIDO (`_run_fast_strategy`) — OneDrive, Google Drive, iCloud Drive e
+qualquer backend com listagem recursiva eficiente:
+  1. Uma única `rclone lsjson --recursive --fast-list` (varre tudo num só
+     processo, com concorrência interna e reuso de conexão).
+  2. Skip por mtime vs. última versão done (+ resume de versão incompleta).
+  3. Download em lotes via `rclone copy --files-from` escopado à raiz.
+
+WALK INCREMENTAL (`_run_walk_strategy`) — só para iCloud Photos
+(iclouddrive/photos), que é lento/rate-limited e não completa listagem recursiva:
+  1. Lista UM diretório por vez (`rclone lsjson` não recursivo), enfileirando
+     subdiretórios — nunca uma listagem monolítica.
+  2. Skip por mtime, ou por já estar registrado nesta versão (resume).
+  3. Download por diretório: um único `rclone copy --max-depth 1 --files-from`
+     com ingester concorrente (SHA-256 → dedup → store → encrypt → replicate →
+     VersionFile), removendo cada arquivo do staging (disco limitado).
+  4. Checkpoint em BackupVersion.progress_json: o resume continua na MESMA versão,
+     pulando diretórios já concluídos sem re-listar.
+
+Nota: o download usa `rclone copy` (escopado à raiz ou ao diretório) em vez de
+`cat`/`copyto` por arquivo, porque a resolução de paths explícitos com nomes
 unicode/acentuados falha em vários backends ('directory not found'); a listagem
-do diretório usa as entradas reais devolvidas pelo servidor.
+usa as entradas reais devolvidas pelo servidor.
 """
 import asyncio
 import hashlib
@@ -45,15 +51,25 @@ from database import (
 
 log = logging.getLogger("backup-server")
 
-_PARALLEL_DOWNLOADS = 4   # --transfers do rclone por diretório
+_PARALLEL_DOWNLOADS = 4   # --transfers do rclone
 
-# Walk incremental: o backend de fotos do iCloud é lento e com rate-limit, então
+# Caminho rápido (OneDrive/GDrive/iCloud Drive): uma listagem recursiva única e
+# download em lotes escopados à raiz.
+_QUEUE_SIZE      = 6
+_BATCH_MAX_FILES = 250
+_BATCH_MAX_BYTES = 3 * 1024 ** 3   # 3 GB
+
+# Walk incremental (iCloud Photos): o backend é lento e com rate-limit, então
 # listamos e baixamos um diretório por vez, com checkpoint resumível. O download
 # de cada diretório é um único `rclone copy` (lista o diretório só uma vez), com
 # ingester concorrente que processa e remove cada arquivo concluído — mantendo o
 # uso de disco do staging limitado mesmo em diretórios flat enormes.
 _PARTIAL_SUFFIX = ".nvpart"   # sufixo de arquivo incompleto do rclone no staging
 _INGEST_POLL    = 2.0         # segundos entre varreduras do ingester
+
+# Backends que exigem o walk incremental (não conseguem listagem recursiva
+# eficiente). Critério atual: serviço de fotos do iCloud (iclouddrive/photos).
+_WALK_SERVICES = {"photos"}
 
 
 def _fmt_size(n: int) -> str:
@@ -131,6 +147,26 @@ async def list_remotes() -> list[str]:
     return [r.rstrip(":") for r in stdout.decode().splitlines() if r.strip()]
 
 
+async def _remote_config(remote_name: str) -> dict:
+    """Retorna a config do remote (type, service, ...) via `rclone config dump`.
+
+    Em falha de detecção retorna {} — o chamador trata como caminho rápido.
+    """
+    stdout, _, rc = await _rclone_run("config", "dump", timeout=30)
+    if rc != 0:
+        return {}
+    try:
+        return json.loads(stdout or b"{}").get(remote_name, {}) or {}
+    except Exception:
+        return {}
+
+
+def _uses_walk(cfg: dict) -> bool:
+    """Decide a estratégia: walk incremental só para backends lentos (fotos do
+    iCloud). Qualquer outro backend usa o caminho rápido (listagem recursiva)."""
+    return cfg.get("service") in _WALK_SERVICES
+
+
 async def browse_remote(remote_name: str, remote_path: str = "") -> list[dict]:
     """Lista subpastas (não recursivo) em remote_name:remote_path."""
     src = f"{remote_name}:{remote_path}" if remote_path else f"{remote_name}:"
@@ -202,6 +238,70 @@ async def list_dir_one_level(
             mtime = 0.0
         files.append(RcloneFileEntry(path=rel, size=item.get("Size", 0), mtime=mtime))
     return files, subdirs
+
+
+async def list_files_recursive(
+    remote_name: str, remote_path: str, *, retries: int = 3
+) -> list[RcloneFileEntry]:
+    """Lista todos os arquivos recursivamente (caminho rápido — uma chamada).
+
+    Eficiente em backends que suportam listagem recursiva (OneDrive, GDrive,
+    iCloud Drive): o rclone varre tudo num só processo, com concorrência interna
+    e reuso de conexão. NÃO usar para iCloud Photos (usa o walk incremental).
+    """
+    src = f"{remote_name}:{remote_path}" if remote_path else f"{remote_name}:"
+    for attempt in range(1, retries + 1):
+        exclude_flags: list[str] = []
+        for folder in _ONEDRIVE_PROTECTED_FOLDERS:
+            exclude_flags += ["--exclude", f"{folder}/**"]
+        stdout, stderr, rc = await _run_lsjson(
+            "--recursive", "--fast-list",
+            "--drive-skip-dangling-shortcuts",
+            "--timeout", "300s",
+            "--contimeout", "60s",
+            *exclude_flags,
+            "--exclude", ".DS_Store",
+            "--exclude", "Thumbs.db",
+            "--exclude", "desktop.ini",
+            src,
+        )
+        if rc == 0:
+            break
+        err_msg = stderr.decode().strip()
+        if attempt < retries:
+            log.warning(
+                f"[rclone] lsjson falhou (tentativa {attempt}/{retries}): {err_msg} "
+                f"— retentando em 10s"
+            )
+            await asyncio.sleep(10)
+        else:
+            raise RuntimeError(f"rclone lsjson falhou ({rc}): {err_msg}")
+
+    result = []
+    filtered_protected: set[str] = set()
+    for item in json.loads(stdout or b"[]"):
+        if item.get("IsDir"):
+            continue
+        if Path(item["Path"]).name in _IGNORED_SYSTEM_FILES:
+            continue
+        top_folder = item["Path"].split("/")[0]
+        if top_folder in _ONEDRIVE_PROTECTED_FOLDERS:
+            filtered_protected.add(top_folder)
+            continue
+        try:
+            mtime = datetime.fromisoformat(
+                item["ModTime"].replace("Z", "+00:00")
+            ).timestamp()
+        except Exception:
+            mtime = 0.0
+        result.append(RcloneFileEntry(
+            path=item["Path"],
+            size=item.get("Size", 0),
+            mtime=mtime,
+        ))
+    for name in filtered_protected:
+        log.info(f"[rclone] pasta protegida ignorada: {name!r}")
+    return result
 
 
 def _hash_file(path: Path) -> tuple[str, int]:
@@ -419,14 +519,213 @@ def _save_checkpoint_sync(version, done_dirs: set[str], pending_dirs: list[str],
 
 
 # ---------------------------------------------------------------------------
+# Caminho rápido: download em lote escopado à raiz (producer/consumer)
+# ---------------------------------------------------------------------------
+
+async def _bulk_copy(
+    remote_name: str, remote_path: str, files_from: Path, staging: Path,
+) -> tuple[int, str]:
+    """Baixa em lote via `rclone copy --files-from` a partir da raiz do job.
+
+    Por que a raiz do job e não o diretório pai de cada arquivo: o rclone
+    resolve um path explícito (ex: remote:Love/Maitê) caminhando e comparando
+    nomes componente a componente, o que falha em nomes unicode/acentuados
+    ('directory not found'). A listagem recursiva a partir da raiz configurada
+    do job usa as entradas devolvidas pelo servidor — o mesmo mecanismo de
+    list_files_recursive que funciona — então os caminhos relativos do
+    --files-from casam corretamente.
+    """
+    src = f"{remote_name}:{remote_path}" if remote_path else f"{remote_name}:"
+    proc = await asyncio.create_subprocess_exec(
+        "rclone", "copy", src, str(staging),
+        "--files-from", str(files_from),
+        "--fast-list",
+        "--drive-skip-dangling-shortcuts",
+        "--transfers", str(_PARALLEL_DOWNLOADS),
+        "--checkers", "8",
+        "--retries", "3",
+        "--timeout", "300s",
+        "--contimeout", "60s",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stderr_bytes = await proc.stderr.read()
+    await proc.wait()
+    return proc.returncode, stderr_bytes.decode(errors="replace").strip()
+
+
+async def _download_batch(
+    queue: asyncio.Queue,
+    batch: list[RcloneFileEntry],
+    remote_name: str,
+    remote_path: str,
+    errors: list,
+    done_before: int,
+    total_dl: int,
+) -> None:
+    """Baixa um lote em staging, calcula hash, e enfileira cada arquivo."""
+    volume = storage.pick_volume()
+    staging = Path(tempfile.mkdtemp(dir=volume, prefix="_rclone_stage_"))
+    ff_path = Path(f"{staging}.files")
+    batch_bytes = sum(e.size for e in batch)
+    log.info(
+        f"[rclone-runner] baixando lote de {len(batch)} arquivo(s) "
+        f"({_fmt_size(batch_bytes)}) "
+        f"[{done_before + 1}-{done_before + len(batch)}/{total_dl}]"
+    )
+    try:
+        ff_path.write_text(
+            "".join(e.path + "\n" for e in batch), encoding="utf-8"
+        )
+        rc, err = await _bulk_copy(remote_name, remote_path, ff_path, staging)
+        if rc != 0:
+            # Falha parcial é possível: o rclone pode ter copiado alguns
+            # arquivos antes do erro. Seguimos e tratamos os ausentes abaixo.
+            log.warning(f"[rclone-runner] rclone copy do lote retornou {rc}: {err}")
+
+        for entry in batch:
+            staged = staging / entry.path
+            if not staged.is_file():
+                msg = f"{entry.path}: não baixado pelo rclone (verifique permissão/atalho)"
+                errors.append(msg)
+                log.error(f"[rclone-runner] {msg}")
+                continue
+            # Move para arquivo plano no volume (rename barato, mesmo FS) e
+            # libera o staging logo em seguida.
+            _fd, _tmp = tempfile.mkstemp(dir=volume, prefix="_rclone_tmp_")
+            os.close(_fd)
+            tmp_path = Path(_tmp)
+            shutil.move(str(staged), str(tmp_path))
+            try:
+                sha256, size = await asyncio.to_thread(_hash_file, tmp_path)
+            except Exception as e:
+                tmp_path.unlink(missing_ok=True)
+                errors.append(f"{entry.path}: {e}")
+                log.error(f"[rclone-runner] Erro ao ler {entry.path}: {e}")
+                continue
+            await queue.put(("file", entry, tmp_path, sha256, size, volume))
+    finally:
+        ff_path.unlink(missing_ok=True)
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+async def _producer(
+    queue: asyncio.Queue,
+    all_files: list[RcloneFileEntry],
+    prev_files: dict,
+    remote_name: str,
+    remote_path: str,
+    errors: list,
+    abort: asyncio.Event,
+) -> None:
+    total = len(all_files)
+
+    # Particiona em "sem alteração" (skip por mtime) e "a baixar".
+    to_download: list[RcloneFileEntry] = []
+    for i, entry in enumerate(all_files, 1):
+        prev = prev_files.get(entry.path)
+        if prev and prev[0] == entry.mtime:
+            if total >= 10 and (i == 1 or i % max(1, total // 4) == 0 or i == total):
+                log.info(f"[rclone-runner] [{i}/{total}] sem alteração — {entry.path}")
+            await queue.put(("skip", entry, prev[1]))
+        else:
+            to_download.append(entry)
+
+    total_dl = len(to_download)
+    log.info(
+        f"[rclone-runner] {total - total_dl} sem alteração, "
+        f"{total_dl} a baixar em lotes"
+    )
+
+    try:
+        done = 0
+        batch: list[RcloneFileEntry] = []
+        batch_bytes = 0
+        for entry in to_download:
+            if abort.is_set():
+                break
+            batch.append(entry)
+            batch_bytes += entry.size
+            if len(batch) >= _BATCH_MAX_FILES or batch_bytes >= _BATCH_MAX_BYTES:
+                await _download_batch(
+                    queue, batch, remote_name, remote_path, errors, done, total_dl
+                )
+                done += len(batch)
+                batch = []
+                batch_bytes = 0
+        if batch and not abort.is_set():
+            await _download_batch(
+                queue, batch, remote_name, remote_path, errors, done, total_dl
+            )
+    finally:
+        await queue.put(None)
+
+
+async def _consumer(
+    queue: asyncio.Queue,
+    version_id: int,
+    db,
+    enc_key: bytes | None,
+    errors: list,
+    abort: asyncio.Event,
+) -> tuple[int, int, int]:
+    processed = 0
+    skipped   = 0
+    bytes_dl  = 0
+
+    while True:
+        item = await queue.get()
+        if item is None:
+            break
+
+        kind = item[0]
+
+        if kind == "skip":
+            _, entry, sha256 = item
+            try:
+                await asyncio.to_thread(
+                    _register_version_file_sync, version_id, entry, sha256, db
+                )
+                processed += 1
+                skipped   += 1
+            except Exception as e:
+                errors.append(f"{entry.path}: {e}")
+                log.error(f"[rclone-runner] Erro ao registrar skip {entry.path}: {e}")
+                db.rollback()
+            continue
+
+        _, entry, tmp_path, sha256, size, volume = item
+        tmp_path = Path(tmp_path)
+        try:
+            await asyncio.to_thread(
+                _process_file_sync,
+                version_id, entry, tmp_path, sha256, size, volume, enc_key, db,
+            )
+            processed += 1
+            bytes_dl  += size
+        except Exception as e:
+            tmp_path.unlink(missing_ok=True)
+            msg = f"{entry.path}: {e}"
+            errors.append(msg)
+            log.error(f"[rclone-runner] Erro ao processar {msg}")
+            db.rollback()
+
+    return processed, skipped, bytes_dl
+
+
+# ---------------------------------------------------------------------------
 # Entry point principal
 # ---------------------------------------------------------------------------
 
 async def run_rclone_backup_job(job_id: int) -> None:
+    """Entry point: detecta o backend e despacha para a estratégia adequada.
+
+    - iCloud Photos (iclouddrive/photos): walk incremental resumível.
+    - demais backends (OneDrive, GDrive, iCloud Drive): listagem recursiva única
+      + download em lote (muito mais rápido onde a listagem recursiva funciona).
+    """
     db = SessionLocal()
     job: RcloneBackupJob | None = None
-    version: BackupVersion | None = None
-    version_db_id: int | None = None
     try:
         job = db.get(RcloneBackupJob, job_id)
         if not job:
@@ -448,6 +747,39 @@ async def run_rclone_backup_job(job_id: int) -> None:
             db.add(BackupID(label=job.target_label, client_name="rclone"))
             db.commit()
 
+        cfg = await _remote_config(job.remote_name)
+        if _uses_walk(cfg):
+            log.info(
+                f"[rclone-runner] Estratégia: walk incremental "
+                f"(backend {cfg.get('type', '?')}/{cfg.get('service', '?')})"
+            )
+            await _run_walk_strategy(job, db)
+        else:
+            log.info(
+                f"[rclone-runner] Estratégia: listagem recursiva "
+                f"(backend {cfg.get('type', '?')})"
+            )
+            await _run_fast_strategy(job, db)
+
+    except Exception as e:
+        log.exception(f"[rclone-runner] Job {job_id} falhou: {e}")
+        db.rollback()
+        if job:
+            try:
+                job.last_run_status  = "error"
+                job.last_run_message = str(e)
+                db.commit()
+                invalidate_activity()
+            except Exception:
+                pass
+    finally:
+        db.close()
+
+
+async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
+    """Walk incremental resumível (iCloud Photos)."""
+    version: BackupVersion | None = None
+    try:
         # Marca 'running' órfãos como incomplete ANTES de selecionar o resume,
         # para que um run anterior interrompido (com checkpoint) seja retomável.
         db.query(BackupVersion).filter(
@@ -487,7 +819,6 @@ async def run_rclone_backup_job(job_id: int) -> None:
             db.add(version)
             db.commit()
         db.refresh(version)
-        version_db_id = version.id
 
         enc_key = storage.encryption_key if storage.ENCRYPTION_ENABLED else None
 
@@ -653,25 +984,129 @@ async def run_rclone_backup_job(job_id: int) -> None:
         job.last_run_message = summary
         db.commit()
         invalidate_activity()
-        log.info(f"[rclone-runner] Job {job_id} concluído — {summary}")
+        log.info(f"[rclone-runner] Job {job.id} concluído — {summary}")
 
-    except Exception as e:
-        log.exception(f"[rclone-runner] Job {job_id} falhou: {e}")
+    except Exception:
         db.rollback()
-        if version and version_db_id:
+        if version is not None:
             try:
                 version.status      = "failed"
                 version.finished_at = datetime.now().astimezone().replace(tzinfo=None)
                 db.commit()
             except Exception:
                 pass
-        if job:
+        raise
+
+
+async def _run_fast_strategy(job: RcloneBackupJob, db) -> None:
+    """Caminho rápido: listagem recursiva única + download em lote escopado à raiz
+    (OneDrive, GDrive, iCloud Drive — backends com listagem recursiva eficiente)."""
+    version: BackupVersion | None = None
+    try:
+        # Cria BackupVersion; marca running anteriores como incomplete
+        version_key = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S")
+        db.query(BackupVersion).filter(
+            BackupVersion.backup_label == job.target_label,
+            BackupVersion.status == "running",
+        ).update({"status": "incomplete"}, synchronize_session=False)
+        version = BackupVersion(
+            backup_label=job.target_label, version_key=version_key, status="running"
+        )
+        db.add(version)
+        db.commit()
+        db.refresh(version)
+
+        # Lista arquivos no remote
+        log.info(f"[rclone-runner] Listando {job.remote_name}:{job.remote_path}")
+        all_files = await list_files_recursive(job.remote_name, job.remote_path)
+        total = len(all_files)
+        total_size = sum(e.size for e in all_files)
+        log.info(f"[rclone-runner] {total} arquivo(s) encontrado(s) ({_fmt_size(total_size)} total)")
+
+        enc_key = storage.encryption_key if storage.ENCRYPTION_ENABLED else None
+
+        # Carrega prev_files para skip por mtime (baseline = última versão done)
+        prev_files: dict[str, tuple[float, str]] = {}
+        prev_done = (
+            db.query(BackupVersion)
+            .filter(
+                BackupVersion.backup_label == job.target_label,
+                BackupVersion.status == "done",
+            )
+            .order_by(BackupVersion.version_key.desc())
+            .first()
+        )
+        if prev_done:
+            for vf in db.query(VersionFile).filter(VersionFile.version_id == prev_done.id).all():
+                prev_files[vf.original_path] = (vf.mtime, vf.sha256)
+            log.info(
+                f"[rclone-runner] {len(prev_files)} arquivo(s) na versão anterior "
+                "para comparação de mtime"
+            )
+
+        # Arquivos de versão incompleta/falha para resume
+        prev_incomplete = (
+            db.query(BackupVersion)
+            .filter(
+                BackupVersion.backup_label == job.target_label,
+                BackupVersion.status.in_(["incomplete", "failed"]),
+            )
+            .order_by(BackupVersion.version_key.desc())
+            .first()
+        )
+        if prev_incomplete:
+            resume_files = {
+                vf.original_path: (vf.mtime, vf.sha256)
+                for vf in db.query(VersionFile)
+                .filter(VersionFile.version_id == prev_incomplete.id)
+                .all()
+            }
+            if resume_files:
+                prev_files.update(resume_files)
+                log.info(
+                    f"[rclone-runner] {len(resume_files)} arquivo(s) de versão "
+                    "incompleta adicionados para resume"
+                )
+
+        errors: list[str] = []
+        abort = asyncio.Event()
+        queue: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_SIZE)
+
+        t_start = time.monotonic()
+        _, (processed, skipped, bytes_dl) = await asyncio.gather(
+            _producer(queue, all_files, prev_files, job.remote_name, job.remote_path, errors, abort),
+            _consumer(queue, version.id, db, enc_key, errors, abort),
+        )
+        elapsed = time.monotonic() - t_start
+
+        version.status      = "failed" if (processed == 0 and errors) else "done"
+        version.finished_at = datetime.now().astimezone().replace(tzinfo=None)
+        db.commit()
+
+        downloaded = processed - skipped
+        summary = (
+            f"{processed}/{total} arquivo(s) processado(s) "
+            f"({downloaded} baixado(s) [{_fmt_size(bytes_dl)}], {skipped} sem alteração) "
+            f"em {elapsed:.0f}s"
+        )
+        if errors:
+            summary += f", {len(errors)} erro(s): {'; '.join(errors[:3])}"
+            if len(errors) > 3:
+                summary += f" ... (+{len(errors) - 3})"
+
+        job.last_run_status  = "success" if not errors else "partial"
+        job.last_run_message = summary
+        db.commit()
+        invalidate_activity()
+        log.info(f"[rclone-runner] Job {job.id} concluído — {summary}")
+
+    except Exception:
+        db.rollback()
+        if version is not None:
             try:
-                job.last_run_status  = "error"
-                job.last_run_message = str(e)
+                version.status      = "failed"
+                version.finished_at = datetime.now().astimezone().replace(tzinfo=None)
                 db.commit()
-                invalidate_activity()
             except Exception:
                 pass
-    finally:
-        db.close()
+        raise

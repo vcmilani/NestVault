@@ -58,6 +58,11 @@ def _install_tree(monkeypatch, tree, downloaded_paths, fail_dirs=None,
     fail_dirs = fail_dirs or set()
     list_fail_dirs = list_fail_dirs or set()
 
+    # Força a estratégia walk (sem chamar `rclone config dump` real).
+    async def fake_cfg(remote_name):
+        return {"type": "iclouddrive", "service": "photos"}
+    monkeypatch.setattr(rr, "_remote_config", fake_cfg)
+
     async def fake_list(remote_name, remote_path, rel_dir, **kw):
         if rel_dir in list_fail_dirs:
             raise RuntimeError("lsjson simulado falhou")
@@ -213,3 +218,61 @@ async def test_done_version_skips_unchanged_by_mtime(session_factory, monkeypatc
     paths = {vf.original_path for vf in db.query(VersionFile).filter_by(version_id=vers[1].id)}
     assert paths == {"a.jpg"}
     db.close()
+
+
+# -- Dispatch por backend -----------------------------------------------------
+
+def test_uses_walk_discriminator():
+    assert rr._uses_walk({"type": "iclouddrive", "service": "photos"}) is True
+    assert rr._uses_walk({"type": "iclouddrive", "service": "drive"}) is False
+    assert rr._uses_walk({"type": "onedrive"}) is False
+    assert rr._uses_walk({"type": "drive"}) is False
+    assert rr._uses_walk({}) is False
+
+
+@pytest.mark.asyncio
+async def test_remote_config_parses_dump(monkeypatch):
+    async def fake_run(*args, **kw):
+        dump = json.dumps({
+            "victor_icloud_photos": {"type": "iclouddrive", "service": "photos"},
+            "onedrive": {"type": "onedrive"},
+        }).encode()
+        return dump, b"", 0
+    monkeypatch.setattr(rr, "_rclone_run", fake_run)
+    assert (await rr._remote_config("onedrive"))["type"] == "onedrive"
+    assert (await rr._remote_config("victor_icloud_photos"))["service"] == "photos"
+    assert await rr._remote_config("inexistente") == {}
+
+    async def fail_run(*args, **kw):
+        return b"", b"erro", 1
+    monkeypatch.setattr(rr, "_rclone_run", fail_run)
+    assert await rr._remote_config("qualquer") == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cfg,expect_walk", [
+    ({"type": "iclouddrive", "service": "photos"}, True),
+    ({"type": "onedrive"}, False),
+])
+async def test_run_dispatches_by_backend(session_factory, monkeypatch, cfg, expect_walk):
+    Session = session_factory
+    jid = _make_job(Session)
+    calls = {"walk": 0, "fast": 0}
+
+    async def fake_cfg(remote_name):
+        return cfg
+
+    async def spy_walk(job, db):
+        calls["walk"] += 1
+
+    async def spy_fast(job, db):
+        calls["fast"] += 1
+
+    monkeypatch.setattr(rr, "_remote_config", fake_cfg)
+    monkeypatch.setattr(rr, "_run_walk_strategy", spy_walk)
+    monkeypatch.setattr(rr, "_run_fast_strategy", spy_fast)
+
+    await rr.run_rclone_backup_job(jid)
+
+    assert calls["walk"] == (1 if expect_walk else 0)
+    assert calls["fast"] == (0 if expect_walk else 1)
