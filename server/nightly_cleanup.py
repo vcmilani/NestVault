@@ -1,6 +1,7 @@
 """Rotina de limpeza noturna com política de retenção progressiva de versões."""
 
 import logging
+import shutil
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -18,6 +19,8 @@ _SIX_MONTHS = timedelta(days=180)
 _BATCH      = 50
 
 _TMP_PREFIXES = ("_cloud_tmp_", "_rclone_tmp_", "_tmp_", "_enc_")
+# Prefixos de diretórios de staging temporários (download em lote do rclone).
+_TMP_DIR_PREFIXES = ("_rclone_stage_",)
 
 
 def _delete_versions(db, version_ids: list[int]) -> None:
@@ -139,6 +142,22 @@ def _cleanup_stale_tmp_files(volumes: list[Path], max_age_hours: float = 24.0) -
                     pass
                 except OSError as e:
                     log.warning(f"[cleanup-tmp] não foi possível remover {f}: {e}")
+        # Diretórios de staging órfãos (e o arquivo-sidecar .files de mesmo prefixo).
+        for prefix in _TMP_DIR_PREFIXES:
+            for d in vol.glob(f"{prefix}*"):
+                try:
+                    if d.stat().st_mtime >= cutoff:
+                        continue
+                    if d.is_dir():
+                        shutil.rmtree(d, ignore_errors=True)
+                    else:
+                        d.unlink()
+                    removed += 1
+                    log.info(f"[cleanup-tmp] staging órfão removido: {d.name}")
+                except FileNotFoundError:
+                    pass
+                except OSError as e:
+                    log.warning(f"[cleanup-tmp] não foi possível remover {d}: {e}")
     return removed, bytes_freed
 
 

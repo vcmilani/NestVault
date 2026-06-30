@@ -4,11 +4,18 @@ Diferença em relação ao runner.py padrão: não há tokens OAuth — o rclone
 gerencia autenticação internamente via ~/.config/rclone/rclone.conf.
 
 Fluxo por job:
-  1. Lista arquivos recursivamente via `rclone lsjson`
+  1. Lista arquivos recursivamente via `rclone lsjson` (streaming, sem timeout total)
   2. Skip de arquivos com mtime inalterado (comparação com versão anterior)
-  3. Producer: até _PARALLEL_DOWNLOADS downloads via `rclone cat` com SHA-256
+  3. Producer: baixa em lotes via `rclone copy --files-from` a partir da raiz do
+     job, calcula SHA-256 localmente e enfileira cada arquivo
   4. Consumer: dedup → store → encrypt → replicate → VersionFile (idêntico ao runner.py)
   5. Finaliza versão
+
+Nota: o download usa `rclone copy` a partir da raiz configurada do job (não
+`cat` por arquivo nem `copy` por diretório pai), porque a resolução de paths
+explícitos com nomes unicode/acentuados falha em vários backends
+('directory not found'); só a listagem/cópia recursiva a partir da raiz
+estável usa as entradas reais devolvidas pelo servidor.
 """
 import asyncio
 import hashlib
@@ -33,8 +40,14 @@ from database import (
 
 log = logging.getLogger("backup-server")
 
-_PARALLEL_DOWNLOADS = 3
+_PARALLEL_DOWNLOADS = 4   # --transfers do rclone em cada lote
 _QUEUE_SIZE = 6
+
+# Download em lote: cada `rclone copy` faz uma listagem recursiva da raiz do job,
+# então agrupamos arquivos para amortizar esse custo, limitando o uso de disco
+# do staging por lote.
+_BATCH_MAX_FILES = 250
+_BATCH_MAX_BYTES = 3 * 1024 ** 3   # 3 GB
 
 
 def _fmt_size(n: int) -> str:
@@ -50,12 +63,6 @@ def _fmt_size(n: int) -> str:
 # "Personal Vault" é o nome em inglês; "Cofre Pessoal" é o nome em PT-BR.
 _ONEDRIVE_PROTECTED_FOLDERS = {"Personal Vault", "Cofre Pessoal"}
 _IGNORED_SYSTEM_FILES = {".DS_Store", "Thumbs.db", "desktop.ini"}
-
-# Substrings de erro do rclone que não se resolvem com retry (falha determinística).
-_NON_RETRYABLE_ERRORS = (
-    "dangling shortcut",
-    "directory not found",
-)
 
 
 @dataclass
@@ -85,35 +92,29 @@ async def _rclone_run(*args: str, timeout: int = 300) -> tuple[bytes, bytes, int
     return stdout, stderr, proc.returncode
 
 
-async def _lsjson_streaming(*args: str, chunk_timeout: int = 300) -> tuple[bytes, bytes, int]:
-    """Executa rclone lsjson transmitindo stdout sem timeout total.
+async def _run_lsjson(*args: str, timeout: int = 14400) -> tuple[bytes, bytes, int]:
+    """Executa rclone lsjson com teto total generoso (default 4h).
 
-    Remotes grandes (iCloud Photos, Google Drive completo) podem levar horas
-    para listar; um timeout total fixo não funciona. Em vez disso, detectamos
-    travamento por ausência de dados por chunk_timeout segundos.
+    lsjson com --fast-list bufferiza toda a saída e só escreve no stdout ao
+    final da varredura, então detectar travamento por ausência de dados no
+    stdout gera falso-positivo em remotes grandes (iCloud Photos pode levar
+    >10min só para listar). Em vez disso, usamos um teto total amplo e
+    delegamos a detecção de conexão morta ao próprio rclone via
+    --timeout/--contimeout (passados pelo chamador), que aborta IO travado
+    em ~5min sem precisar de heurística nossa.
     """
     proc = await asyncio.create_subprocess_exec(
         "rclone", "lsjson", *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    chunks: list[bytes] = []
     try:
-        while True:
-            chunk = await asyncio.wait_for(
-                proc.stdout.read(65536), timeout=chunk_timeout
-            )
-            if not chunk:
-                break
-            chunks.append(chunk)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except TimeoutError:
         proc.kill()
         await proc.wait()
-        raise RuntimeError(
-            f"rclone lsjson travou — sem dados por {chunk_timeout}s"
-        )
-    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-    return b"".join(chunks), stderr, proc.returncode
+        raise RuntimeError(f"rclone lsjson excedeu timeout total de {timeout}s")
+    return stdout, stderr, proc.returncode
 
 
 async def list_remotes() -> list[str]:
@@ -147,9 +148,11 @@ async def list_files_recursive(
         exclude_flags: list[str] = []
         for folder in _ONEDRIVE_PROTECTED_FOLDERS:
             exclude_flags += ["--exclude", f"{folder}/**"]
-        stdout, stderr, rc = await _lsjson_streaming(
+        stdout, stderr, rc = await _run_lsjson(
             "--recursive", "--fast-list",
             "--drive-skip-dangling-shortcuts",
+            "--timeout", "300s",
+            "--contimeout", "60s",
             *exclude_flags,
             "--exclude", ".DS_Store",
             "--exclude", "Thumbs.db",
@@ -195,89 +198,47 @@ async def list_files_recursive(
     return result
 
 
-async def _download_to(
-    remote_name: str, remote_path: str, file_path: str, dest: Path,
-    *, retries: int = 3,
-) -> tuple[str, int]:
-    """Baixa arquivo via rclone copy --files-from e calcula SHA-256.
-
-    rclone cat reconstrói a URL a partir do path, o que falha em remotes
-    WebDAV (iCloud) com nomes unicode/acentuados — 'directory not found' mesmo
-    o arquivo existindo. rclone copy --files-from lista o diretório pai via
-    PROPFIND e usa a URL real devolvida pelo servidor, contornando o problema.
-    """
-    if "/" in file_path:
-        parent_rel, filename = file_path.rsplit("/", 1)
-        remote_dir = f"{remote_path}/{parent_rel}" if remote_path else parent_rel
-    else:
-        filename = file_path
-        remote_dir = remote_path
-
-    src_dir = f"{remote_name}:{remote_dir}" if remote_dir else f"{remote_name}:"
-
-    last_err: Exception | None = None
-    for attempt in range(1, retries + 1):
-        dest.unlink(missing_ok=True)
-        tmp_dl_dir = dest.parent / f"_dl_{dest.name}"
-        ff_path    = dest.parent / f"_ff_{dest.name}.txt"
-        try:
-            shutil.rmtree(tmp_dl_dir, ignore_errors=True)
-            tmp_dl_dir.mkdir()
-            ff_path.write_text(filename + "\n", encoding="utf-8")
-
-            proc = await asyncio.create_subprocess_exec(
-                "rclone", "copy", src_dir, str(tmp_dl_dir),
-                "--files-from", str(ff_path),
-                "--timeout", "300s",
-                "--contimeout", "60s",
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stderr_bytes = await proc.stderr.read()
-            await proc.wait()
-
-            if proc.returncode != 0:
-                last_err = RuntimeError(
-                    f"rclone copy falhou ({proc.returncode}): "
-                    f"{stderr_bytes.decode().strip()}"
-                )
-            else:
-                downloaded = list(tmp_dl_dir.iterdir())
-                if not downloaded:
-                    last_err = RuntimeError(
-                        f"rclone copy não gerou arquivo para: {filename}"
-                    )
-                else:
-                    shutil.move(str(downloaded[0]), str(dest))
-                    last_err = None
-        except Exception as e:
-            last_err = e
-        finally:
-            ff_path.unlink(missing_ok=True)
-            shutil.rmtree(tmp_dl_dir, ignore_errors=True)
-
-        if last_err is None:
-            break
-        # Erros determinísticos: retry não ajuda (atalho quebrado, sem permissão).
-        if any(s in str(last_err) for s in _NON_RETRYABLE_ERRORS):
-            break
-        if attempt < retries:
-            log.warning(
-                f"[rclone-runner] copy tentativa {attempt}/{retries} falhou "
-                f"({file_path}): {last_err} — retentando em 5s"
-            )
-            await asyncio.sleep(5)
-
-    if last_err is not None:
-        raise last_err  # type: ignore[misc]
-
+def _hash_file(path: Path) -> tuple[str, int]:
+    """Calcula SHA-256 e tamanho de um arquivo local (bloqueante)."""
     h = hashlib.sha256()
     total = 0
-    with open(dest, "rb") as f:
+    with open(path, "rb") as f:
         while chunk := f.read(storage.CHUNK_SIZE):
             h.update(chunk)
             total += len(chunk)
     return h.hexdigest(), total
+
+
+async def _bulk_copy(
+    remote_name: str, remote_path: str, files_from: Path, staging: Path,
+) -> tuple[int, str]:
+    """Baixa em lote via `rclone copy --files-from` a partir da raiz do job.
+
+    Por que a raiz do job e não o diretório pai de cada arquivo: o rclone
+    resolve um path explícito (ex: remote:Love/Maitê) caminhando e comparando
+    nomes componente a componente, o que falha em nomes unicode/acentuados
+    ('directory not found'). A listagem recursiva a partir da raiz configurada
+    do job usa as entradas devolvidas pelo servidor — o mesmo mecanismo de
+    list_files_recursive que funciona — então os caminhos relativos do
+    --files-from casam corretamente.
+    """
+    src = f"{remote_name}:{remote_path}" if remote_path else f"{remote_name}:"
+    proc = await asyncio.create_subprocess_exec(
+        "rclone", "copy", src, str(staging),
+        "--files-from", str(files_from),
+        "--fast-list",
+        "--drive-skip-dangling-shortcuts",
+        "--transfers", str(_PARALLEL_DOWNLOADS),
+        "--checkers", "8",
+        "--retries", "3",
+        "--timeout", "300s",
+        "--contimeout", "60s",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stderr_bytes = await proc.stderr.read()
+    await proc.wait()
+    return proc.returncode, stderr_bytes.decode(errors="replace").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +299,61 @@ def _process_file_sync(
 # Producer-consumer (espelha o padrão de runner.py)
 # ---------------------------------------------------------------------------
 
+async def _download_batch(
+    queue: asyncio.Queue,
+    batch: list[RcloneFileEntry],
+    remote_name: str,
+    remote_path: str,
+    errors: list,
+    done_before: int,
+    total_dl: int,
+) -> None:
+    """Baixa um lote em staging, calcula hash, e enfileira cada arquivo."""
+    volume = storage.pick_volume()
+    staging = Path(tempfile.mkdtemp(dir=volume, prefix="_rclone_stage_"))
+    ff_path = Path(f"{staging}.files")
+    batch_bytes = sum(e.size for e in batch)
+    log.info(
+        f"[rclone-runner] baixando lote de {len(batch)} arquivo(s) "
+        f"({_fmt_size(batch_bytes)}) "
+        f"[{done_before + 1}-{done_before + len(batch)}/{total_dl}]"
+    )
+    try:
+        ff_path.write_text(
+            "".join(e.path + "\n" for e in batch), encoding="utf-8"
+        )
+        rc, err = await _bulk_copy(remote_name, remote_path, ff_path, staging)
+        if rc != 0:
+            # Falha parcial é possível: o rclone pode ter copiado alguns
+            # arquivos antes do erro. Seguimos e tratamos os ausentes abaixo.
+            log.warning(f"[rclone-runner] rclone copy do lote retornou {rc}: {err}")
+
+        for entry in batch:
+            staged = staging / entry.path
+            if not staged.is_file():
+                msg = f"{entry.path}: não baixado pelo rclone (verifique permissão/atalho)"
+                errors.append(msg)
+                log.error(f"[rclone-runner] {msg}")
+                continue
+            # Move para arquivo plano no volume (rename barato, mesmo FS) e
+            # libera o staging logo em seguida.
+            _fd, _tmp = tempfile.mkstemp(dir=volume, prefix="_rclone_tmp_")
+            os.close(_fd)
+            tmp_path = Path(_tmp)
+            shutil.move(str(staged), str(tmp_path))
+            try:
+                sha256, size = await asyncio.to_thread(_hash_file, tmp_path)
+            except Exception as e:
+                tmp_path.unlink(missing_ok=True)
+                errors.append(f"{entry.path}: {e}")
+                log.error(f"[rclone-runner] Erro ao ler {entry.path}: {e}")
+                continue
+            await queue.put(("file", entry, tmp_path, sha256, size, volume))
+    finally:
+        ff_path.unlink(missing_ok=True)
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 async def _producer(
     queue: asyncio.Queue,
     all_files: list[RcloneFileEntry],
@@ -347,50 +363,45 @@ async def _producer(
     errors: list,
     abort: asyncio.Event,
 ) -> None:
-    semaphore = asyncio.Semaphore(_PARALLEL_DOWNLOADS)
     total = len(all_files)
 
-    async def _download_one(i: int, entry: RcloneFileEntry) -> None:
-        if abort.is_set():
-            return
-
+    # Particiona em "sem alteração" (skip por mtime) e "a baixar".
+    to_download: list[RcloneFileEntry] = []
+    for i, entry in enumerate(all_files, 1):
         prev = prev_files.get(entry.path)
         if prev and prev[0] == entry.mtime:
             if total >= 10 and (i == 1 or i % max(1, total // 4) == 0 or i == total):
                 log.info(f"[rclone-runner] [{i}/{total}] sem alteração — {entry.path}")
             await queue.put(("skip", entry, prev[1]))
-            return
+        else:
+            to_download.append(entry)
 
-        log.info(
-            f"[rclone-runner] [{i}/{total}] baixando {entry.path} "
-            f"({_fmt_size(entry.size)})"
-        )
-        volume = storage.pick_volume()
-        _fd, _tmp = tempfile.mkstemp(dir=volume, prefix="_rclone_tmp_")
-        os.close(_fd)
-        tmp_path = Path(_tmp)
-
-        async with semaphore:
-            if abort.is_set():
-                return
-            try:
-                sha256, size = await _download_to(
-                    remote_name, remote_path, entry.path, tmp_path
-                )
-            except Exception as e:
-                tmp_path.unlink(missing_ok=True)
-                errors.append(f"{entry.path}: {e}")
-                log.error(f"[rclone-runner] Erro ao baixar {entry.path}: {e}")
-                return
-
-        await queue.put(("file", entry, tmp_path, sha256, size, volume))
+    total_dl = len(to_download)
+    log.info(
+        f"[rclone-runner] {total - total_dl} sem alteração, "
+        f"{total_dl} a baixar em lotes"
+    )
 
     try:
-        tasks = [
-            asyncio.create_task(_download_one(i, entry))
-            for i, entry in enumerate(all_files, 1)
-        ]
-        await asyncio.gather(*tasks)
+        done = 0
+        batch: list[RcloneFileEntry] = []
+        batch_bytes = 0
+        for entry in to_download:
+            if abort.is_set():
+                break
+            batch.append(entry)
+            batch_bytes += entry.size
+            if len(batch) >= _BATCH_MAX_FILES or batch_bytes >= _BATCH_MAX_BYTES:
+                await _download_batch(
+                    queue, batch, remote_name, remote_path, errors, done, total_dl
+                )
+                done += len(batch)
+                batch = []
+                batch_bytes = 0
+        if batch and not abort.is_set():
+            await _download_batch(
+                queue, batch, remote_name, remote_path, errors, done, total_dl
+            )
     finally:
         await queue.put(None)
 

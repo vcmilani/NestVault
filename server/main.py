@@ -203,7 +203,8 @@ def _cleanup_stale_running_states():
     finally:
         db.close()
 
-    from nightly_cleanup import _TMP_PREFIXES
+    import shutil as _shutil
+    from nightly_cleanup import _TMP_PREFIXES, _TMP_DIR_PREFIXES
     for vol in storage.STORAGE_VOLUMES:
         for prefix in _TMP_PREFIXES:
             for f in vol.glob(f"{prefix}*"):
@@ -213,6 +214,16 @@ def _cleanup_stale_running_states():
                         log.info(f"[startup] arquivo temporário órfão removido: {f.name}")
                     except OSError as e:
                         log.warning(f"[startup] não foi possível remover {f}: {e}")
+        for prefix in _TMP_DIR_PREFIXES:
+            for d in vol.glob(f"{prefix}*"):
+                try:
+                    if d.is_dir():
+                        _shutil.rmtree(d, ignore_errors=True)
+                    else:
+                        d.unlink()
+                    log.info(f"[startup] staging temporário órfão removido: {d.name}")
+                except OSError as e:
+                    log.warning(f"[startup] não foi possível remover {d}: {e}")
 
 
 def _backup_labels_for_sha256s(db, sha256s: list[str]) -> list[str]:
