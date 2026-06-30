@@ -221,7 +221,6 @@ async def _download_to(
             proc = await asyncio.create_subprocess_exec(
                 "rclone", "copy", src_dir, str(tmp_dl_dir),
                 "--files-from", str(ff_path),
-                "--no-traverse",
                 "--timeout", "300s",
                 "--contimeout", "60s",
                 stdout=asyncio.subprocess.DEVNULL,
