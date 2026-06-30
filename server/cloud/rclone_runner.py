@@ -192,62 +192,83 @@ async def _download_to(
     remote_name: str, remote_path: str, file_path: str, dest: Path,
     *, retries: int = 3,
 ) -> tuple[str, int]:
-    """Baixa arquivo via `rclone cat` e calcula SHA-256 em single pass."""
-    full_remote_path = f"{remote_path}/{file_path}" if remote_path else file_path
-    src = f"{remote_name}:{full_remote_path}"
+    """Baixa arquivo via rclone copy --files-from e calcula SHA-256.
+
+    rclone cat reconstrói a URL a partir do path, o que falha em remotes
+    WebDAV (iCloud) com nomes unicode/acentuados — 'directory not found' mesmo
+    o arquivo existindo. rclone copy --files-from lista o diretório pai via
+    PROPFIND e usa a URL real devolvida pelo servidor, contornando o problema.
+    """
+    if "/" in file_path:
+        parent_rel, filename = file_path.rsplit("/", 1)
+        remote_dir = f"{remote_path}/{parent_rel}" if remote_path else parent_rel
+    else:
+        filename = file_path
+        remote_dir = remote_path
+
+    src_dir = f"{remote_name}:{remote_dir}" if remote_dir else f"{remote_name}:"
 
     last_err: Exception | None = None
     for attempt in range(1, retries + 1):
         dest.unlink(missing_ok=True)
-        proc = await asyncio.create_subprocess_exec(
-            "rclone", "cat", src,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-
-        h = hashlib.sha256()
-        total = 0
+        tmp_dl_dir = dest.parent / f"_dl_{dest.name}"
+        ff_path    = dest.parent / f"_ff_{dest.name}.txt"
         try:
-            with open(dest, "wb") as f:
-                while True:
-                    chunk = await asyncio.wait_for(
-                        proc.stdout.read(storage.CHUNK_SIZE), timeout=300
-                    )
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    h.update(chunk)
-                    total += len(chunk)
-        except Exception as e:
-            proc.kill()
-            await proc.wait()
-            dest.unlink(missing_ok=True)
-            last_err = e
-            if attempt < retries:
-                log.warning(
-                    f"[rclone-runner] cat tentativa {attempt}/{retries} falhou "
-                    f"({file_path}): {e} — retentando em 5s"
-                )
-                await asyncio.sleep(5)
-            continue
+            shutil.rmtree(tmp_dl_dir, ignore_errors=True)
+            tmp_dl_dir.mkdir()
+            ff_path.write_text(filename + "\n", encoding="utf-8")
 
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-        if proc.returncode != 0:
-            dest.unlink(missing_ok=True)
-            last_err = RuntimeError(
-                f"rclone cat falhou ({proc.returncode}): {stderr.decode().strip()}"
+            proc = await asyncio.create_subprocess_exec(
+                "rclone", "copy", src_dir, str(tmp_dl_dir),
+                "--files-from", str(ff_path),
+                "--no-traverse",
+                "--timeout", "300s",
+                "--contimeout", "60s",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
             )
-            if attempt < retries:
-                log.warning(
-                    f"[rclone-runner] cat tentativa {attempt}/{retries} falhou "
-                    f"({file_path}): {last_err} — retentando em 5s"
+            stderr_bytes = await proc.stderr.read()
+            await proc.wait()
+
+            if proc.returncode != 0:
+                last_err = RuntimeError(
+                    f"rclone copy falhou ({proc.returncode}): "
+                    f"{stderr_bytes.decode().strip()}"
                 )
-                await asyncio.sleep(5)
-            continue
+            else:
+                downloaded = list(tmp_dl_dir.iterdir())
+                if not downloaded:
+                    last_err = RuntimeError(
+                        f"rclone copy não gerou arquivo para: {filename}"
+                    )
+                else:
+                    shutil.move(str(downloaded[0]), str(dest))
+                    last_err = None
+        except Exception as e:
+            last_err = e
+        finally:
+            ff_path.unlink(missing_ok=True)
+            shutil.rmtree(tmp_dl_dir, ignore_errors=True)
 
-        return h.hexdigest(), total
+        if last_err is None:
+            break
+        if attempt < retries:
+            log.warning(
+                f"[rclone-runner] copy tentativa {attempt}/{retries} falhou "
+                f"({file_path}): {last_err} — retentando em 5s"
+            )
+            await asyncio.sleep(5)
 
-    raise last_err  # type: ignore[misc]
+    if last_err is not None:
+        raise last_err  # type: ignore[misc]
+
+    h = hashlib.sha256()
+    total = 0
+    with open(dest, "rb") as f:
+        while chunk := f.read(storage.CHUNK_SIZE):
+            h.update(chunk)
+            total += len(chunk)
+    return h.hexdigest(), total
 
 
 # ---------------------------------------------------------------------------
