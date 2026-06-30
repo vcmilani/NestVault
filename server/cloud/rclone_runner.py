@@ -51,6 +51,12 @@ def _fmt_size(n: int) -> str:
 _ONEDRIVE_PROTECTED_FOLDERS = {"Personal Vault", "Cofre Pessoal"}
 _IGNORED_SYSTEM_FILES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 
+# Substrings de erro do rclone que não se resolvem com retry (falha determinística).
+_NON_RETRYABLE_ERRORS = (
+    "dangling shortcut",
+    "directory not found",
+)
+
 
 @dataclass
 class RcloneFileEntry:
@@ -143,6 +149,7 @@ async def list_files_recursive(
             exclude_flags += ["--exclude", f"{folder}/**"]
         stdout, stderr, rc = await _lsjson_streaming(
             "--recursive", "--fast-list",
+            "--drive-skip-dangling-shortcuts",
             *exclude_flags,
             "--exclude", ".DS_Store",
             "--exclude", "Thumbs.db",
@@ -250,6 +257,9 @@ async def _download_to(
             shutil.rmtree(tmp_dl_dir, ignore_errors=True)
 
         if last_err is None:
+            break
+        # Erros determinísticos: retry não ajuda (atalho quebrado, sem permissão).
+        if any(s in str(last_err) for s in _NON_RETRYABLE_ERRORS):
             break
         if attempt < retries:
             log.warning(
