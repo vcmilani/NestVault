@@ -79,6 +79,37 @@ async def _rclone_run(*args: str, timeout: int = 300) -> tuple[bytes, bytes, int
     return stdout, stderr, proc.returncode
 
 
+async def _lsjson_streaming(*args: str, chunk_timeout: int = 300) -> tuple[bytes, bytes, int]:
+    """Executa rclone lsjson transmitindo stdout sem timeout total.
+
+    Remotes grandes (iCloud Photos, Google Drive completo) podem levar horas
+    para listar; um timeout total fixo não funciona. Em vez disso, detectamos
+    travamento por ausência de dados por chunk_timeout segundos.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "rclone", "lsjson", *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    chunks: list[bytes] = []
+    try:
+        while True:
+            chunk = await asyncio.wait_for(
+                proc.stdout.read(65536), timeout=chunk_timeout
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError(
+            f"rclone lsjson travou — sem dados por {chunk_timeout}s"
+        )
+    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+    return b"".join(chunks), stderr, proc.returncode
+
+
 async def list_remotes() -> list[str]:
     """Lista remotes configurados no rclone config do sistema."""
     stdout, _, rc = await _rclone_run("listremotes")
@@ -110,13 +141,13 @@ async def list_files_recursive(
         exclude_flags: list[str] = []
         for folder in _ONEDRIVE_PROTECTED_FOLDERS:
             exclude_flags += ["--exclude", f"{folder}/**"]
-        stdout, stderr, rc = await _rclone_run(
-            "lsjson", "--recursive",
+        stdout, stderr, rc = await _lsjson_streaming(
+            "--recursive", "--fast-list",
             *exclude_flags,
             "--exclude", ".DS_Store",
             "--exclude", "Thumbs.db",
             "--exclude", "desktop.ini",
-            src, timeout=3600
+            src,
         )
         if rc == 0:
             break
