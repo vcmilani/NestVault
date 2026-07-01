@@ -183,19 +183,8 @@
   let _tickTimer    = null;
   const H = () => ({'X-API-Key': API_KEY});
 
-  // Disk usage sparkline via localStorage
-  function _saveDiskHistory(path, usedPct) {
-    const key = 'nv-disk-' + path.replace(/[^a-z0-9]/gi, '_');
-    const hist = JSON.parse(localStorage.getItem(key) || '[]');
-    hist.push({ ts: Date.now(), pct: Math.round(usedPct * 10) / 10 });
-    if (hist.length > 48) hist.splice(0, hist.length - 48);
-    localStorage.setItem(key, JSON.stringify(hist));
-  }
-
-  function _renderSparkline(path) {
-    const key = 'nv-disk-' + path.replace(/[^a-z0-9]/gi, '_');
-    const hist = JSON.parse(localStorage.getItem(key) || '[]');
-    if (hist.length < 2) return '<span class="disk-sparkline-label">sem histórico</span>';
+  function _renderSparkline(hist) {
+    if (!hist || hist.length < 2) return '<span class="disk-sparkline-label">sem histórico</span>';
     const pts = hist.map(h => h.pct);
     const max = Math.max(...pts), min = Math.min(...pts);
     const range = max - min || 1;
@@ -262,10 +251,6 @@
       if (r.status === 401) { showLogin('API Key inválida.'); container.innerHTML = ''; return; }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const disks = await r.json();
-      disks.forEach(d => {
-        const usedPct = d.total_bytes > 0 ? d.used_bytes / d.total_bytes * 100 : 0;
-        _saveDiskHistory(d.path, usedPct);
-      });
       renderDisks(disks);
       _lastLoadTime = Date.now();
       _startTick();
@@ -321,7 +306,7 @@
             <span>${freePct.toFixed(1)}% livre</span>
           </div>
           <div class="disk-sparkline-row">
-            ${_renderSparkline(d.path)}
+            ${_renderSparkline(d.history)}
           </div>
 
           <div class="disk-content-info">

@@ -276,3 +276,99 @@ async def test_run_dispatches_by_backend(session_factory, monkeypatch, cfg, expe
 
     assert calls["walk"] == (1 if expect_walk else 0)
     assert calls["fast"] == (0 if expect_walk else 1)
+
+
+@pytest.mark.asyncio
+async def test_list_dir_skips_recently_deleted(monkeypatch):
+    """'Recently Deleted' do iCloud Photos é ignorada no walk, sem erro."""
+    payload = json.dumps([
+        {"Name": "Recently Deleted", "IsDir": True},
+        {"Name": "2024", "IsDir": True},
+        {"Name": "a.jpg", "IsDir": False, "Size": 10,
+         "ModTime": "2024-01-01T00:00:00Z"},
+    ]).encode()
+
+    async def fake_lsjson(*args, **kw):
+        return payload, b"", 0
+    monkeypatch.setattr(rr, "_run_lsjson", fake_lsjson)
+
+    files, subdirs = await rr.list_dir_one_level("victor_icloud_photos", "", "")
+
+    assert subdirs == ["2024"]
+    assert [f.path for f in files] == ["a.jpg"]
+
+
+@pytest.mark.asyncio
+async def test_stale_checkpoint_with_recently_deleted_is_skipped(session_factory, monkeypatch):
+    """Checkpoint pré-existente com 'Recently Deleted' pendente (ex: de antes
+    do fix de pastas protegidas) é descartado no pop, sem tentar listar."""
+    Session = session_factory
+    jid = _make_job(Session)
+    tree = {
+        "": ([_fe("ok.jpg")], []),
+    }
+    downloaded = []
+    _install_tree(monkeypatch, tree, downloaded)
+
+    async def fake_list(remote_name, remote_path, rel_dir, **kw):
+        if rel_dir == "Recently Deleted":
+            raise AssertionError("não deveria tentar listar Recently Deleted")
+        return tree[rel_dir]
+    monkeypatch.setattr(rr, "list_dir_one_level", fake_list)
+
+    # Cria uma versão incompleta com checkpoint já contendo o pendente "sujo".
+    db = Session()
+    ver = BackupVersion(
+        backup_label="fotos", version_key="2024-01-01T00:00:00",
+        status="incomplete",
+        progress_json=json.dumps({
+            "done_dirs": [], "pending_dirs": ["", "Recently Deleted"], "resume_count": 0,
+        }),
+    )
+    db.add(ver)
+    db.commit()
+    db.close()
+
+    await rr.run_rclone_backup_job(jid)
+
+    db = Session()
+    ver = db.query(BackupVersion).filter_by(backup_label="fotos").one()
+    assert ver.status == "done"
+    assert ver.progress_json is None
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_max_resumes_abandons_version_and_creates_new(session_factory, monkeypatch):
+    """Após _MAX_RESUMES resumes sem concluir, versão vira 'failed' e
+    o próximo run cria versão nova."""
+    Session = session_factory
+    monkeypatch.setattr(rr, "datetime", _IncDateTime)
+    jid = _make_job(Session)
+    tree = {
+        "": ([], ["A", "B"]),
+        "A": ([_fe("A/ok.jpg")], []),
+        "B": ([_fe("B/bad.jpg")], []),   # B sempre falha na listagem
+    }
+    downloaded = []
+    _install_tree(monkeypatch, tree, downloaded, list_fail_dirs={"B"})
+
+    # O contador é salvo no FINAL de cada run falhado. A sequência é:
+    #   Run 1 (inicial): salva resume_count=0
+    #   Run 2..N+1 (resumes): carrega N-1, incrementa para N, salva N
+    #   Run N+2 (abandon): carrega _MAX_RESUMES → check >= _MAX_RESUMES → abandon + nova versão
+    # Total necessário: _MAX_RESUMES + 2
+    for _ in range(rr._MAX_RESUMES + 2):
+        await rr.run_rclone_backup_job(jid)
+
+    db = Session()
+    vers = db.query(BackupVersion).filter_by(backup_label="fotos").order_by(
+        BackupVersion.id).all()
+
+    # Versão original abandonada (failed, checkpoint limpo)
+    assert vers[0].status == "failed"
+    assert vers[0].progress_json is None
+    # Nova versão foi criada no último run
+    assert len(vers) == 2
+    assert vers[1].status == "incomplete"   # B ainda falha, mas é um novo início
+    db.close()

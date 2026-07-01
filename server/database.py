@@ -178,6 +178,18 @@ class RcloneBackupJob(Base):
     created_at       = Column(DateTime, default=_utcnow)
 
 
+class DiskSnapshot(Base):
+    __tablename__ = "disk_snapshots"
+    __table_args__ = (
+        Index("ix_disk_snapshots_volume_sampled", "volume_path", "sampled_at"),
+    )
+
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    volume_path = Column(String, nullable=False)
+    used_pct    = Column(Float, nullable=False)
+    sampled_at  = Column(DateTime, nullable=False, default=_utcnow)
+
+
 def init_db():
     import logging as _initlog
     _log_init = _initlog.getLogger("backup-server")

@@ -68,7 +68,7 @@ from sqlalchemy import func, select, insert, literal, case, delete, exists
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
-from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob, SsdCachePendingMove, RcloneBackupJob
+from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob, SsdCachePendingMove, RcloneBackupJob, DiskSnapshot
 import crypto
 import storage
 from auth import require_api_key, API_KEY, AUTH_ENABLED
@@ -607,6 +607,7 @@ class DiskVolumeInfo(BaseModel):
     content_bytes: int
     status: Literal["ok", "degraded"]
     is_cache: bool = False
+    history: list[dict] = []
 
 class BackupDiskEntry(BaseModel):
     volume_path: str
@@ -2108,31 +2109,71 @@ def storage_disks(db: Session = Depends(get_db)):
     )
     vol_stats = {r.volume_path: (r.cnt, int(r.bytes)) for r in rows}
 
-    result = []
-    for v in STORAGE_VOLUMES:
-        usage = _safe_disk_usage(v)
-        files, bytes_ = vol_stats.get(str(v), (0, 0))
-        result.append(DiskVolumeInfo(
-            path=str(v),
-            total_bytes=usage.total if usage else 0,
-            used_bytes=usage.used  if usage else 0,
-            free_bytes=usage.free  if usage else 0,
-            content_files=files,
-            content_bytes=bytes_,
-            status="degraded" if usage is None else "ok",
-        ))
+    all_vols = [(str(v), _safe_disk_usage(v), False) for v in STORAGE_VOLUMES]
     if storage.SSD_CACHE_ENABLED and storage.SSD_CACHE_DIR:
-        usage = _safe_disk_usage(storage.SSD_CACHE_DIR)
-        files, bytes_ = vol_stats.get(str(storage.SSD_CACHE_DIR), (0, 0))
+        all_vols.append((str(storage.SSD_CACHE_DIR), _safe_disk_usage(storage.SSD_CACHE_DIR), True))
+
+    all_paths = [p for p, _, _ in all_vols]
+    cutoff = datetime.now() - timedelta(minutes=30)
+    last_snaps = {
+        r.volume_path: r.max_sampled_at
+        for r in db.query(
+            DiskSnapshot.volume_path,
+            func.max(DiskSnapshot.sampled_at).label("max_sampled_at"),
+        ).group_by(DiskSnapshot.volume_path).all()
+    }
+
+    needs_commit = False
+    for path, usage, _ in all_vols:
+        if usage is None:
+            continue
+        last = last_snaps.get(path)
+        if last is not None and last >= cutoff:
+            continue
+        used_pct = round(usage.used / usage.total * 100, 1) if usage.total else 0.0
+        db.add(DiskSnapshot(volume_path=path, used_pct=used_pct))
+        db.flush()
+        keep_ids = [
+            r.id for r in db.query(DiskSnapshot.id)
+            .filter(DiskSnapshot.volume_path == path)
+            .order_by(DiskSnapshot.sampled_at.desc())
+            .limit(48)
+            .all()
+        ]
+        if keep_ids:
+            db.query(DiskSnapshot).filter(
+                DiskSnapshot.volume_path == path,
+                ~DiskSnapshot.id.in_(keep_ids),
+            ).delete(synchronize_session=False)
+        needs_commit = True
+    if needs_commit:
+        db.commit()
+
+    hist_rows = (
+        db.query(DiskSnapshot)
+        .filter(DiskSnapshot.volume_path.in_(all_paths))
+        .order_by(DiskSnapshot.sampled_at.asc())
+        .all()
+    )
+    history_map: dict[str, list] = {}
+    for snap in hist_rows:
+        history_map.setdefault(snap.volume_path, []).append(
+            {"ts": int(snap.sampled_at.timestamp() * 1000), "pct": snap.used_pct}
+        )
+
+    result = []
+    for path, usage, is_cache in all_vols:
+        files, bytes_ = vol_stats.get(path, (0, 0))
         result.append(DiskVolumeInfo(
-            path=str(storage.SSD_CACHE_DIR),
+            path=path,
             total_bytes=usage.total if usage else 0,
             used_bytes=usage.used  if usage else 0,
             free_bytes=usage.free  if usage else 0,
             content_files=files,
             content_bytes=bytes_,
             status="degraded" if usage is None else "ok",
-            is_cache=True,
+            is_cache=is_cache,
+            history=history_map.get(path, []),
         ))
     return result
 
