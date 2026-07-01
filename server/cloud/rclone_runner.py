@@ -70,7 +70,7 @@ _INGEST_POLL    = 2.0         # segundos entre varreduras do ingester
 # Backends que exigem o walk incremental (não conseguem listagem recursiva
 # eficiente). Critério atual: serviço de fotos do iCloud (iclouddrive/photos).
 _WALK_SERVICES = {"photos"}
-_MAX_RESUMES   = 5   # versão incompleta é abandonada após este número de resumes falhados
+_MAX_RESUMES   = 3   # versão incompleta é abandonada após este número de resumes falhados
 
 
 def _fmt_size(n: int) -> str:
