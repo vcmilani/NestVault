@@ -279,6 +279,26 @@ async def test_run_dispatches_by_backend(session_factory, monkeypatch, cfg, expe
 
 
 @pytest.mark.asyncio
+async def test_list_dir_skips_recently_deleted(monkeypatch):
+    """'Recently Deleted' do iCloud Photos é ignorada no walk, sem erro."""
+    payload = json.dumps([
+        {"Name": "Recently Deleted", "IsDir": True},
+        {"Name": "2024", "IsDir": True},
+        {"Name": "a.jpg", "IsDir": False, "Size": 10,
+         "ModTime": "2024-01-01T00:00:00Z"},
+    ]).encode()
+
+    async def fake_lsjson(*args, **kw):
+        return payload, b"", 0
+    monkeypatch.setattr(rr, "_run_lsjson", fake_lsjson)
+
+    files, subdirs = await rr.list_dir_one_level("victor_icloud_photos", "", "")
+
+    assert subdirs == ["2024"]
+    assert [f.path for f in files] == ["a.jpg"]
+
+
+@pytest.mark.asyncio
 async def test_max_resumes_abandons_version_and_creates_new(session_factory, monkeypatch):
     """Após _MAX_RESUMES resumes sem concluir, versão vira 'failed' e
     o próximo run cria versão nova."""

@@ -85,6 +85,9 @@ def _fmt_size(n: int) -> str:
 # Pastas do OneDrive que exigem autenticação adicional — ignoradas em todos os jobs.
 # "Personal Vault" é o nome em inglês; "Cofre Pessoal" é o nome em PT-BR.
 _ONEDRIVE_PROTECTED_FOLDERS = {"Personal Vault", "Cofre Pessoal"}
+# Álbuns especiais do iCloud Photos que o rclone não consegue listar/baixar
+# normalmente — ignorados apenas no walk incremental (list_dir_one_level).
+_ICLOUD_PHOTOS_PROTECTED_FOLDERS = {"Recently Deleted"}
 _IGNORED_SYSTEM_FILES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 
 
@@ -224,7 +227,7 @@ async def list_dir_one_level(
         name = item["Name"]
         rel = f"{rel_dir}/{name}" if rel_dir else name
         if item.get("IsDir"):
-            if name in _ONEDRIVE_PROTECTED_FOLDERS:
+            if name in _ONEDRIVE_PROTECTED_FOLDERS or name in _ICLOUD_PHOTOS_PROTECTED_FOLDERS:
                 log.info(f"[rclone] pasta protegida ignorada: {name!r}")
                 continue
             subdirs.append(rel)
