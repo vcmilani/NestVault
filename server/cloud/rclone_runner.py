@@ -898,6 +898,11 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
         processed_total  = 0
 
         t_start = time.monotonic()
+        t_last_progress = t_start
+        log.info(
+            f"[rclone-runner] Walk iniciado: {job.remote_name}:{job.remote_path or '/'} "
+            f"— {len(pending)} dir(s) na fila, {len(done_dirs)} já concluído(s)"
+        )
         while pending:
             rel_dir = pending.pop(0)
             if rel_dir in done_dirs:
@@ -970,22 +975,40 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
             # Checkpoint: marca o diretório como concluído só se não houve novos
             # erros. Se houve, o diretório vai para failed_dirs e é persistido na
             # fronteira pendente para ser re-tentado no próximo run (resume).
-            if len(errors) == errors_before:
+            dir_ok = len(errors) == errors_before
+            if dir_ok:
                 done_dirs.add(rel_dir)
             else:
                 failed_dirs.append(rel_dir)
             await asyncio.to_thread(
                 _save_checkpoint_sync, version, done_dirs, pending + failed_dirs, resume_count, db
             )
-            if files or subdirs:
+            _log_dir = log.info if dir_ok else log.warning
+            if files or subdirs or not dir_ok:
+                _log_dir(
+                    f"[rclone-runner] {'[ok]' if dir_ok else '[err]'} {rel_dir or '/'}: "
+                    f"{dl} baixado(s), {len(skip_entries)} sem alt., "
+                    f"{len(subdirs)} subpasta(s) — {len(pending)} pendente(s)"
+                )
+            _tnow = time.monotonic()
+            if _tnow - t_last_progress >= 60:
+                t_last_progress = _tnow
                 log.info(
-                    f"[rclone-runner] {rel_dir or '/'}: {len(files)} arquivo(s), "
-                    f"{len(subdirs)} subpasta(s) — {len(pending)} pendente(s) na fila"
+                    f"[rclone-runner] Progresso: {processed_total} processado(s), "
+                    f"{downloaded_total} baixado(s), {len(done_dirs)} dir(s) ok, "
+                    f"{len(pending)} pendente(s), {len(failed_dirs)} com erro "
+                    f"— {_tnow - t_start:.0f}s"
                 )
 
         elapsed = time.monotonic() - t_start
 
         if failed_dirs:
+            log.warning(
+                f"[rclone-runner] {len(failed_dirs)} dir(s) com falha serão re-tentados "
+                f"no próximo resume: "
+                + ", ".join((d or "/") for d in failed_dirs[:10])
+                + (f" ... (+{len(failed_dirs) - 10})" if len(failed_dirs) > 10 else "")
+            )
             # Walk percorreu tudo, mas alguns diretórios falharam → versão fica
             # 'incomplete' (resumível); o próximo run re-tenta failed_dirs.
             version.status = "incomplete"
