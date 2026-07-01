@@ -299,6 +299,46 @@ async def test_list_dir_skips_recently_deleted(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stale_checkpoint_with_recently_deleted_is_skipped(session_factory, monkeypatch):
+    """Checkpoint pré-existente com 'Recently Deleted' pendente (ex: de antes
+    do fix de pastas protegidas) é descartado no pop, sem tentar listar."""
+    Session = session_factory
+    jid = _make_job(Session)
+    tree = {
+        "": ([_fe("ok.jpg")], []),
+    }
+    downloaded = []
+    _install_tree(monkeypatch, tree, downloaded)
+
+    async def fake_list(remote_name, remote_path, rel_dir, **kw):
+        if rel_dir == "Recently Deleted":
+            raise AssertionError("não deveria tentar listar Recently Deleted")
+        return tree[rel_dir]
+    monkeypatch.setattr(rr, "list_dir_one_level", fake_list)
+
+    # Cria uma versão incompleta com checkpoint já contendo o pendente "sujo".
+    db = Session()
+    ver = BackupVersion(
+        backup_label="fotos", version_key="2024-01-01T00:00:00",
+        status="incomplete",
+        progress_json=json.dumps({
+            "done_dirs": [], "pending_dirs": ["", "Recently Deleted"], "resume_count": 0,
+        }),
+    )
+    db.add(ver)
+    db.commit()
+    db.close()
+
+    await rr.run_rclone_backup_job(jid)
+
+    db = Session()
+    ver = db.query(BackupVersion).filter_by(backup_label="fotos").one()
+    assert ver.status == "done"
+    assert ver.progress_json is None
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_max_resumes_abandons_version_and_creates_new(session_factory, monkeypatch):
     """Após _MAX_RESUMES resumes sem concluir, versão vira 'failed' e
     o próximo run cria versão nova."""

@@ -911,6 +911,18 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
             if rel_dir in done_dirs:
                 continue
 
+            # Pasta protegida já enfileirada (checkpoint de antes deste filtro,
+            # ou re-enfileirada como failed_dir num resume anterior): descarta
+            # sem tentar listar — list_dir_one_level nunca completaria.
+            _basename = rel_dir.rsplit("/", 1)[-1] if rel_dir else ""
+            if _basename in _ONEDRIVE_PROTECTED_FOLDERS or _basename in _ICLOUD_PHOTOS_PROTECTED_FOLDERS:
+                log.info(f"[rclone] pasta protegida ignorada (fila do checkpoint): {rel_dir!r}")
+                done_dirs.add(rel_dir)
+                await asyncio.to_thread(
+                    _save_checkpoint_sync, version, done_dirs, pending + failed_dirs, resume_count, db
+                )
+                continue
+
             # Falha de listagem de um diretório não aborta o job: registra,
             # marca para re-tentar no resume e segue para os demais.
             try:
