@@ -276,3 +276,39 @@ async def test_run_dispatches_by_backend(session_factory, monkeypatch, cfg, expe
 
     assert calls["walk"] == (1 if expect_walk else 0)
     assert calls["fast"] == (0 if expect_walk else 1)
+
+
+@pytest.mark.asyncio
+async def test_max_resumes_abandons_version_and_creates_new(session_factory, monkeypatch):
+    """Após _MAX_RESUMES resumes sem concluir, versão vira 'failed' e
+    o próximo run cria versão nova."""
+    Session = session_factory
+    monkeypatch.setattr(rr, "datetime", _IncDateTime)
+    jid = _make_job(Session)
+    tree = {
+        "": ([], ["A", "B"]),
+        "A": ([_fe("A/ok.jpg")], []),
+        "B": ([_fe("B/bad.jpg")], []),   # B sempre falha na listagem
+    }
+    downloaded = []
+    _install_tree(monkeypatch, tree, downloaded, list_fail_dirs={"B"})
+
+    # O contador é salvo no FINAL de cada run falhado. A sequência é:
+    #   Run 1 (inicial): salva resume_count=0
+    #   Run 2..N+1 (resumes): carrega N-1, incrementa para N, salva N
+    #   Run N+2 (abandon): carrega _MAX_RESUMES → check >= _MAX_RESUMES → abandon + nova versão
+    # Total necessário: _MAX_RESUMES + 2
+    for _ in range(rr._MAX_RESUMES + 2):
+        await rr.run_rclone_backup_job(jid)
+
+    db = Session()
+    vers = db.query(BackupVersion).filter_by(backup_label="fotos").order_by(
+        BackupVersion.id).all()
+
+    # Versão original abandonada (failed, checkpoint limpo)
+    assert vers[0].status == "failed"
+    assert vers[0].progress_json is None
+    # Nova versão foi criada no último run
+    assert len(vers) == 2
+    assert vers[1].status == "incomplete"   # B ainda falha, mas é um novo início
+    db.close()

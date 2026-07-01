@@ -70,6 +70,7 @@ _INGEST_POLL    = 2.0         # segundos entre varreduras do ingester
 # Backends que exigem o walk incremental (não conseguem listagem recursiva
 # eficiente). Critério atual: serviço de fotos do iCloud (iclouddrive/photos).
 _WALK_SERVICES = {"photos"}
+_MAX_RESUMES   = 5   # versão incompleta é abandonada após este número de resumes falhados
 
 
 def _fmt_size(n: int) -> str:
@@ -498,22 +499,29 @@ async def _download_and_ingest_dir(
     return downloaded, bytes_dl
 
 
-def _load_checkpoint(version) -> tuple[set[str], list[str]]:
-    """Lê (done_dirs, pending_dirs) do progress_json da versão."""
+def _load_checkpoint(version) -> tuple[set[str], list[str], int]:
+    """Lê (done_dirs, pending_dirs, resume_count) do progress_json da versão."""
     if not version.progress_json:
-        return set(), []
+        return set(), [], 0
     try:
         data = json.loads(version.progress_json)
-        return set(data.get("done_dirs", [])), list(data.get("pending_dirs", []))
+        return (
+            set(data.get("done_dirs", [])),
+            list(data.get("pending_dirs", [])),
+            int(data.get("resume_count", 0)),
+        )
     except Exception:
-        return set(), []
+        return set(), [], 0
 
 
-def _save_checkpoint_sync(version, done_dirs: set[str], pending_dirs: list[str], db) -> None:
+def _save_checkpoint_sync(
+    version, done_dirs: set[str], pending_dirs: list[str], resume_count: int, db
+) -> None:
     """Persiste o checkpoint do walk no progress_json da versão."""
     version.progress_json = json.dumps({
         "done_dirs": sorted(done_dirs),
         "pending_dirs": pending_dirs,
+        "resume_count": resume_count,
     })
     db.commit()
 
@@ -803,13 +811,34 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
         )
 
         if resume_version is not None:
-            version = resume_version
-            version.status = "running"
-            db.commit()
-            log.info(
-                f"[rclone-runner] Retomando versão {version.version_key} "
-                f"(checkpoint encontrado)"
-            )
+            done_dirs, pending, resume_count = _load_checkpoint(resume_version)
+
+            if resume_count >= _MAX_RESUMES:
+                # Muitos resumes sem concluir — abandona esta versão e cria nova.
+                resume_version.status = "failed"
+                resume_version.progress_json = None   # sai do pool de resumáveis
+                resume_version.finished_at = datetime.now().astimezone().replace(tzinfo=None)
+                db.commit()
+                log.warning(
+                    f"[rclone-runner] Versão {resume_version.version_key} abandonada após "
+                    f"{resume_count} resumes sem concluir — criando versão nova"
+                )
+                version_key = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S")
+                version = BackupVersion(
+                    backup_label=job.target_label, version_key=version_key, status="running",
+                )
+                db.add(version)
+                db.commit()
+                done_dirs, pending, resume_count = set(), [""], 0
+            else:
+                version = resume_version
+                resume_count += 1
+                version.status = "running"
+                db.commit()
+                log.info(
+                    f"[rclone-runner] Retomando versão {version.version_key} "
+                    f"(resume {resume_count}/{_MAX_RESUMES})"
+                )
         else:
             version_key = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S")
             version = BackupVersion(
@@ -818,6 +847,7 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
             )
             db.add(version)
             db.commit()
+            done_dirs, pending, resume_count = set(), [""], 0
         db.refresh(version)
 
         enc_key = storage.encryption_key if storage.ENCRYPTION_ENABLED else None
@@ -850,10 +880,8 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
             .all()
         }
 
-        # Checkpoint do walk: diretórios concluídos e fronteira pendente.
-        done_dirs, pending = _load_checkpoint(version)
-        if not done_dirs and not pending and not this_version_paths:
-            pending = [""]   # início: raiz do remote_path
+        if not pending:
+            pending = [""]   # safety: checkpoint vazio — recomeça da raiz
         discovered: set[str] = done_dirs | set(pending)
         if this_version_paths:
             log.info(
@@ -887,7 +915,7 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                 if rel_dir not in failed_dirs:
                     failed_dirs.append(rel_dir)
                 await asyncio.to_thread(
-                    _save_checkpoint_sync, version, done_dirs, pending + failed_dirs, db
+                    _save_checkpoint_sync, version, done_dirs, pending + failed_dirs, resume_count, db
                 )
                 continue
 
@@ -947,7 +975,7 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
             else:
                 failed_dirs.append(rel_dir)
             await asyncio.to_thread(
-                _save_checkpoint_sync, version, done_dirs, pending + failed_dirs, db
+                _save_checkpoint_sync, version, done_dirs, pending + failed_dirs, resume_count, db
             )
             if files or subdirs:
                 log.info(
@@ -962,7 +990,7 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
             # 'incomplete' (resumível); o próximo run re-tenta failed_dirs.
             version.status = "incomplete"
             await asyncio.to_thread(
-                _save_checkpoint_sync, version, done_dirs, failed_dirs, db
+                _save_checkpoint_sync, version, done_dirs, failed_dirs, resume_count, db
             )
         else:
             version.status = "failed" if (processed_total == 0 and errors) else "done"
