@@ -912,10 +912,17 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
             f"[rclone-runner] Walk iniciado: {job.remote_name}:{job.remote_path or '/'} "
             f"— {len(pending)} dir(s) na fila, {len(done_dirs)} já concluído(s)"
         )
-        async def _advance_to_next_listable() -> str | None:
-            """Avança na fila até achar um dir que precisa ser listado,
-            pulando os já concluídos e as pastas protegidas (persistindo o
-            checkpoint nesse caso). Retorna None quando a fila acaba."""
+        # [EXPERIMENTO] producer/consumer totalmente desacoplados por fila sem
+        # limite: uma task lista diretório por diretório o mais rápido
+        # possível, outra consome a fila e baixa/registra/faz checkpoint.
+        # Só o consumer toca o banco (db/version) — o producer só mexe em
+        # estruturas Python em memória (pending/discovered/done_dirs/
+        # failed_dirs), evitando duas coroutines usando a mesma Session do
+        # SQLAlchemy ao mesmo tempo.
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def _pop_next_listable() -> str | None:
+            """Só mexe em estruturas em memória — nunca toca no banco."""
             while pending:
                 rel_dir = pending.pop(0)
                 if rel_dir in done_dirs:
@@ -923,60 +930,46 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                 basename = rel_dir.rsplit("/", 1)[-1] if rel_dir else ""
                 if basename in _ONEDRIVE_PROTECTED_FOLDERS or basename in _ICLOUD_PHOTOS_PROTECTED_FOLDERS:
                     log.info(f"[rclone] pasta protegida ignorada (fila do checkpoint): {rel_dir!r}")
-                    done_dirs.add(rel_dir)
-                    await asyncio.to_thread(
-                        _save_checkpoint_sync, version, done_dirs, pending + failed_dirs, resume_count, db
-                    )
+                    done_dirs.add(rel_dir)   # persistido pelo consumer no próximo save
                     continue
                 return rel_dir
             return None
 
-        # Pipeline de profundidade 1: a listagem do próximo dir é disparada
-        # antes do download+ingest do dir atual, então lsjson (rede) e
-        # rclone copy (rede) rodam em paralelo em vez de sequencialmente.
-        next_dir = await _advance_to_next_listable()
-        next_listing = (
-            asyncio.create_task(list_dir_one_level(job.remote_name, job.remote_path, next_dir))
-            if next_dir is not None else None
-        )
-
-        try:
-            while next_dir is not None:
-                rel_dir = next_dir
-
-                # Falha de listagem de um diretório não aborta o job: registra,
-                # marca para re-tentar no resume e segue para os demais.
+        async def _lister_loop() -> None:
+            """Producer: lista diretório por diretório sem esperar nenhum
+            download — enfileira pro consumer assim que cada um é listado."""
+            while True:
+                rel_dir = _pop_next_listable()
+                if rel_dir is None:
+                    break
                 try:
-                    files, subdirs = await next_listing
-                    list_ok = True
+                    files, subdirs = await list_dir_one_level(
+                        job.remote_name, job.remote_path, rel_dir
+                    )
                 except Exception as e:
                     errors.append(f"{rel_dir or '/'} (listagem): {e}")
                     log.error(f"[rclone-runner] Erro ao listar {rel_dir or '/'}: {e}")
                     if rel_dir not in failed_dirs:
-                        failed_dirs.append(rel_dir)
-                    await asyncio.to_thread(
-                        _save_checkpoint_sync, version, done_dirs, pending + failed_dirs, resume_count, db
-                    )
-                    files, subdirs = [], []
-                    list_ok = False
+                        failed_dirs.append(rel_dir)   # persistido pelo consumer
+                    continue
+                for sub in subdirs:
+                    if sub not in discovered:
+                        discovered.add(sub)
+                        pending.append(sub)
+                await queue.put((rel_dir, files, subdirs))
+            await queue.put(None)   # sentinela — sinaliza fim pro consumer
 
-                if list_ok:
-                    # Enfileira novos subdiretórios (sem duplicar entre resumes).
-                    for sub in subdirs:
-                        if sub not in discovered:
-                            discovered.add(sub)
-                            pending.append(sub)
-
-                # Dispara a listagem do PRÓXIMO dir agora, antes de baixar o
-                # atual — é isso que faz o overlap acontecer.
-                next_dir = await _advance_to_next_listable()
-                next_listing = (
-                    asyncio.create_task(list_dir_one_level(job.remote_name, job.remote_path, next_dir))
-                    if next_dir is not None else None
-                )
-
-                if not list_ok:
-                    continue   # nada a baixar deste dir — segue pro já prefetchado
+        async def _downloader_loop() -> None:
+            """Consumer: único dono da sessão do banco — baixa, registra,
+            faz checkpoint. Corpo igual ao que existia por diretório antes
+            do experimento, só que agora dirigido pela fila."""
+            nonlocal skipped_total, processed_total, downloaded_total
+            nonlocal bytes_total, t_last_progress
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                rel_dir, files, subdirs = item
 
                 # Particiona arquivos do diretório.
                 changed: list[RcloneFileEntry] = []
@@ -1010,7 +1003,7 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                         db.rollback()
 
                 # Baixa e ingere os novos/alterados. Roda em paralelo com a
-                # listagem do próximo dir, disparada logo acima.
+                # listagem dos próximos dirs, feita pelo producer.
                 dl, by = await _download_and_ingest_dir(
                     rel_dir, changed, job.remote_name, job.remote_path,
                     version.id, db, enc_key, errors,
@@ -1029,8 +1022,13 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                     done_dirs.add(rel_dir)
                 else:
                     failed_dirs.append(rel_dir)
+                # Snapshot de done_dirs: _save_checkpoint_sync roda numa thread
+                # de verdade (to_thread) e itera esse set (sorted()) enquanto o
+                # producer pode estar mutando o done_dirs "ao vivo" na main
+                # thread (skip de pasta protegida) — sem cópia isso é uma
+                # corrida real entre threads, não só entre coroutines.
                 await asyncio.to_thread(
-                    _save_checkpoint_sync, version, done_dirs, pending + failed_dirs, resume_count, db
+                    _save_checkpoint_sync, version, set(done_dirs), pending + failed_dirs, resume_count, db
                 )
                 _log_dir = log.info if dir_ok else log.warning
                 if files or subdirs or not dir_ok:
@@ -1048,11 +1046,10 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                         f"{len(pending)} pendente(s), {len(failed_dirs)} com erro "
                         f"— {_tnow - t_start:.0f}s"
                     )
-        finally:
-            # Evita task órfã se o loop sair por exceção antes de consumir o
-            # prefetch já disparado.
-            if next_listing is not None and not next_listing.done():
-                next_listing.cancel()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(_lister_loop())
+            tg.create_task(_downloader_loop())
 
         elapsed = time.monotonic() - t_start
 
