@@ -3,6 +3,7 @@
 Mocka a listagem (list_dir_one_level) e o download (_download_and_ingest_dir)
 para exercitar só a lógica de walk/checkpoint sem rclone nem rede.
 """
+import asyncio
 import datetime as _dt
 import json
 
@@ -403,3 +404,54 @@ async def test_max_resumes_abandons_version_and_creates_new(session_factory, mon
     assert len(vers) == 2
     assert vers[1].status == "incomplete"   # B ainda falha, mas é um novo início
     db.close()
+
+
+@pytest.mark.asyncio
+async def test_walk_prefetches_next_dir_listing_during_download(session_factory, monkeypatch):
+    """A listagem do próximo dir começa antes do download do dir atual
+    terminar — comprova o pipeline de profundidade 1."""
+    Session = session_factory
+    jid = _make_job(Session)
+    tree = {
+        "": ([], ["A", "B"]),
+        "A": ([_fe("A/ok.jpg")], []),
+        "B": ([_fe("B/ok.jpg")], []),
+    }
+    events: list[str] = []
+    download_gate = asyncio.Event()
+
+    async def fake_list(remote_name, remote_path, rel_dir, **kw):
+        events.append(f"list-start:{rel_dir}")
+        return tree[rel_dir]
+
+    async def fake_download(rel_dir, changed, remote_name, remote_path, version_id, db, enc_key, errors):
+        events.append(f"download-start:{rel_dir}")
+        if rel_dir == "A":
+            # Segura o download de A até a listagem de B já ter começado.
+            await asyncio.wait_for(download_gate.wait(), timeout=1)
+        dl = 0
+        for e in changed:
+            rr._register_version_file_sync(version_id, e, "sha_" + e.path, db)
+            dl += 1
+        return dl, sum(e.size for e in changed)
+
+    async def fake_cfg(remote_name):
+        return {"type": "iclouddrive", "service": "photos"}
+    monkeypatch.setattr(rr, "_remote_config", fake_cfg)
+    monkeypatch.setattr(rr, "list_dir_one_level", fake_list)
+    monkeypatch.setattr(rr, "_download_and_ingest_dir", fake_download)
+
+    async def _release_gate_soon():
+        # dá tempo do prefetch de B disparar antes de liberar o download de A
+        await asyncio.sleep(0.05)
+        download_gate.set()
+    asyncio.create_task(_release_gate_soon())
+
+    await rr.run_rclone_backup_job(jid)
+
+    # A listagem de B deve ter começado ANTES do download de A ser liberado
+    # (ou seja, enquanto o download de A ainda estava em andamento).
+    assert events.index("list-start:B") < events.index("download-start:B")
+    # prova real do pipeline: list-start:B aconteceu durante download-start:A,
+    # não depois dele terminar.
+    assert "list-start:B" in events[events.index("download-start:A"):]

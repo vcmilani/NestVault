@@ -912,114 +912,147 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
             f"[rclone-runner] Walk iniciado: {job.remote_name}:{job.remote_path or '/'} "
             f"— {len(pending)} dir(s) na fila, {len(done_dirs)} já concluído(s)"
         )
-        while pending:
-            rel_dir = pending.pop(0)
-            if rel_dir in done_dirs:
-                continue
+        async def _advance_to_next_listable() -> str | None:
+            """Avança na fila até achar um dir que precisa ser listado,
+            pulando os já concluídos e as pastas protegidas (persistindo o
+            checkpoint nesse caso). Retorna None quando a fila acaba."""
+            while pending:
+                rel_dir = pending.pop(0)
+                if rel_dir in done_dirs:
+                    continue
+                basename = rel_dir.rsplit("/", 1)[-1] if rel_dir else ""
+                if basename in _ONEDRIVE_PROTECTED_FOLDERS or basename in _ICLOUD_PHOTOS_PROTECTED_FOLDERS:
+                    log.info(f"[rclone] pasta protegida ignorada (fila do checkpoint): {rel_dir!r}")
+                    done_dirs.add(rel_dir)
+                    await asyncio.to_thread(
+                        _save_checkpoint_sync, version, done_dirs, pending + failed_dirs, resume_count, db
+                    )
+                    continue
+                return rel_dir
+            return None
 
-            # Pasta protegida já enfileirada (checkpoint de antes deste filtro,
-            # ou re-enfileirada como failed_dir num resume anterior): descarta
-            # sem tentar listar — list_dir_one_level nunca completaria.
-            _basename = rel_dir.rsplit("/", 1)[-1] if rel_dir else ""
-            if _basename in _ONEDRIVE_PROTECTED_FOLDERS or _basename in _ICLOUD_PHOTOS_PROTECTED_FOLDERS:
-                log.info(f"[rclone] pasta protegida ignorada (fila do checkpoint): {rel_dir!r}")
-                done_dirs.add(rel_dir)
-                await asyncio.to_thread(
-                    _save_checkpoint_sync, version, done_dirs, pending + failed_dirs, resume_count, db
-                )
-                continue
+        # Pipeline de profundidade 1: a listagem do próximo dir é disparada
+        # antes do download+ingest do dir atual, então lsjson (rede) e
+        # rclone copy (rede) rodam em paralelo em vez de sequencialmente.
+        next_dir = await _advance_to_next_listable()
+        next_listing = (
+            asyncio.create_task(list_dir_one_level(job.remote_name, job.remote_path, next_dir))
+            if next_dir is not None else None
+        )
 
-            # Falha de listagem de um diretório não aborta o job: registra,
-            # marca para re-tentar no resume e segue para os demais.
-            try:
-                files, subdirs = await list_dir_one_level(
-                    job.remote_name, job.remote_path, rel_dir
+        try:
+            while next_dir is not None:
+                rel_dir = next_dir
+
+                # Falha de listagem de um diretório não aborta o job: registra,
+                # marca para re-tentar no resume e segue para os demais.
+                try:
+                    files, subdirs = await next_listing
+                    list_ok = True
+                except Exception as e:
+                    errors.append(f"{rel_dir or '/'} (listagem): {e}")
+                    log.error(f"[rclone-runner] Erro ao listar {rel_dir or '/'}: {e}")
+                    if rel_dir not in failed_dirs:
+                        failed_dirs.append(rel_dir)
+                    await asyncio.to_thread(
+                        _save_checkpoint_sync, version, done_dirs, pending + failed_dirs, resume_count, db
+                    )
+                    files, subdirs = [], []
+                    list_ok = False
+
+                if list_ok:
+                    # Enfileira novos subdiretórios (sem duplicar entre resumes).
+                    for sub in subdirs:
+                        if sub not in discovered:
+                            discovered.add(sub)
+                            pending.append(sub)
+
+                # Dispara a listagem do PRÓXIMO dir agora, antes de baixar o
+                # atual — é isso que faz o overlap acontecer.
+                next_dir = await _advance_to_next_listable()
+                next_listing = (
+                    asyncio.create_task(list_dir_one_level(job.remote_name, job.remote_path, next_dir))
+                    if next_dir is not None else None
                 )
-            except Exception as e:
-                errors.append(f"{rel_dir or '/'} (listagem): {e}")
-                log.error(f"[rclone-runner] Erro ao listar {rel_dir or '/'}: {e}")
-                if rel_dir not in failed_dirs:
+
+                if not list_ok:
+                    continue   # nada a baixar deste dir — segue pro já prefetchado
+
+                # Particiona arquivos do diretório.
+                changed: list[RcloneFileEntry] = []
+                skip_entries: list[RcloneFileEntry] = []
+                for entry in files:
+                    if entry.path in this_version_paths:
+                        skipped_total   += 1
+                        processed_total += 1
+                        continue
+                    prev = prev_files.get(entry.path)
+                    if prev and prev[0] == entry.mtime:
+                        skip_entries.append(entry)
+                    else:
+                        changed.append(entry)
+
+                errors_before = len(errors)
+
+                # Registra os "sem alteração" (idempotente) na versão atual.
+                for entry in skip_entries:
+                    try:
+                        await asyncio.to_thread(
+                            _register_version_file_sync,
+                            version.id, entry, prev_files[entry.path][1], db,
+                        )
+                        skipped_total   += 1
+                        processed_total += 1
+                        this_version_paths.add(entry.path)
+                    except Exception as e:
+                        errors.append(f"{entry.path}: {e}")
+                        log.error(f"[rclone-runner] Erro ao registrar skip {entry.path}: {e}")
+                        db.rollback()
+
+                # Baixa e ingere os novos/alterados. Roda em paralelo com a
+                # listagem do próximo dir, disparada logo acima.
+                dl, by = await _download_and_ingest_dir(
+                    rel_dir, changed, job.remote_name, job.remote_path,
+                    version.id, db, enc_key, errors,
+                )
+                downloaded_total += dl
+                bytes_total      += by
+                processed_total  += dl
+                for entry in changed:
+                    this_version_paths.add(entry.path)
+
+                # Checkpoint: marca o diretório como concluído só se não houve
+                # novos erros. Se houve, o diretório vai para failed_dirs e é
+                # persistido na fronteira pendente para retry no resume.
+                dir_ok = len(errors) == errors_before
+                if dir_ok:
+                    done_dirs.add(rel_dir)
+                else:
                     failed_dirs.append(rel_dir)
                 await asyncio.to_thread(
                     _save_checkpoint_sync, version, done_dirs, pending + failed_dirs, resume_count, db
                 )
-                continue
-
-            # Enfileira novos subdiretórios (sem duplicar entre resumes).
-            for sub in subdirs:
-                if sub not in discovered:
-                    discovered.add(sub)
-                    pending.append(sub)
-
-            # Particiona arquivos do diretório.
-            changed: list[RcloneFileEntry] = []
-            skip_entries: list[RcloneFileEntry] = []
-            for entry in files:
-                if entry.path in this_version_paths:
-                    skipped_total   += 1
-                    processed_total += 1
-                    continue
-                prev = prev_files.get(entry.path)
-                if prev and prev[0] == entry.mtime:
-                    skip_entries.append(entry)
-                else:
-                    changed.append(entry)
-
-            errors_before = len(errors)
-
-            # Registra os "sem alteração" (idempotente) na versão atual.
-            for entry in skip_entries:
-                try:
-                    await asyncio.to_thread(
-                        _register_version_file_sync,
-                        version.id, entry, prev_files[entry.path][1], db,
+                _log_dir = log.info if dir_ok else log.warning
+                if files or subdirs or not dir_ok:
+                    _log_dir(
+                        f"[rclone-runner] {'[ok]' if dir_ok else '[err]'} {rel_dir or '/'}: "
+                        f"{dl} baixado(s), {len(skip_entries)} sem alt., "
+                        f"{len(subdirs)} subpasta(s) — {len(pending)} pendente(s)"
                     )
-                    skipped_total   += 1
-                    processed_total += 1
-                    this_version_paths.add(entry.path)
-                except Exception as e:
-                    errors.append(f"{entry.path}: {e}")
-                    log.error(f"[rclone-runner] Erro ao registrar skip {entry.path}: {e}")
-                    db.rollback()
-
-            # Baixa e ingere os novos/alterados.
-            dl, by = await _download_and_ingest_dir(
-                rel_dir, changed, job.remote_name, job.remote_path,
-                version.id, db, enc_key, errors,
-            )
-            downloaded_total += dl
-            bytes_total      += by
-            processed_total  += dl
-            for entry in changed:
-                this_version_paths.add(entry.path)
-
-            # Checkpoint: marca o diretório como concluído só se não houve novos
-            # erros. Se houve, o diretório vai para failed_dirs e é persistido na
-            # fronteira pendente para ser re-tentado no próximo run (resume).
-            dir_ok = len(errors) == errors_before
-            if dir_ok:
-                done_dirs.add(rel_dir)
-            else:
-                failed_dirs.append(rel_dir)
-            await asyncio.to_thread(
-                _save_checkpoint_sync, version, done_dirs, pending + failed_dirs, resume_count, db
-            )
-            _log_dir = log.info if dir_ok else log.warning
-            if files or subdirs or not dir_ok:
-                _log_dir(
-                    f"[rclone-runner] {'[ok]' if dir_ok else '[err]'} {rel_dir or '/'}: "
-                    f"{dl} baixado(s), {len(skip_entries)} sem alt., "
-                    f"{len(subdirs)} subpasta(s) — {len(pending)} pendente(s)"
-                )
-            _tnow = time.monotonic()
-            if _tnow - t_last_progress >= 60:
-                t_last_progress = _tnow
-                log.info(
-                    f"[rclone-runner] Progresso: {processed_total} processado(s), "
-                    f"{downloaded_total} baixado(s), {len(done_dirs)} dir(s) ok, "
-                    f"{len(pending)} pendente(s), {len(failed_dirs)} com erro "
-                    f"— {_tnow - t_start:.0f}s"
-                )
+                _tnow = time.monotonic()
+                if _tnow - t_last_progress >= 60:
+                    t_last_progress = _tnow
+                    log.info(
+                        f"[rclone-runner] Progresso: {processed_total} processado(s), "
+                        f"{downloaded_total} baixado(s), {len(done_dirs)} dir(s) ok, "
+                        f"{len(pending)} pendente(s), {len(failed_dirs)} com erro "
+                        f"— {_tnow - t_start:.0f}s"
+                    )
+        finally:
+            # Evita task órfã se o loop sair por exceção antes de consumir o
+            # prefetch já disparado.
+            if next_listing is not None and not next_listing.done():
+                next_listing.cancel()
 
         elapsed = time.monotonic() - t_start
 
