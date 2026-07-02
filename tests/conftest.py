@@ -54,6 +54,10 @@ def client(tmp_vol, monkeypatch):
     monkeypatch.setattr(m, "STORAGE_DIR", tmp_vol)
     monkeypatch.setattr(storage_mod, "STORAGE_VOLUMES", [tmp_vol])
     monkeypatch.setattr(storage_mod, "STORAGE_DIR", tmp_vol)
+    # Background tasks (_bg_*) abrem sua propria sessao via SessionLocal() em vez de
+    # Depends(get_db) — aponta para o mesmo engine in-memory do teste, senao elas
+    # operariam sobre o banco real (./backup.db) e pareceriam no-op nos testes.
+    monkeypatch.setattr(m, "SessionLocal", Session)
 
     def override_get_db():
         db = Session()
@@ -84,6 +88,7 @@ def auth_client(tmp_vol, monkeypatch):
     monkeypatch.setattr(auth_mod, "AUTH_ENABLED", True)
     monkeypatch.setattr(m, "API_KEY", "testkey")
     monkeypatch.setattr(m, "AUTH_ENABLED", True)
+    monkeypatch.setattr(m, "SessionLocal", Session)
 
     def override_get_db():
         db = Session()

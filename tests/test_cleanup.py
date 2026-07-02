@@ -93,9 +93,7 @@ def test_cleanup_orphans_removes_unreferenced(client, tmp_vol):
 
     r = client.post("/maintenance/cleanup-orphans")
     assert r.status_code == 200
-    data = r.json()
-    assert data["files_removed"] == 1
-    assert data["bytes_freed"] == len(b"data")
+    assert r.json()["scheduled"] is True
 
     dest = tmp_vol / "_content" / sha[:2] / sha
     assert not dest.exists()
@@ -107,15 +105,19 @@ def test_cleanup_orphans_nothing_to_remove(client):
     upload_file(client, "b1", "v1", path="/file.txt", content=b"data")
 
     r = client.post("/maintenance/cleanup-orphans")
-    assert r.json()["files_removed"] == 0
+    assert r.json()["scheduled"] is True
 
 
-def test_cleanup_orphans_bytes_freed(client):
+def test_cleanup_orphans_bytes_freed(client, tmp_vol):
     make_backup(client, "b1")
     make_version(client, "b1", "v1")
     content = b"x" * 200
-    upload_file(client, "b1", "v1", path="/big.txt", content=content)
+    up = upload_file(client, "b1", "v1", path="/big.txt", content=content)
+    sha = up["sha256"]
     client.delete("/backups/b1/versions/v1")
 
     r = client.post("/maintenance/cleanup-orphans")
-    assert r.json()["bytes_freed"] == 200
+    assert r.json()["scheduled"] is True
+
+    dest = tmp_vol / "_content" / sha[:2] / sha
+    assert not dest.exists()

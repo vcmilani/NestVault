@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v7.6.0`
+# 🗄️ NestVault  `v7.7.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -6,6 +6,8 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v7.7.0** — `cleanup-orphans` (`POST /maintenance/cleanup-orphans`) convertido para background com progresso em tempo real, no mesmo padrão já usado por `encrypt-existing`/`migrate-disk`: o request retorna imediatamente (`{"scheduled": true}`) em vez de bloquear até toda a limpeza terminar, e o job aparece como "em execução" na tela de Atividades desde o início, com progresso `X / Y arquivo(s) (Z%)`, não só o resultado final. As chamadas automáticas de limpeza de órfãos disparadas após a exclusão de um label também passam a registrar esse progresso.
+>
 > **v7.6.0** — backup incremental e resumível para iCloud Photos: walk descendente diretório a diretório com checkpoint em `BackupVersion.progress_json` — retomadas continuam na mesma versão a partir de onde pararam, sem re-baixar o já processado. Bibliotecas de 5k–50k fotos que não completavam listagem recursiva nem em 4 horas agora fazem backup progressivo sem perder progresso em caso de falha. Para os demais backends (OneDrive, Google Drive, iCloud Drive normal), o caminho rápido original (uma listagem recursiva única + download em lote na raiz) é preservado; o dispatch é automático via `rclone config dump` — `service=photos` aciona o walk, todo o resto usa o caminho rápido. Corrigido: download agora usa `rclone copy --files-from` em vez de `rclone cat`, resolvendo "directory not found" para nomes unicode/acentuados em todos os backends. Corrigido: dangling shortcuts do Google Drive não causam mais abort do job (`--drive-skip-dangling-shortcuts`). Corrigido: diretórios de staging órfãos (`_rclone_stage_*`) são removidos no startup e na limpeza noturna. Corrigido: path traversal e deadlock no shutdown.
 >
 > **v7.5.0** — `STORAGE_FALLBACK_THRESHOLD_GB` agora é respeitado como piso mínimo de espaço por disco. Quando todos os volumes ficam abaixo do limiar, o sistema aciona automaticamente o cleanup de versões antigas antes de continuar escrevendo; apenas se o cleanup não liberar espaço suficiente é que usa o volume com mais espaço livre como último recurso (log CRITICAL). Alerta via Telegram enviado no momento em que o limiar é ultrapassado, se `TELEGRAM_BOT_TOKEN` e `TELEGRAM_CHAT_ID` estiverem configurados.
