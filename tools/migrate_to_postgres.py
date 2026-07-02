@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-migrate_to_postgres.py — NestVault v7.1
+migrate_to_postgres.py — NestVault v7.6
 Migra todos os dados de um banco SQLite para PostgreSQL.
 
 Uso:
@@ -27,11 +27,10 @@ from sqlalchemy.pool import NullPool
 TABLES_IN_ORDER = [
     "backup_ids",
     "file_contents",
-    "cloud_credentials",
     "rclone_backup_jobs",
-    "cloud_backup_jobs",
     "maintenance_jobs",
     "ssd_cache_pending_moves",
+    "disk_snapshots",
     "backup_versions",
     "file_content_copies",
     "version_files",
@@ -233,8 +232,8 @@ def _migrate_table(src_conn, dst_conn, table: str, bool_cols: set[str]) -> tuple
 
 TABLES_WITH_INT_PK = [
     "backup_ids", "backup_versions", "file_content_copies",
-    "version_files", "cloud_credentials", "cloud_backup_jobs",
-    "maintenance_jobs", "rclone_backup_jobs",
+    "version_files", "maintenance_jobs", "rclone_backup_jobs",
+    "disk_snapshots",
 ]
 
 
