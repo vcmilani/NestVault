@@ -69,6 +69,8 @@ _BATCH_MAX_BYTES = 3 * 1024 ** 3   # 3 GB
 # caminho rápido (_download_batch/_bulk_copy) — agrupa até _BATCH_MAX_FILES
 # arquivos de QUALQUER diretório num único rclone copy, em vez de 1 processo
 # rclone por diretório pequeno.
+_BATCH_IDLE_FLUSH   = 5.0    # segundos sem novo item na fila -> baixa o lote parcial
+_CHECKPOINT_INTERVAL = 15.0  # segundos entre saves de checkpoint (era por contagem de itens)
 
 # Backends que exigem o walk incremental (não conseguem listagem recursiva
 # eficiente). Critério atual: serviço de fotos do iCloud (iclouddrive/photos).
@@ -411,7 +413,10 @@ def _save_checkpoint_sync(
 ) -> None:
     """Persiste o checkpoint do walk no progress_json da versão."""
     version.progress_json = json.dumps({
-        "done_dirs": sorted(done_dirs),
+        # Ordem não importa — _load_checkpoint carrega como set(). sorted()
+        # custava caro repetido a cada save numa biblioteca com milhares de
+        # diretórios (done_dirs cresce ao longo do run).
+        "done_dirs": list(done_dirs),
         "pending_dirs": pending_dirs,
         "resume_count": resume_count,
     })
@@ -887,7 +892,12 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
             """Agrupa até _BATCH_MAX_FILES/_BATCH_MAX_BYTES arquivos — de
             QUALQUER diretório — e baixa via _download_batch (reaproveitado
             do caminho rápido, sem alteração nenhuma). 'skip' passa direto
-            pro consumer, sem download."""
+            pro consumer, sem download.
+
+            Sem timeout de inatividade, o flush só dispara ao encher o lote
+            ou no fim do walk inteiro — como a listagem do iCloud Photos é
+            lenta/rate-limited, isso deixava arquivos já descobertos parados
+            esperando em vez de baixar continuamente."""
             batch: list[RcloneFileEntry] = []
             batch_bytes = 0
             total_dl = 0
@@ -904,7 +914,11 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                 batch, batch_bytes = [], 0
 
             while True:
-                item = await file_queue.get()
+                try:
+                    item = await asyncio.wait_for(file_queue.get(), timeout=_BATCH_IDLE_FLUSH)
+                except TimeoutError:
+                    await _flush()   # lister lento — baixa o parcial em vez de esperar
+                    continue
                 if item is None:
                     break
                 kind, rel_dir, entry = item
@@ -926,7 +940,7 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
             chamada de rclone) e faz checkpoint periódico."""
             nonlocal skipped_total, processed_total, downloaded_total
             nonlocal bytes_total, t_last_progress
-            items_since_checkpoint = 0
+            t_last_checkpoint = t_start
 
             def _mark_dir_progress(rel_dir: str) -> None:
                 dir_done_count[rel_dir] = dir_done_count.get(rel_dir, 0) + 1
@@ -937,7 +951,6 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                 item = await process_queue.get()
                 if item is None:
                     break
-                items_since_checkpoint += 1
 
                 if item[0] == "skip":
                     _, rel_dir, entry = item
@@ -974,16 +987,17 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                         log.error(f"[rclone-runner] Erro ao processar {entry.path}: {e}")
                         db.rollback()
 
-                # Checkpoint a cada 100 itens (não mais a cada arquivo — a
-                # fila anda rápido agora, commit por item viraria gargalo).
-                if items_since_checkpoint >= 100:
-                    items_since_checkpoint = 0
+                _tnow = time.monotonic()
+                # Checkpoint por tempo, não por contagem de itens — desacopla
+                # o custo do save da vazão da fila (que agora anda rápido e
+                # de forma irregular, em rajadas de lote).
+                if _tnow - t_last_checkpoint >= _CHECKPOINT_INTERVAL:
+                    t_last_checkpoint = _tnow
                     await asyncio.to_thread(
                         _save_checkpoint_sync, version, set(done_dirs),
                         pending + failed_dirs, resume_count, db,
                     )
 
-                _tnow = time.monotonic()
                 if _tnow - t_last_progress >= 60:
                     t_last_progress = _tnow
                     log.info(
