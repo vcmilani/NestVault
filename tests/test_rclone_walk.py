@@ -32,11 +32,11 @@ def session_factory(monkeypatch):
     return Session
 
 
-def _make_job(Session, remote_path=""):
+def _make_job(Session, remote_path="", strategy="auto"):
     db = Session()
     job = RcloneBackupJob(
         remote_name="victor_icloud_photos", remote_path=remote_path,
-        display_name="Fotos", target_label="fotos",
+        display_name="Fotos", target_label="fotos", strategy=strategy,
     )
     db.add(job)
     db.commit()
@@ -257,6 +257,37 @@ async def test_remote_config_parses_dump(monkeypatch):
 async def test_run_dispatches_by_backend(session_factory, monkeypatch, cfg, expect_walk):
     Session = session_factory
     jid = _make_job(Session)
+    calls = {"walk": 0, "fast": 0}
+
+    async def fake_cfg(remote_name):
+        return cfg
+
+    async def spy_walk(job, db):
+        calls["walk"] += 1
+
+    async def spy_fast(job, db):
+        calls["fast"] += 1
+
+    monkeypatch.setattr(rr, "_remote_config", fake_cfg)
+    monkeypatch.setattr(rr, "_run_walk_strategy", spy_walk)
+    monkeypatch.setattr(rr, "_run_fast_strategy", spy_fast)
+
+    await rr.run_rclone_backup_job(jid)
+
+    assert calls["walk"] == (1 if expect_walk else 0)
+    assert calls["fast"] == (0 if expect_walk else 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("strategy,cfg,expect_walk", [
+    ("auto", {"type": "iclouddrive", "service": "photos"}, True),
+    ("auto", {"type": "onedrive"}, False),
+    ("walk", {"type": "onedrive"}, True),      # força walk mesmo em backend "rápido"
+    ("fast", {"type": "iclouddrive", "service": "photos"}, False),  # força fast mesmo no iCloud Photos
+])
+async def test_strategy_override_dispatch(session_factory, monkeypatch, strategy, cfg, expect_walk):
+    Session = session_factory
+    jid = _make_job(Session, strategy=strategy)
     calls = {"walk": 0, "fast": 0}
 
     async def fake_cfg(remote_name):

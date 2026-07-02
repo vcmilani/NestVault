@@ -3,7 +3,11 @@
 Diferença em relação ao runner.py padrão: não há tokens OAuth — o rclone
 gerencia autenticação internamente via ~/.config/rclone/rclone.conf.
 
-A estratégia é escolhida por backend (`run_rclone_backup_job` → `_uses_walk`):
+A estratégia é escolhida por backend (`run_rclone_backup_job` → `_uses_walk`),
+mas pode ser forçada por job via `RcloneBackupJob.strategy`
+("auto" | "walk" | "fast") — configurável na criação/edição do job em
+/rclone-jobs, para os casos em que a heurística por backend não é ideal
+(ex: pasta restrita causando timeout mesmo em backend "rápido").
 
 CAMINHO RÁPIDO (`_run_fast_strategy`) — OneDrive, Google Drive, iCloud Drive e
 qualquer backend com listagem recursiva eficiente:
@@ -759,16 +763,18 @@ async def run_rclone_backup_job(job_id: int) -> None:
             db.commit()
 
         cfg = await _remote_config(job.remote_name)
-        if _uses_walk(cfg):
+        strategy = job.strategy or "auto"
+        use_walk = strategy == "walk" or (strategy == "auto" and _uses_walk(cfg))
+        if use_walk:
             log.info(
                 f"[rclone-runner] Estratégia: walk incremental "
-                f"(backend {cfg.get('type', '?')}/{cfg.get('service', '?')})"
+                f"(strategy={strategy}, backend {cfg.get('type', '?')}/{cfg.get('service', '?')})"
             )
             await _run_walk_strategy(job, db)
         else:
             log.info(
                 f"[rclone-runner] Estratégia: listagem recursiva "
-                f"(backend {cfg.get('type', '?')})"
+                f"(strategy={strategy}, backend {cfg.get('type', '?')})"
             )
             await _run_fast_strategy(job, db)
 

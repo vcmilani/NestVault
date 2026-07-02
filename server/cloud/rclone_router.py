@@ -21,8 +21,15 @@ log = logging.getLogger("backup-server")
 router = APIRouter()
 
 _REMOTE_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+_VALID_STRATEGIES = {"auto", "walk", "fast"}
 
 _job_locks: dict[int, asyncio.Lock] = {}
+
+
+def _validate_strategy(v: Optional[str]) -> Optional[str]:
+    if v is not None and v not in _VALID_STRATEGIES:
+        raise ValueError(f"strategy deve ser um de {sorted(_VALID_STRATEGIES)}")
+    return v
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +60,7 @@ class RcloneJobCreate(BaseModel):
     target_label: str
     cron_expr: Optional[str] = None
     enabled: bool = True
+    strategy: str = "auto"
 
     @field_validator("remote_name")
     @classmethod
@@ -70,6 +78,11 @@ class RcloneJobCreate(BaseModel):
             _parse_cron(v)
         return v
 
+    @field_validator("strategy")
+    @classmethod
+    def _validate_strategy_create(cls, v: str) -> str:
+        return _validate_strategy(v)
+
 
 class RcloneJobUpdate(BaseModel):
     display_name: Optional[str] = None
@@ -77,6 +90,7 @@ class RcloneJobUpdate(BaseModel):
     target_label: Optional[str] = None
     cron_expr: Optional[str] = None
     enabled: Optional[bool] = None
+    strategy: Optional[str] = None
 
     @field_validator("cron_expr")
     @classmethod
@@ -84,6 +98,11 @@ class RcloneJobUpdate(BaseModel):
         if v is not None:
             _parse_cron(v)
         return v
+
+    @field_validator("strategy")
+    @classmethod
+    def _validate_strategy_update(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_strategy(v)
 
 
 class RcloneJobOut(BaseModel):
@@ -94,6 +113,7 @@ class RcloneJobOut(BaseModel):
     target_label: str
     cron_expr: Optional[str]
     enabled: bool
+    strategy: str
     last_run_at: Optional[str]
     last_run_status: Optional[str]
     last_run_message: Optional[str]
@@ -111,6 +131,7 @@ def _job_out(j: RcloneBackupJob) -> RcloneJobOut:
         target_label=j.target_label,
         cron_expr=j.cron_expr,
         enabled=j.enabled,
+        strategy=j.strategy,
         last_run_at=str(j.last_run_at) if j.last_run_at else None,
         last_run_status=j.last_run_status,
         last_run_message=j.last_run_message,
@@ -172,6 +193,7 @@ def create_job(req: RcloneJobCreate, db: Session = Depends(get_db)):
         target_label=req.target_label,
         cron_expr=req.cron_expr,
         enabled=req.enabled,
+        strategy=req.strategy,
     )
     db.add(job)
     db.commit()
@@ -206,6 +228,8 @@ def update_job(job_id: int, req: RcloneJobUpdate, db: Session = Depends(get_db))
         job.cron_expr = req.cron_expr
     if req.enabled is not None:
         job.enabled = req.enabled
+    if req.strategy is not None:
+        job.strategy = req.strategy
 
     db.commit()
 
