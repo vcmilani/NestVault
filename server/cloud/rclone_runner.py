@@ -70,7 +70,7 @@ _BATCH_MAX_BYTES = 3 * 1024 ** 3   # 3 GB
 # arquivos de QUALQUER diretório num único rclone copy, em vez de 1 processo
 # rclone por diretório pequeno.
 _BATCH_IDLE_FLUSH   = 5.0    # segundos sem novo item na fila -> baixa o lote parcial
-_CHECKPOINT_INTERVAL = 15.0  # segundos entre saves de checkpoint (era por contagem de itens)
+_CHECKPOINT_INTERVAL = 300.0  # segundos entre saves de checkpoint (era por contagem de itens)
 
 # Backends que exigem o walk incremental (não conseguem listagem recursiva
 # eficiente). Critério atual: serviço de fotos do iCloud (iclouddrive/photos).
