@@ -64,12 +64,11 @@ _BATCH_MAX_FILES = 250
 _BATCH_MAX_BYTES = 3 * 1024 ** 3   # 3 GB
 
 # Walk incremental (iCloud Photos): o backend é lento e com rate-limit, então
-# listamos e baixamos um diretório por vez, com checkpoint resumível. O download
-# de cada diretório é um único `rclone copy` (lista o diretório só uma vez), com
-# ingester concorrente que processa e remove cada arquivo concluído — mantendo o
-# uso de disco do staging limitado mesmo em diretórios flat enormes.
-_PARTIAL_SUFFIX = ".nvpart"   # sufixo de arquivo incompleto do rclone no staging
-_INGEST_POLL    = 2.0         # segundos entre varreduras do ingester
+# a LISTAGEM é feita um diretório por vez (rclone lsjson não recursivo), com
+# checkpoint resumível. O DOWNLOAD reaproveita o mesmo mecanismo de lotes do
+# caminho rápido (_download_batch/_bulk_copy) — agrupa até _BATCH_MAX_FILES
+# arquivos de QUALQUER diretório num único rclone copy, em vez de 1 processo
+# rclone por diretório pequeno.
 
 # Backends que exigem o walk incremental (não conseguem listagem recursiva
 # eficiente). Critério atual: serviço de fotos do iCloud (iclouddrive/photos).
@@ -389,122 +388,8 @@ def _process_file_sync(
 
 
 # ---------------------------------------------------------------------------
-# Download por diretório (streaming, bounded-disk) + checkpoint
+# Checkpoint do walk
 # ---------------------------------------------------------------------------
-
-async def _download_and_ingest_dir(
-    rel_dir: str,
-    changed: list[RcloneFileEntry],
-    remote_name: str,
-    remote_path: str,
-    version_id: int,
-    db,
-    enc_key: bytes | None,
-    errors: list,
-) -> tuple[int, int]:
-    """Baixa (um único rclone copy) e ingere os arquivos novos de um diretório.
-
-    Um `rclone copy --max-depth 1` lista o diretório só uma vez (sem re-varrer a
-    raiz). Um ingester concorrente processa cada arquivo já concluído no staging
-    (move → SHA-256 → dedup/store/encrypt/replicate) e o remove, mantendo o disco
-    do staging limitado mesmo num diretório flat enorme.
-
-    Retorna (baixados, bytes_baixados).
-    """
-    if not changed:
-        return 0, 0
-
-    volume  = storage.pick_volume()
-    staging = Path(tempfile.mkdtemp(dir=volume, prefix="_rclone_stage_"))
-    ff_path = Path(f"{staging}.files")
-    # Arquivos são filhos diretos de rel_dir → --files-from usa só o basename.
-    by_name: dict[str, RcloneFileEntry] = {Path(e.path).name: e for e in changed}
-    remaining = set(by_name)
-    downloaded = 0
-    bytes_dl   = 0
-    total_bytes = sum(e.size for e in changed)
-    log.info(
-        f"[rclone-runner] {rel_dir or '/'}: baixando {len(changed)} arquivo(s) "
-        f"({_fmt_size(total_bytes)})"
-    )
-
-    async def _ingest_ready() -> None:
-        nonlocal downloaded, bytes_dl
-        for name in list(remaining):
-            staged = staging / name
-            if not staged.is_file():
-                continue  # ainda não concluído (parcial tem sufixo _PARTIAL_SUFFIX)
-            _fd, _tmp = tempfile.mkstemp(dir=volume, prefix="_rclone_tmp_")
-            os.close(_fd)
-            tmp_path = Path(_tmp)
-            try:
-                shutil.move(str(staged), str(tmp_path))
-            except FileNotFoundError:
-                tmp_path.unlink(missing_ok=True)
-                continue
-            entry = by_name[name]
-            try:
-                sha256, size = await asyncio.to_thread(_hash_file, tmp_path)
-                await asyncio.to_thread(
-                    _process_file_sync,
-                    version_id, entry, tmp_path, sha256, size, volume, enc_key, db,
-                )
-                downloaded += 1
-                bytes_dl   += size
-            except Exception as e:
-                tmp_path.unlink(missing_ok=True)
-                errors.append(f"{entry.path}: {e}")
-                log.error(f"[rclone-runner] Erro ao processar {entry.path}: {e}")
-                db.rollback()
-            remaining.discard(name)
-
-    full = "/".join(p for p in (remote_path, rel_dir) if p)
-    src = f"{remote_name}:{full}" if full else f"{remote_name}:"
-    try:
-        ff_path.write_text("".join(n + "\n" for n in by_name), encoding="utf-8")
-        proc = await asyncio.create_subprocess_exec(
-            "rclone", "copy", src, str(staging),
-            "--files-from", str(ff_path),
-            "--max-depth", "1",
-            "--drive-skip-dangling-shortcuts",
-            "--transfers", str(_PARALLEL_DOWNLOADS),
-            "--checkers", "8",
-            "--retries", "3",
-            "--partial-suffix", _PARTIAL_SUFFIX,
-            "--timeout", "300s",
-            "--contimeout", "60s",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        # Drena stderr em background (evita travar o processo) e serve de sinal
-        # de término: stderr.read() retorna ao EOF, quando o rclone sai.
-        drain_task = asyncio.create_task(proc.stderr.read())
-        while not drain_task.done():
-            await _ingest_ready()
-            try:
-                await asyncio.wait_for(asyncio.shield(drain_task), timeout=_INGEST_POLL)
-            except (TimeoutError, asyncio.CancelledError):
-                pass
-        stderr_bytes = await drain_task
-        rc = await proc.wait()
-        await _ingest_ready()  # varredura final após o término do rclone
-
-        if rc != 0:
-            err = stderr_bytes.decode(errors="replace").strip()
-            log.warning(
-                f"[rclone-runner] {rel_dir or '/'}: rclone copy retornou {rc}: {err}"
-            )
-        for name in remaining:
-            entry = by_name[name]
-            msg = f"{entry.path}: não baixado pelo rclone"
-            errors.append(msg)
-            log.error(f"[rclone-runner] {msg}")
-    finally:
-        ff_path.unlink(missing_ok=True)
-        shutil.rmtree(staging, ignore_errors=True)
-
-    return downloaded, bytes_dl
-
 
 def _load_checkpoint(version) -> tuple[set[str], list[str], int]:
     """Lê (done_dirs, pending_dirs, resume_count) do progress_json da versão."""
@@ -912,14 +797,20 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
             f"[rclone-runner] Walk iniciado: {job.remote_name}:{job.remote_path or '/'} "
             f"— {len(pending)} dir(s) na fila, {len(done_dirs)} já concluído(s)"
         )
-        # [EXPERIMENTO] producer/consumer totalmente desacoplados por fila sem
-        # limite: uma task lista diretório por diretório o mais rápido
-        # possível, outra consome a fila e baixa/registra/faz checkpoint.
-        # Só o consumer toca o banco (db/version) — o producer só mexe em
-        # estruturas Python em memória (pending/discovered/done_dirs/
-        # failed_dirs), evitando duas coroutines usando a mesma Session do
-        # SQLAlchemy ao mesmo tempo.
-        queue: asyncio.Queue = asyncio.Queue()
+        # [EXPERIMENTO v2] pipeline de 3 estágios com fila de ARQUIVOS (não de
+        # diretórios): o walker varre e enfileira arquivo por arquivo, o
+        # batcher agrupa até _BATCH_MAX_FILES (250) — cruzando diretórios
+        # livremente — e baixa via _download_batch/_bulk_copy (as MESMAS
+        # funções que o caminho rápido já usa, sem alteração), e só o
+        # consumer final toca o banco. Isso elimina o overhead de 1 processo
+        # rclone por diretório pequeno, que era o gargalo real do
+        # experimento anterior (listar em paralelo não ajuda se o
+        # download/registro continua sendo 1 diretório de cada vez).
+        file_queue: asyncio.Queue = asyncio.Queue()
+        process_queue: asyncio.Queue = asyncio.Queue()
+        dir_total: dict[str, int] = {}        # arquivos esperados por diretório
+        dir_done_count: dict[str, int] = {}   # arquivos já registrados com sucesso
+        file_to_dir: dict[str, str] = {}      # entry.path -> rel_dir (rastreio pro consumer)
 
         def _pop_next_listable() -> str | None:
             """Só mexe em estruturas em memória — nunca toca no banco."""
@@ -936,8 +827,12 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
             return None
 
         async def _lister_loop() -> None:
-            """Producer: lista diretório por diretório sem esperar nenhum
-            download — enfileira pro consumer assim que cada um é listado."""
+            """Producer sequencial (não precisa de paralelismo próprio —
+            listar é barato, o gargalo sempre foi download/registro): varre
+            diretório por diretório, particiona skip/changed e empurra cada
+            ARQUIVO na fila — sem acumular lote aqui, isso é trabalho do
+            _batcher_loop, pra não bloquear a listagem esperando download."""
+            nonlocal skipped_total, processed_total
             while True:
                 rel_dir = _pop_next_listable()
                 if rel_dir is None:
@@ -950,32 +845,19 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                     errors.append(f"{rel_dir or '/'} (listagem): {e}")
                     log.error(f"[rclone-runner] Erro ao listar {rel_dir or '/'}: {e}")
                     if rel_dir not in failed_dirs:
-                        failed_dirs.append(rel_dir)   # persistido pelo consumer
+                        failed_dirs.append(rel_dir)
                     continue
                 for sub in subdirs:
                     if sub not in discovered:
                         discovered.add(sub)
                         pending.append(sub)
-                await queue.put((rel_dir, files, subdirs))
-            await queue.put(None)   # sentinela — sinaliza fim pro consumer
 
-        async def _downloader_loop() -> None:
-            """Consumer: único dono da sessão do banco — baixa, registra,
-            faz checkpoint. Corpo igual ao que existia por diretório antes
-            do experimento, só que agora dirigido pela fila."""
-            nonlocal skipped_total, processed_total, downloaded_total
-            nonlocal bytes_total, t_last_progress
-            while True:
-                item = await queue.get()
-                if item is None:
-                    break
-                rel_dir, files, subdirs = item
-
-                # Particiona arquivos do diretório.
                 changed: list[RcloneFileEntry] = []
                 skip_entries: list[RcloneFileEntry] = []
                 for entry in files:
                     if entry.path in this_version_paths:
+                        # já registrado nesta versão (resume anterior) — nem
+                        # conta pro dir_total, não precisa esperar por ele.
                         skipped_total   += 1
                         processed_total += 1
                         continue
@@ -985,10 +867,80 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                     else:
                         changed.append(entry)
 
-                errors_before = len(errors)
+                dir_total[rel_dir] = len(skip_entries) + len(changed)
+                if dir_total[rel_dir] == 0:
+                    done_dirs.add(rel_dir)   # nada a esperar deste diretório
+                else:
+                    for entry in skip_entries:
+                        await file_queue.put(("skip", rel_dir, entry))
+                    for entry in changed:
+                        await file_queue.put(("dl", rel_dir, entry))
 
-                # Registra os "sem alteração" (idempotente) na versão atual.
-                for entry in skip_entries:
+                if files or subdirs:
+                    log.info(
+                        f"[rclone-runner] listado {rel_dir or '/'}: {len(files)} arquivo(s), "
+                        f"{len(subdirs)} subpasta(s) — {len(pending)} dir(s) na fila"
+                    )
+            await file_queue.put(None)   # sentinela — sinaliza fim pro batcher
+
+        async def _batcher_loop() -> None:
+            """Agrupa até _BATCH_MAX_FILES/_BATCH_MAX_BYTES arquivos — de
+            QUALQUER diretório — e baixa via _download_batch (reaproveitado
+            do caminho rápido, sem alteração nenhuma). 'skip' passa direto
+            pro consumer, sem download."""
+            batch: list[RcloneFileEntry] = []
+            batch_bytes = 0
+            total_dl = 0
+
+            async def _flush() -> None:
+                nonlocal batch, batch_bytes, total_dl
+                if not batch:
+                    return
+                await _download_batch(
+                    process_queue, batch, job.remote_name, job.remote_path,
+                    errors, total_dl, total_dl + len(batch),
+                )
+                total_dl += len(batch)
+                batch, batch_bytes = [], 0
+
+            while True:
+                item = await file_queue.get()
+                if item is None:
+                    break
+                kind, rel_dir, entry = item
+                if kind == "skip":
+                    await process_queue.put(("skip", rel_dir, entry))
+                    continue
+                file_to_dir[entry.path] = rel_dir
+                batch.append(entry)
+                batch_bytes += entry.size
+                if len(batch) >= _BATCH_MAX_FILES or batch_bytes >= _BATCH_MAX_BYTES:
+                    await _flush()
+            await _flush()
+            await process_queue.put(None)   # sentinela — sinaliza fim pro consumer
+
+        async def _walk_consumer_loop() -> None:
+            """Único dono da sessão do banco: dedupe/store/encrypt/replicate/
+            registra (hash já feito pelo batcher), rastreia conclusão por
+            diretório via contagem (dir_done_count vs dir_total, não por
+            chamada de rclone) e faz checkpoint periódico."""
+            nonlocal skipped_total, processed_total, downloaded_total
+            nonlocal bytes_total, t_last_progress
+            items_since_checkpoint = 0
+
+            def _mark_dir_progress(rel_dir: str) -> None:
+                dir_done_count[rel_dir] = dir_done_count.get(rel_dir, 0) + 1
+                if dir_done_count[rel_dir] >= dir_total.get(rel_dir, -1):
+                    done_dirs.add(rel_dir)
+
+            while True:
+                item = await process_queue.get()
+                if item is None:
+                    break
+                items_since_checkpoint += 1
+
+                if item[0] == "skip":
+                    _, rel_dir, entry = item
                     try:
                         await asyncio.to_thread(
                             _register_version_file_sync,
@@ -997,59 +949,69 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                         skipped_total   += 1
                         processed_total += 1
                         this_version_paths.add(entry.path)
+                        _mark_dir_progress(rel_dir)
                     except Exception as e:
                         errors.append(f"{entry.path}: {e}")
                         log.error(f"[rclone-runner] Erro ao registrar skip {entry.path}: {e}")
                         db.rollback()
-
-                # Baixa e ingere os novos/alterados. Roda em paralelo com a
-                # listagem dos próximos dirs, feita pelo producer.
-                dl, by = await _download_and_ingest_dir(
-                    rel_dir, changed, job.remote_name, job.remote_path,
-                    version.id, db, enc_key, errors,
-                )
-                downloaded_total += dl
-                bytes_total      += by
-                processed_total  += dl
-                for entry in changed:
-                    this_version_paths.add(entry.path)
-
-                # Checkpoint: marca o diretório como concluído só se não houve
-                # novos erros. Se houve, o diretório vai para failed_dirs e é
-                # persistido na fronteira pendente para retry no resume.
-                dir_ok = len(errors) == errors_before
-                if dir_ok:
-                    done_dirs.add(rel_dir)
                 else:
-                    failed_dirs.append(rel_dir)
-                # Snapshot de done_dirs: _save_checkpoint_sync roda numa thread
-                # de verdade (to_thread) e itera esse set (sorted()) enquanto o
-                # producer pode estar mutando o done_dirs "ao vivo" na main
-                # thread (skip de pasta protegida) — sem cópia isso é uma
-                # corrida real entre threads, não só entre coroutines.
-                await asyncio.to_thread(
-                    _save_checkpoint_sync, version, set(done_dirs), pending + failed_dirs, resume_count, db
-                )
-                _log_dir = log.info if dir_ok else log.warning
-                if files or subdirs or not dir_ok:
-                    _log_dir(
-                        f"[rclone-runner] {'[ok]' if dir_ok else '[err]'} {rel_dir or '/'}: "
-                        f"{dl} baixado(s), {len(skip_entries)} sem alt., "
-                        f"{len(subdirs)} subpasta(s) — {len(pending)} pendente(s)"
+                    _, entry, tmp_path, sha256, size, volume = item
+                    tmp_path = Path(tmp_path)
+                    rel_dir = file_to_dir.pop(entry.path, "")
+                    try:
+                        await asyncio.to_thread(
+                            _process_file_sync,
+                            version.id, entry, tmp_path, sha256, size, volume, enc_key, db,
+                        )
+                        downloaded_total += 1
+                        bytes_total      += size
+                        processed_total  += 1
+                        this_version_paths.add(entry.path)
+                        _mark_dir_progress(rel_dir)
+                    except Exception as e:
+                        tmp_path.unlink(missing_ok=True)
+                        errors.append(f"{entry.path}: {e}")
+                        log.error(f"[rclone-runner] Erro ao processar {entry.path}: {e}")
+                        db.rollback()
+
+                # Checkpoint a cada 100 itens (não mais a cada arquivo — a
+                # fila anda rápido agora, commit por item viraria gargalo).
+                if items_since_checkpoint >= 100:
+                    items_since_checkpoint = 0
+                    await asyncio.to_thread(
+                        _save_checkpoint_sync, version, set(done_dirs),
+                        pending + failed_dirs, resume_count, db,
                     )
+
                 _tnow = time.monotonic()
                 if _tnow - t_last_progress >= 60:
                     t_last_progress = _tnow
                     log.info(
                         f"[rclone-runner] Progresso: {processed_total} processado(s), "
-                        f"{downloaded_total} baixado(s), {len(done_dirs)} dir(s) ok, "
-                        f"{len(pending)} pendente(s), {len(failed_dirs)} com erro "
+                        f"{downloaded_total} baixado(s), {len(done_dirs)} dir(s) ok "
                         f"— {_tnow - t_start:.0f}s"
                     )
 
+            # Varredura final — garante que o último lote parcial é persistido.
+            await asyncio.to_thread(
+                _save_checkpoint_sync, version, set(done_dirs),
+                pending + failed_dirs, resume_count, db,
+            )
+
         async with asyncio.TaskGroup() as tg:
             tg.create_task(_lister_loop())
-            tg.create_task(_downloader_loop())
+            tg.create_task(_batcher_loop())
+            tg.create_task(_walk_consumer_loop())
+
+        # Reconciliação: um erro de download dentro de um lote não aborta o
+        # lote inteiro (mesmo comportamento de _download_batch: loga e
+        # segue) — o diretório dono do arquivo que falhou nunca bate
+        # dir_done_count == dir_total, então nunca entrou em done_dirs
+        # durante o loop acima. Sem isso, ele sumiria do checkpoint em vez
+        # de ser re-tentado no resume.
+        for rel_dir in dir_total:
+            if rel_dir not in done_dirs and rel_dir not in failed_dirs:
+                failed_dirs.append(rel_dir)
 
         elapsed = time.monotonic() - t_start
 
