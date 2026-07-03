@@ -811,6 +811,16 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
         # rclone por diretório pequeno, que era o gargalo real do
         # experimento anterior (listar em paralelo não ajuda se o
         # download/registro continua sendo 1 diretório de cada vez).
+        # Captura como strings simples ANTES do TaskGroup — job é um objeto
+        # ORM preso à Session `db`; com expire_on_commit=True (padrão), os
+        # commits frequentes do consumer expiram os atributos de `job`, e
+        # acessá-los de novo (job.remote_name) dispararia um lazy-load na
+        # MESMA sessão a partir de outra coroutine — concorrência real entre
+        # threads (to_thread) que corrompe o estado da Session. Strings
+        # puras não têm esse problema.
+        remote_name = job.remote_name
+        remote_path = job.remote_path
+
         file_queue: asyncio.Queue = asyncio.Queue()
         process_queue: asyncio.Queue = asyncio.Queue()
         dir_total: dict[str, int] = {}        # arquivos esperados por diretório
@@ -844,7 +854,7 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                     break
                 try:
                     files, subdirs = await list_dir_one_level(
-                        job.remote_name, job.remote_path, rel_dir
+                        remote_name, remote_path, rel_dir
                     )
                 except Exception as e:
                     errors.append(f"{rel_dir or '/'} (listagem): {e}")
@@ -907,7 +917,7 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                 if not batch:
                     return
                 await _download_batch(
-                    process_queue, batch, job.remote_name, job.remote_path,
+                    process_queue, batch, remote_name, remote_path,
                     errors, total_dl, total_dl + len(batch),
                 )
                 total_dl += len(batch)
