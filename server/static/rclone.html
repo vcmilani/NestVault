@@ -216,6 +216,13 @@
     <label class="field-label" for="mCron">Agendamento cron (opcional)</label>
     <input class="field-input" id="mCron" placeholder="Ex: 0 3 * * * (3h diário)" autocomplete="off">
 
+    <label class="field-label" for="mStrategy">Estratégia de listagem</label>
+    <select class="field-input" id="mStrategy">
+      <option value="auto">Automática (recomendado)</option>
+      <option value="walk">Incremental — pasta a pasta (remotes grandes/lentos/instáveis)</option>
+      <option value="fast">Recursiva — uma listagem única (mais rápida quando funciona)</option>
+    </select>
+
     <div class="toggle-wrap">
       <input type="checkbox" id="mEnabled" checked>
       <label class="toggle-label" for="mEnabled">Habilitado</label>
@@ -362,6 +369,7 @@
         <th>Remote</th>
         <th>Pasta</th>
         <th>Label destino</th>
+        <th>Estratégia</th>
         <th>Cron</th>
         <th>Status</th>
         <th>Último run</th>
@@ -370,6 +378,8 @@
       <tbody>${jobs.map(j => jobRow(j)).join('')}</tbody>
     </table>`;
   }
+
+  const STRATEGY_LABELS = {auto: 'Auto', walk: 'Incremental', fast: 'Recursiva'};
 
   function jobRow(j) {
     const statusBadge = j.last_run_status
@@ -392,6 +402,7 @@
       <td class="dim">${esc(j.remote_name)}:</td>
       <td class="dim">${j.remote_path ? esc(j.remote_path) : '<span class="mute">(raiz)</span>'}</td>
       <td>${esc(j.target_label)}</td>
+      <td class="dim">${esc(STRATEGY_LABELS[j.strategy] || j.strategy || 'Auto')}</td>
       <td><code>${esc(j.cron_expr || 'manual')}</code></td>
       <td>${statusBadge}</td>
       <td class="dim">${lastRun}</td>
@@ -457,6 +468,7 @@
     document.getElementById('mName').value    = job ? job.display_name : '';
     document.getElementById('mLabel').value   = job ? job.target_label : '';
     document.getElementById('mCron').value    = job ? (job.cron_expr || '') : '';
+    document.getElementById('mStrategy').value = job ? (job.strategy || 'auto') : 'auto';
     document.getElementById('mEnabled').checked = job ? job.enabled : true;
 
     document.getElementById('jobModal').classList.add('open');
@@ -540,6 +552,7 @@
     const target_label = document.getElementById('mLabel').value.trim();
     const cron_expr    = document.getElementById('mCron').value.trim() || null;
     const enabled      = document.getElementById('mEnabled').checked;
+    const strategy     = document.getElementById('mStrategy').value;
 
     if (!remote_name)  { errEl.textContent = 'Selecione um remote'; errEl.classList.add('visible'); return; }
     if (!display_name) { errEl.textContent = 'Informe o nome de exibição'; errEl.classList.add('visible'); return; }
@@ -548,7 +561,7 @@
     const btn = document.getElementById('modalSaveBtn');
     btn.disabled = true; btn.textContent = 'Salvando...';
 
-    const body = {remote_name, remote_path, display_name, target_label, cron_expr, enabled};
+    const body = {remote_name, remote_path, display_name, target_label, cron_expr, enabled, strategy};
     const [url, method] = _editingJobId
       ? [`/rclone/jobs/${_editingJobId}`, 'PATCH']
       : ['/rclone/jobs', 'POST'];

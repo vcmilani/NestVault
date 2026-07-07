@@ -1,5 +1,5 @@
 """
-NestVault  v7.6.0
+NestVault  v7.7.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -7,6 +7,14 @@ Otimizacoes de performance:
 - Indices no banco + WAL mode
 - Cleanup de orfaos em uma unica query
 - Limpeza de arquivos ao deletar label/versao feita em background (nao bloqueia o cliente)
+
+v7.7.0:
+- cleanup-orphans convertido para background com progresso em tempo real
+  (mesmo padrão de encrypt-existing/migrate-disk) — o request não fica mais
+  bloqueado esperando a limpeza inteira, e o job aparece como "running" nas
+  atividades enquanto roda, não só no resultado final
+- Chamadas fire-and-forget de limpeza de órfãos após exclusão de label também
+  passam a registrar um MaintenanceJob "running" desde o início
 
 v7.6.0:
 - Backup incremental e resumível para iCloud Photos: walk descendente dir a dir
@@ -254,32 +262,33 @@ def _bg_process_ssd_pending_moves():
         log.debug("[ssd-cache] worker já em execução — ignorando chamada duplicada")
         return
     db = SessionLocal()
-    job = MaintenanceJob(job_type="ssd-cache-move", status="running")
-    db.add(job)
-    db.commit()
-    db.refresh(job)
-    job_id = job.id
+    job_id = None
     try:
         from database import SsdCachePendingMove
         total_pending = db.query(SsdCachePendingMove).count()
+        if not total_pending:
+            storage.reconcile_orphaned_ssd_copies(db)
+            return
+        job = MaintenanceJob(job_type="ssd-cache-move", status="running",
+                             summary=f"Movendo: 0 / {total_pending} arquivo(s) (0%)")
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        job_id = job.id
+        invalidate_activity()
         processed = 0
         all_moved: list[str] = []
-        if total_pending:
-            job.summary = f"Movendo: 0 / {total_pending} arquivo(s) (0%)"
-            db.commit()
-            invalidate_activity()
         while True:
             done, sha256s = storage.process_ssd_pending_moves(db)
             if done == 0:
                 break
             processed += done
             all_moved.extend(sha256s)
-            if total_pending:
-                pct = round(processed / total_pending * 100)
-                job = db.get(MaintenanceJob, job_id)
-                job.summary = f"Movendo: {processed} / {total_pending} arquivo(s) ({pct}%)"
-                db.commit()
-                invalidate_activity()
+            pct = round(processed / total_pending * 100)
+            job = db.get(MaintenanceJob, job_id)
+            job.summary = f"Movendo: {processed} / {total_pending} arquivo(s) ({pct}%)"
+            db.commit()
+            invalidate_activity()
         storage.reconcile_orphaned_ssd_copies(db)
         labels = _backup_labels_for_sha256s(db, all_moved)
         label_str = ", ".join(labels) if labels else "—"
@@ -289,7 +298,7 @@ def _bg_process_ssd_pending_moves():
         job.summary = f"{processed} arquivo(s) movidos SSD → HDD — backups: {label_str}"
     except Exception as e:
         log.error(f"[ssd-cache] Erro no worker de move: {e}")
-        job = db.get(MaintenanceJob, job_id)
+        job = db.get(MaintenanceJob, job_id) if job_id is not None else None
         if job:
             job.status = "error"
             job.finished_at = datetime.now()
@@ -406,7 +415,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="7.5.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="7.7.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
@@ -547,10 +556,6 @@ class CleanupResponse(BaseModel):
     kept: int
     versions_removed: list[str]
     storage_files_removed: int
-
-class OrphanCleanupResponse(BaseModel):
-    files_removed: int
-    bytes_freed: int
 
 class RereplicateResponse(BaseModel):
     replicated: int
@@ -1103,35 +1108,67 @@ def _cleanup_orphan_contents_no_commit(db: Session, limit: int | None = None) ->
 _BG_CLEANUP_BATCH = 500
 _CLEANUP_BY_DATE_BATCH = 50  # versões por lote para evitar lock prolongado
 
-def _bg_cleanup_orphan_contents() -> None:
-    """Background task: cria sua propria sessao DB e limpa conteudos orfaos em lotes."""
+def _bg_cleanup_orphan_contents(job_id: int | None = None) -> None:
+    """Background task: cria sua propria sessao DB e limpa conteudos orfaos em lotes.
+
+    Se job_id nao for informado (chamadas fire-and-forget apos exclusao de label),
+    cria seu proprio MaintenanceJob "running" para que a execucao apareca nas atividades
+    enquanto roda, nao so ao final.
+    """
     db = SessionLocal()
     try:
-        log.info("[bg-cleanup] iniciando limpeza de conteúdos órfãos")
-        total = 0
+        own_job = job_id is None
+        if own_job:
+            mj = MaintenanceJob(job_type="cleanup-orphans", status="running", summary="Iniciando limpeza de órfãos...")
+            db.add(mj)
+            db.commit()
+            db.refresh(mj)
+            job_id = mj.id
+
+        used_shas = db.query(VersionFile.sha256).distinct().subquery()
+        total = db.query(FileContent).filter(~FileContent.sha256.in_(select(used_shas))).count()
+
+        log.info(f"[bg-cleanup] iniciando limpeza de conteúdos órfãos ({total} candidato(s))")
+        total_removed = 0
         bytes_total = 0
         while True:
             removed, freed = _cleanup_orphan_contents_no_commit(db, limit=_BG_CLEANUP_BATCH)
             if not removed:
                 break
             db.commit()
-            total += removed
+            total_removed += removed
             bytes_total += freed
-            log.debug(f"[bg-cleanup] lote: {removed} arquivo(s) removido(s) (total={total})")
-        if total:
-            log.info(f"[bg-cleanup] {total} arquivo(s) orfao(s) removido(s) do storage")
-            mj = MaintenanceJob(
-                job_type="cleanup-orphans",
-                status="done",
-                finished_at=datetime.now(),
-                summary=f"{total} arquivo(s) órfão(s) removido(s), {round(bytes_total/1024/1024, 1)} MB liberados",
-            )
-            db.add(mj)
-            db.commit()
-            invalidate_activity()
+            pct = round(total_removed / total * 100) if total else 100
+            mj = db.get(MaintenanceJob, job_id)
+            if mj:
+                mj.summary = f"Removendo: {total_removed} / {total} arquivo(s) ({pct}%)"
+                db.commit()
+                invalidate_activity()
+            log.debug(f"[bg-cleanup] lote: {removed} arquivo(s) removido(s) (total={total_removed})")
+
+        if total_removed:
+            log.info(f"[bg-cleanup] {total_removed} arquivo(s) orfao(s) removido(s) do storage")
+            summary = f"{total_removed} arquivo(s) órfão(s) removido(s), {round(bytes_total/1024/1024, 1)} MB liberados"
         else:
             log.info("[bg-cleanup] nenhuma limpeza necessária, não havia arquivos órfãos")
+            summary = "Nenhum arquivo órfão encontrado"
+
+        mj = db.get(MaintenanceJob, job_id)
+        if mj:
+            mj.status = "done"
+            mj.finished_at = datetime.now()
+            mj.summary = summary
+            db.commit()
+    except Exception as e:
+        log.exception("[bg-cleanup] erro inesperado")
+        mj = db.get(MaintenanceJob, job_id) if job_id else None
+        if mj:
+            mj.status = "failed"
+            mj.finished_at = datetime.now()
+            mj.summary = f"Erro: {e}"
+            db.commit()
     finally:
+        invalidate_activity()
         db.close()
 
 
@@ -2972,20 +3009,15 @@ def force_nightly_cleanup(background_tasks: BackgroundTasks):
     return {"status": "started"}
 
 
-@app.post("/maintenance/cleanup-orphans", response_model=OrphanCleanupResponse, dependencies=[Depends(require_api_key)])
-def force_cleanup_orphans(db: Session = Depends(get_db)):
-    """Remove todos os FileContents nao referenciados por nenhuma versao ativa."""
-    files_removed, bytes_freed = _cleanup_orphan_contents(db)
-    mj = MaintenanceJob(
-        job_type="cleanup-orphans",
-        status="done",
-        finished_at=datetime.now(),
-        summary=f"{files_removed} arquivo(s) removido(s) ({round(bytes_freed / 1024 / 1024, 2)} MB)",
-    )
+@app.post("/maintenance/cleanup-orphans", dependencies=[Depends(require_api_key)])
+def force_cleanup_orphans(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Agenda em background a remoção de FileContents não referenciados por nenhuma versão ativa."""
+    mj = MaintenanceJob(job_type="cleanup-orphans", status="running", summary="Iniciando limpeza de órfãos...")
     db.add(mj)
     db.commit()
-    invalidate_activity()
-    return OrphanCleanupResponse(files_removed=files_removed, bytes_freed=bytes_freed)
+    db.refresh(mj)
+    background_tasks.add_task(_bg_cleanup_orphan_contents, mj.id)
+    return {"scheduled": True, "job_id": mj.id}
 
 
 @app.post("/maintenance/rereplicate", response_model=RereplicateResponse, dependencies=[Depends(require_api_key)])

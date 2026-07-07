@@ -1,5 +1,5 @@
 """
-Models do banco de dados — v7.6.0
+Models do banco de dados — v7.7.0
 Suporte dual: SQLite (padrão) ou PostgreSQL (opcional via DATABASE_URL).
 
 SQLite:  configurado via DB_PATH (padrão ./backup.db) — ideal para uso doméstico/NAS.
@@ -172,6 +172,9 @@ class RcloneBackupJob(Base):
     target_label     = Column(String, nullable=False)
     cron_expr        = Column(String, nullable=True)
     enabled          = Column(Boolean, nullable=False, default=True)
+    # Estratégia de listagem: "auto" (decide por backend), "walk" (incremental
+    # dir a dir) ou "fast" (recursiva única) — força a escolha por job.
+    strategy         = Column(String, nullable=False, default="auto", server_default="auto")
     last_run_at      = Column(DateTime, nullable=True)
     last_run_status  = Column(String, nullable=True)
     last_run_message = Column(String, nullable=True)
@@ -211,6 +214,23 @@ def init_db():
                 ))
             conn.commit()
             _log_init.info("[db-migrate] Coluna backup_versions.progress_json garantida")
+        except Exception as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+
+    # Idem para rclone_backup_jobs.strategy (escolha manual de estratégia).
+    with engine.connect() as conn:
+        try:
+            if engine.dialect.name == "sqlite":
+                conn.execute(text(
+                    "ALTER TABLE rclone_backup_jobs ADD COLUMN strategy TEXT NOT NULL DEFAULT 'auto'"
+                ))
+            else:
+                conn.execute(text(
+                    "ALTER TABLE rclone_backup_jobs ADD COLUMN IF NOT EXISTS strategy TEXT NOT NULL DEFAULT 'auto'"
+                ))
+            conn.commit()
+            _log_init.info("[db-migrate] Coluna rclone_backup_jobs.strategy garantida")
         except Exception as e:
             if "duplicate column" not in str(e).lower():
                 raise

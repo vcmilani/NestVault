@@ -32,6 +32,9 @@ def _mk_client(monkeypatch, volumes, replication_factor=2):
     monkeypatch.setattr(storage_mod, "STORAGE_VOLUMES", volumes)
     monkeypatch.setattr(storage_mod, "STORAGE_DIR", volumes[0])
     monkeypatch.setattr(storage_mod, "REPLICATION_FACTOR", replication_factor)
+    # Background tasks (_bg_*) abrem sua propria sessao via SessionLocal() em vez de
+    # Depends(get_db) — aponta para o mesmo engine in-memory do teste.
+    monkeypatch.setattr(m, "SessionLocal", Session)
 
     def override_get_db():
         db = Session()
@@ -238,9 +241,10 @@ def test_cleanup_removes_all_physical_copies(tmp_path, monkeypatch):
 
         # Deleta a versão → conteúdo vira órfão
         c.delete("/backups/b1/versions/v1")
-        # Cleanup via endpoint de manutenção (usa a sessão do request, não SessionLocal)
+        # Cleanup via endpoint de manutenção (roda em background)
         r = c.post("/maintenance/cleanup-orphans")
         assert r.status_code == 200
+        assert r.json()["scheduled"] is True
 
         assert _copies_in(v1, sha) == [], "cópia v1 deve ser removida"
         assert _copies_in(v2, sha) == [], "cópia v2 deve ser removida"
