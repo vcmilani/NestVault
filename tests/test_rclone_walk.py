@@ -1,7 +1,10 @@
 """Testa o walk incremental + checkpoint/resume do rclone_runner (job de fotos).
 
-Mocka a listagem (list_dir_one_level) e o download (_download_and_ingest_dir)
-para exercitar só a lógica de walk/checkpoint sem rclone nem rede.
+Mocka a listagem (list_dir_one_level) e o download em lote (_bulk_copy) para
+exercitar a lógica de walk/checkpoint sem rclone nem rede — mas deixa o resto
+do pipeline (staging, hash, dedupe/store/registro via _download_batch/
+_process_file_sync) rodar de verdade contra um volume de storage temporário e
+o banco de teste (sqlite in-memory).
 """
 import asyncio
 import datetime as _dt
@@ -20,7 +23,7 @@ from database import BackupVersion, VersionFile, RcloneBackupJob
 
 
 @pytest.fixture
-def session_factory(monkeypatch):
+def session_factory(tmp_path, monkeypatch):
     engine = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -30,6 +33,11 @@ def session_factory(monkeypatch):
     Session = sessionmaker(bind=engine)
     monkeypatch.setattr(rr, "SessionLocal", Session)
     monkeypatch.setattr(storage_mod, "ENCRYPTION_ENABLED", False, raising=False)
+
+    vol = tmp_path / "vol"
+    vol.mkdir()
+    monkeypatch.setattr(storage_mod, "STORAGE_VOLUMES", [vol])
+    monkeypatch.setattr(storage_mod, "STORAGE_DIR", vol)
     return Session
 
 
@@ -54,8 +62,12 @@ def _fe(path, mtime=1.0, size=10):
 def _install_tree(monkeypatch, tree, downloaded_paths, fail_dirs=None,
                   list_fail_dirs=None):
     """tree: {rel_dir: (files:[RcloneFileEntry], subdirs:[str])}.
-    Registra os paths baixados em downloaded_paths; fail_dirs força erro de
-    download; list_fail_dirs força erro de listagem."""
+    Registra os paths efetivamente baixados (staged) em downloaded_paths;
+    fail_dirs força "não baixado pelo rclone" pros arquivos daquele
+    diretório (simulando falha de download); list_fail_dirs força erro de
+    listagem. O download em si (_bulk_copy) é mockado escrevendo bytes
+    fake no staging — o resto do pipeline (_download_batch/hash/
+    _process_file_sync) roda de verdade."""
     fail_dirs = fail_dirs or set()
     list_fail_dirs = list_fail_dirs or set()
 
@@ -69,24 +81,20 @@ def _install_tree(monkeypatch, tree, downloaded_paths, fail_dirs=None,
             raise RuntimeError("lsjson simulado falhou")
         return tree[rel_dir]
 
-    async def fake_download(rel_dir, changed, remote_name, remote_path,
-                            version_id, db, enc_key, errors):
-        if rel_dir in fail_dirs:
-            for e in changed:
-                errors.append(f"{e.path}: erro simulado")
-            return 0, 0
-        dl = 0
-        by = 0
-        for e in changed:
-            # Simula ingest: registra VersionFile e marca baixado.
-            rr._register_version_file_sync(version_id, e, "sha_" + e.path, db)
-            downloaded_paths.append(e.path)
-            dl += 1
-            by += e.size
-        return dl, by
+    async def fake_bulk_copy(remote_name, remote_path, files_from, staging):
+        paths = [p for p in files_from.read_text().splitlines() if p]
+        for p in paths:
+            top_dir = p.rsplit("/", 1)[0] if "/" in p else ""
+            if top_dir in fail_dirs:
+                continue   # simula "não baixado pelo rclone" — arquivo falha
+            dest = staging / p
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"x" * 10)
+            downloaded_paths.append(p)
+        return 0, ""
 
     monkeypatch.setattr(rr, "list_dir_one_level", fake_list)
-    monkeypatch.setattr(rr, "_download_and_ingest_dir", fake_download)
+    monkeypatch.setattr(rr, "_bulk_copy", fake_bulk_copy)
 
 
 @pytest.mark.asyncio
@@ -128,7 +136,7 @@ async def test_failed_dir_keeps_version_incomplete_and_resumes(session_factory, 
         "B": ([_fe("B/bad.jpg")], []),
     }
     downloaded = []
-    # 1ª execução: diretório B falha.
+    # 1ª execução: arquivos de B falham no download.
     _install_tree(monkeypatch, tree, downloaded, fail_dirs={"B"})
     await rr.run_rclone_backup_job(jid)
 
@@ -407,51 +415,48 @@ async def test_max_resumes_abandons_version_and_creates_new(session_factory, mon
 
 
 @pytest.mark.asyncio
-async def test_walk_prefetches_next_dir_listing_during_download(session_factory, monkeypatch):
-    """A listagem do próximo dir começa antes do download do dir atual
-    terminar — comprova o pipeline de profundidade 1."""
+async def test_walk_batches_across_directories(session_factory, monkeypatch):
+    """Um único _bulk_copy deve levar arquivos de MAIS DE UM diretório —
+    prova que o consumer agrupa agnóstico a pasta em vez de 1 rclone copy
+    por diretório (o gargalo real do experimento anterior)."""
     Session = session_factory
     jid = _make_job(Session)
     tree = {
         "": ([], ["A", "B"]),
-        "A": ([_fe("A/ok.jpg")], []),
-        "B": ([_fe("B/ok.jpg")], []),
+        "A": ([_fe(f"A/{i}.jpg") for i in range(3)], []),
+        "B": ([_fe(f"B/{i}.jpg") for i in range(3)], []),
     }
-    events: list[str] = []
-    download_gate = asyncio.Event()
+    calls = []
 
     async def fake_list(remote_name, remote_path, rel_dir, **kw):
-        events.append(f"list-start:{rel_dir}")
         return tree[rel_dir]
 
-    async def fake_download(rel_dir, changed, remote_name, remote_path, version_id, db, enc_key, errors):
-        events.append(f"download-start:{rel_dir}")
-        if rel_dir == "A":
-            # Segura o download de A até a listagem de B já ter começado.
-            await asyncio.wait_for(download_gate.wait(), timeout=1)
-        dl = 0
-        for e in changed:
-            rr._register_version_file_sync(version_id, e, "sha_" + e.path, db)
-            dl += 1
-        return dl, sum(e.size for e in changed)
+    async def fake_bulk_copy(remote_name, remote_path, files_from, staging):
+        paths = [p for p in files_from.read_text().splitlines() if p]
+        calls.append(sorted(paths))
+        for p in paths:
+            dest = staging / p
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"x" * 10)
+        return 0, ""
 
     async def fake_cfg(remote_name):
         return {"type": "iclouddrive", "service": "photos"}
     monkeypatch.setattr(rr, "_remote_config", fake_cfg)
     monkeypatch.setattr(rr, "list_dir_one_level", fake_list)
-    monkeypatch.setattr(rr, "_download_and_ingest_dir", fake_download)
-
-    async def _release_gate_soon():
-        # dá tempo do prefetch de B disparar antes de liberar o download de A
-        await asyncio.sleep(0.05)
-        download_gate.set()
-    asyncio.create_task(_release_gate_soon())
+    monkeypatch.setattr(rr, "_bulk_copy", fake_bulk_copy)
 
     await rr.run_rclone_backup_job(jid)
 
-    # A listagem de B deve ter começado ANTES do download de A ser liberado
-    # (ou seja, enquanto o download de A ainda estava em andamento).
-    assert events.index("list-start:B") < events.index("download-start:B")
-    # prova real do pipeline: list-start:B aconteceu durante download-start:A,
-    # não depois dele terminar.
-    assert "list-start:B" in events[events.index("download-start:A"):]
+    # Um único lote (6 arquivos, abaixo de _BATCH_MAX_FILES) deve conter
+    # arquivos de A e de B juntos — não um rclone copy por diretório.
+    assert len(calls) == 1
+    assert any(p.startswith("A/") for p in calls[0])
+    assert any(p.startswith("B/") for p in calls[0])
+
+    db = Session()
+    ver = db.query(BackupVersion).filter_by(backup_label="fotos").one()
+    assert ver.status == "done"
+    paths = {vf.original_path for vf in db.query(VersionFile).filter_by(version_id=ver.id)}
+    assert len(paths) == 6
+    db.close()
