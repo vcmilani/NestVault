@@ -7,29 +7,16 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="NestVault">
-<link rel="icon" type="image/png" href="/static/icon_web.png">
+<link rel="icon" type="image/png" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
 <link rel="manifest" href="/static/manifest.json">
 <title>NestVault — Explorer</title>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/theme.css">
+<link rel="stylesheet" href="/static/app.css">
 <link rel="stylesheet" href="/static/nav.css">
 <script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
 <style>
-  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
-  body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;min-height:100vh}
-  body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.04) 2px,rgba(0,0,0,.04) 4px);pointer-events:none;z-index:999}
-
-  header{border-bottom:1px solid var(--border);padding:0 32px;display:flex;align-items:center;justify-content:space-between;height:56px;position:sticky;top:0;background:var(--bg);z-index:10}
-  .logo{display:flex;align-items:center;gap:12px}
-  .logo-icon{width:28px;height:28px;border:1.5px solid var(--amber);display:grid;place-items:center;color:var(--amber);font-size:14px}
-  .logo-text{font-size:12px;font-weight:500;letter-spacing:.12em;text-transform:uppercase}
-  .logo-sub{font-size:10px;color:var(--text-dim);letter-spacing:.08em}
-  .header-right{display:flex;align-items:center;gap:20px}
-  .hbtn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 12px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;user-select:none}
-  .hbtn:hover,.hbtn:active{border-color:var(--amber);color:var(--amber)}
-
-  main{padding:28px 32px;max-width:1500px}
-  @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+  main{max-width:1500px}
 
   .breadcrumb{display:flex;align-items:center;gap:8px;margin-bottom:20px;font-size:11px;color:var(--text-dim);flex-wrap:wrap}
   .bc-link{color:var(--amber);text-decoration:none}
@@ -44,9 +31,6 @@
   .stat-box:hover::before{transform:scaleX(1)}
   .stat-label{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim);margin-bottom:6px}
   .stat-value{font-size:22px;font-weight:300;color:var(--amber);letter-spacing:-.02em;line-height:1}
-
-  .error-bar{background:var(--red-dim);border:1px solid var(--red);padding:10px 16px;margin-bottom:20px;color:var(--red);font-size:11px;display:none}
-  .error-bar.visible{display:block}
 
   .controls{display:flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid var(--border);border-bottom:none;background:var(--bg2)}
   .filter-input{flex:1;background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:12px;padding:6px 12px;outline:none;transition:border-color .15s;min-width:0}
@@ -64,9 +48,9 @@
 
   /* Diff badges */
   .diff-badge{font-size:9px;letter-spacing:.06em;padding:1px 5px;margin-left:5px;flex-shrink:0;vertical-align:middle}
-  .diff-add{background:rgba(76,175,80,.15);color:#4caf50;border:1px solid rgba(76,175,80,.3)}
+  .diff-add{background:color-mix(in srgb,var(--green) 15%,transparent);color:var(--green);border:1px solid color-mix(in srgb,var(--green) 30%,transparent)}
   .diff-mod{background:rgba(232,169,64,.12);color:var(--amber);border:1px solid rgba(232,169,64,.25)}
-  .diff-del{background:rgba(244,67,54,.12);color:var(--red);border:1px solid rgba(244,67,54,.25)}
+  .diff-del{background:color-mix(in srgb,var(--red) 12%,transparent);color:var(--red);border:1px solid color-mix(in srgb,var(--red) 25%,transparent)}
 
   /* Folder change dot in tree */
   .t-change-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;margin-left:4px;display:inline-block}
@@ -120,29 +104,11 @@
   .flat-path{flex:1;font-size:11px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
   .flat-path em{color:var(--amber);font-style:normal}
 
-  .loading{padding:40px;text-align:center;color:var(--text-mute);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
-  .loading::after{content:'...';animation:dots 1.2s steps(4,end) infinite}
-  @keyframes dots{0%,20%{content:'.'}40%{content:'..'}60%,100%{content:'...'}}
-  .empty{padding:40px;text-align:center;color:var(--text-mute);font-size:11px;line-height:1.8}
+  .empty{padding:40px;line-height:1.8}
   .empty a{color:var(--amber)}
 
   .files-placeholder{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--text-mute);font-size:11px;letter-spacing:.06em;gap:10px}
   .files-placeholder-icon{font-size:24px;opacity:.25}
-
-  .login-overlay{position:fixed;inset:0;background:var(--overlay-bg);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
-  .login-box{border:1px solid var(--border2);border-top:2px solid var(--amber);background:var(--bg2);padding:40px 48px;width:min(400px,calc(100vw - 32px));animation:fadeUp .3s ease}
-  .login-title{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--amber);margin-bottom:6px}
-  .login-sub{font-size:11px;color:var(--text-dim);margin-bottom:28px}
-  .login-label{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);display:block;margin-bottom:8px}
-  .login-input{width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:13px;padding:10px 14px;outline:none;transition:border-color .15s}
-  .login-input:focus{border-color:var(--amber)}
-  .login-btn{margin-top:16px;width:100%;background:var(--amber);border:none;color:var(--bg);font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;padding:11px;cursor:pointer;transition:opacity .15s;min-height:44px}
-  .login-btn:hover{opacity:.85}
-  .login-error{margin-top:12px;font-size:11px;color:var(--red);min-height:16px}
-
-  ::-webkit-scrollbar{width:6px;height:6px}
-  ::-webkit-scrollbar-track{background:var(--bg)}
-  ::-webkit-scrollbar-thumb{background:var(--border2)}
 
   /* Explorer tabs (mobile only) */
   .explorer-tabs{display:none;border-bottom:1px solid var(--border);background:var(--bg2)}
@@ -150,12 +116,8 @@
   .explorer-tab.active{color:var(--amber);border-bottom-color:var(--amber)}
 
   @media(max-width:768px){
-    main{padding:16px}
-    header{padding:0 16px}
-    .header-right{gap:10px}
     .stats-bar{grid-template-columns:repeat(2,1fr)}
     .t-hash{display:none}
-    .hbtn{min-height:40px;padding:8px 12px}
     .cbtn{min-height:40px}
     .explorer-tabs{display:flex}
     .explorer-layout{flex-direction:column;height:calc(100vh - 305px);min-height:300px}
@@ -163,14 +125,11 @@
     .tree-panel.tab-hidden{display:none}
     .files-panel{height:100%;max-height:none;flex:1}
     .files-panel.tab-hidden{display:none}
-    .login-input{font-size:16px}
     .filter-input{font-size:16px}
   }
   @media(max-width:480px){
     .t-count{display:none}
-    main{padding:10px 12px}
     .cbtn{min-height:44px}
-    .hbtn{min-height:44px}
     .explorer-layout{height:calc(100vh - 265px)}
   }
 </style>
@@ -268,8 +227,8 @@
   </div>
 </div>
 
+<script src="/static/app.js"></script>
 <script>
-  let API_KEY = localStorage.getItem('backupApiKey') || '';
   const qp    = new URLSearchParams(location.search);
   const LABEL = qp.get('label') || '';
   let currentVersion = qp.get('version') || '';
@@ -285,41 +244,8 @@
   let compareData   = null;  // { added: Map<normPath,entry>, deleted: Map, modified: Map }
   let folderChanges = null;  // Map<folderPath, {add,mod,del}>
 
-  const H        = () => ({ 'X-API-Key': API_KEY });
   const normPath = p => p.replace(/\\/g, '/').replace(/^\//, '');
-
-  const fmtSize = b => {
-    if (!b) return '0 B';
-    const u = ['B','KB','MB','GB','TB'];
-    for (const unit of u) { if (b < 1024) return b.toFixed(1)+' '+unit; b /= 1024; }
-    return b.toFixed(1)+' PB';
-  };
-  const esc = s => String(s)
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   const basename = p => p.replace(/\\/g,'/').split('/').filter(Boolean).pop() || p;
-
-  // -- Auth -------------------------------------------------------------------
-  function showError(msg) {
-    const b = document.getElementById('errorBar');
-    b.textContent = '⚠ '+msg; b.classList.add('visible');
-  }
-  function showLogin(msg='') {
-    document.getElementById('loginOverlay').style.display = 'flex';
-    document.getElementById('loginError').textContent = msg;
-  }
-  function hideLogin() { document.getElementById('loginOverlay').style.display = 'none'; }
-
-  document.getElementById('loginForm').addEventListener('submit', e => {
-    e.preventDefault();
-    const key = document.getElementById('apiKeyInput').value.trim();
-    if (!key) return;
-    API_KEY = key; localStorage.setItem('backupApiKey', key);
-    hideLogin(); loadFiles();
-  });
-  document.getElementById('logoutBtn').addEventListener('click', () => {
-    localStorage.removeItem('backupApiKey'); API_KEY = ''; showLogin();
-  });
 
   // -- Tree building ----------------------------------------------------------
   function buildTree(files) {
@@ -367,7 +293,7 @@
   function _changeDot(path) {
     const fc = folderChanges?.get(path);
     if (!fc) return '';
-    if (fc.add) return `<span class="t-change-dot" style="background:#4caf50" title="${fc.add} adicionado(s)"></span>`;
+    if (fc.add) return `<span class="t-change-dot" style="background:var(--green)" title="${fc.add} adicionado(s)"></span>`;
     if (fc.mod) return `<span class="t-change-dot" style="background:var(--amber)" title="${fc.mod} modificado(s)"></span>`;
     if (fc.del) return `<span class="t-change-dot" style="background:var(--red)" title="${fc.del} removido(s)"></span>`;
     return '';
@@ -504,7 +430,7 @@
     ${badge}
     <span class="t-hash">${f.sha256 ? f.sha256.slice(0,10)+'…' : '—'}</span>
     <span class="t-size">${fmtSize(f.size || 0)}</span>
-    <button class="t-dl" onclick="dlFile(${f.id},'${esc(f._basename)}')" title="Baixar arquivo">↓ baixar</button>
+    <button class="t-dl" data-id="${f.id}" data-name="${esc(f._basename)}" onclick="dlFile(+this.dataset.id,this.dataset.name)" title="Baixar arquivo">↓ baixar</button>
   </div>
 </div>`;
     });
@@ -566,7 +492,7 @@
   <div class="t-meta">
     <span class="t-hash">${f.sha256 ? f.sha256.slice(0,10)+'…' : '—'}</span>
     <span class="t-size">${fmtSize(f.size || 0)}</span>
-    <button class="t-dl" onclick="dlFile(${f.id},'${esc(basename(f.original_path))}')" title="Baixar arquivo">↓ baixar</button>
+    <button class="t-dl" data-id="${f.id}" data-name="${esc(basename(f.original_path))}" onclick="dlFile(+this.dataset.id,this.dataset.name)" title="Baixar arquivo">↓ baixar</button>
   </div>
 </div>`;
     }).join('');
@@ -577,7 +503,7 @@
     try {
       const r = await fetch(`/files/${fileId}/download`, { headers: H() });
       if (r.status === 401) { showLogin(); return; }
-      if (!r.ok) { alert(`Erro ${r.status} ao baixar o arquivo`); return; }
+      if (!r.ok) { showError(`Erro ${r.status} ao baixar o arquivo`); return; }
       const blob = await r.blob();
       const url  = URL.createObjectURL(blob);
       const a    = Object.assign(document.createElement('a'), { href: url, download: filename });
@@ -586,7 +512,7 @@
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch(e) {
-      alert('Erro ao baixar: ' + e.message);
+      showError('Erro ao baixar: ' + e.message);
     }
   }
 
@@ -767,15 +693,11 @@
     }
   }
 
-  // -- Init -------------------------------------------------------------------
-  async function init() {
-    const resp = await fetch('/health');
-    if (!resp.ok) { showError('Servidor indisponível'); return; }
-    const test = await fetch('/backups', { headers: H() });
-    if (test.status === 401) { showLogin(); }
-    else { await loadFiles(); await loadVersionList(); }
-  }
-  init();
+  // -- Init — a própria carga inicial faz o auth-check (401 → login) ---------
+  (async function init() {
+    await loadFiles();
+    await loadVersionList();
+  })();
 
   // -- Browser back/forward ---------------------------------------------------
   window.addEventListener('popstate', () => {
@@ -796,18 +718,6 @@
       });
     }
   });
-
-  function toggleTheme() {
-    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-    if (isLight) { document.documentElement.removeAttribute('data-theme'); localStorage.setItem('nv-theme','dark'); }
-    else { document.documentElement.setAttribute('data-theme','light'); localStorage.setItem('nv-theme','light'); }
-    updateThemeBtn();
-  }
-  function updateThemeBtn() {
-    const btn = document.getElementById('themeBtn');
-    if (btn) btn.textContent = document.documentElement.getAttribute('data-theme') === 'light' ? '☾ Escuro' : '☀ Claro';
-  }
-  updateThemeBtn();
 
   function switchTab(tab) {
     const tree = document.getElementById('dirTree');

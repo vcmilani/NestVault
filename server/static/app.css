@@ -1,0 +1,119 @@
+/* ── app.css — estilos compartilhados por todas as páginas ─────────────────
+   Fontes locais, reset, header, seções, badges, login overlay, loading.
+   Estilos específicos de cada página permanecem no <style> da própria página. */
+
+/* Fontes locais (IBM Plex Mono, subset latin) */
+@font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:300;font-display:swap;src:url('/static/fonts/ibm-plex-mono-300.woff2') format('woff2')}
+@font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:400;font-display:swap;src:url('/static/fonts/ibm-plex-mono-400.woff2') format('woff2')}
+@font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:500;font-display:swap;src:url('/static/fonts/ibm-plex-mono-500.woff2') format('woff2')}
+@font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:600;font-display:swap;src:url('/static/fonts/ibm-plex-mono-600.woff2') format('woff2')}
+
+/* Reset + base */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;min-height:100vh}
+body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.04) 2px,rgba(0,0,0,.04) 4px);pointer-events:none;z-index:999}
+
+/* Keyframes compartilhados */
+@keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+@keyframes dots{0%,20%{content:'.'}40%{content:'..'}60%,100%{content:'...'}}
+.spin{display:inline-block;animation:spin .8s linear infinite}
+
+/* Header */
+header{border-bottom:1px solid var(--border);padding:0 32px;display:flex;align-items:center;justify-content:space-between;height:56px;position:sticky;top:0;background:var(--bg);z-index:10}
+.logo{display:flex;align-items:center;gap:12px}
+.logo-icon{width:28px;height:28px;border:1.5px solid var(--amber);display:grid;place-items:center;color:var(--amber);font-size:14px}
+.logo-text{font-size:12px;font-weight:500;letter-spacing:.12em;text-transform:uppercase}
+.logo-sub{font-size:10px;color:var(--text-dim);letter-spacing:.08em}
+.header-right{display:flex;align-items:center;gap:16px}
+.hbtn{display:inline-flex;align-items:center;justify-content:center;background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 12px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s;text-decoration:none;user-select:none}
+.hbtn:hover,.hbtn:active{border-color:var(--amber);color:var(--amber)}
+.hbtn:disabled{opacity:.4;cursor:not-allowed;pointer-events:none}
+.last-updated{font-size:11px;color:var(--text-mute);letter-spacing:.06em;white-space:nowrap}
+
+/* Botões pequenos de ação */
+.small-btn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:2px 8px;font-family:var(--mono);font-size:10px;cursor:pointer;letter-spacing:.04em;transition:all .15s;display:inline-flex;align-items:center;gap:3px;white-space:nowrap;user-select:none}
+.small-btn:hover,.small-btn:active{border-color:var(--amber);color:var(--amber)}
+.small-btn:disabled{opacity:.35;cursor:not-allowed;pointer-events:none}
+.small-btn.btn-run:hover{border-color:var(--green);color:var(--green)}
+.small-btn.btn-run.is-running{border-color:var(--amber-dim);color:var(--amber);pointer-events:none}
+.small-btn.btn-danger:hover{border-color:var(--red);color:var(--red)}
+
+/* Layout base (max-width fica por página) */
+main{padding:28px 32px}
+
+/* Seções */
+.section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.section-title{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-dim);display:flex;align-items:center;gap:8px}
+.section-title::before{content:'';display:block;width:3px;height:12px;background:var(--amber)}
+.section-sub{font-size:10px;color:var(--text-mute);letter-spacing:.06em}
+.count-badge{background:var(--bg3);border:1px solid var(--border2);padding:2px 8px;font-size:10px;color:var(--text-dim)}
+
+/* Barra de erro */
+.error-bar{background:var(--red-dim);border:1px solid var(--red);padding:10px 16px;margin-bottom:20px;color:var(--red);font-size:11px;display:none}
+.error-bar.visible{display:block}
+
+/* Badges de status */
+.badge{display:inline-block;padding:2px 7px;font-size:10px;letter-spacing:.06em;text-transform:uppercase}
+.badge-active,.badge-done,.badge-success{background:var(--green-dim);color:var(--green)}
+.badge-failed,.badge-error{background:var(--red-dim);color:var(--red)}
+.badge-running,.badge-partial{background:var(--amber-dim);color:var(--amber)}
+.badge-running::before{content:'⟳ ';display:inline-block;animation:spin .9s linear infinite}
+.badge-incomplete,.badge-unknown{background:var(--bg3);border:1px solid var(--border2);color:var(--text-dim)}
+.badge-off{background:var(--bg3);border:1px solid var(--border2);color:var(--text-mute)}
+.badge-absorb{background:color-mix(in srgb,var(--blue) 12%,var(--bg2));color:var(--blue)}
+
+/* Loading / vazio */
+.loading{padding:40px;text-align:center;color:var(--text-mute);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+.loading::after{content:'...';animation:dots 1.2s steps(4,end) infinite}
+.empty{padding:32px;text-align:center;color:var(--text-mute);font-size:11px}
+
+/* Login overlay (padrão — maintenance usa variante própria) */
+.login-overlay{position:fixed;inset:0;background:var(--overlay-bg);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
+.login-overlay .login-box{border:1px solid var(--border2);border-top:2px solid var(--amber);background:var(--bg2);padding:40px 48px;width:min(400px,calc(100vw - 32px));animation:fadeUp .3s ease}
+.login-overlay .login-title{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--amber);margin-bottom:6px}
+.login-overlay .login-sub{font-size:11px;color:var(--text-dim);margin-bottom:28px}
+.login-overlay .login-label{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);display:block;margin-bottom:8px}
+.login-overlay .login-input{width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:13px;padding:10px 14px;outline:none;transition:border-color .15s}
+.login-overlay .login-input:focus{border-color:var(--amber)}
+.login-overlay .login-btn{margin-top:16px;width:100%;background:var(--amber);border:none;color:var(--bg);font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;padding:11px;cursor:pointer;transition:opacity .15s;min-height:44px}
+.login-overlay .login-btn:hover{opacity:.85}
+.login-overlay .login-error{margin-top:12px;font-size:11px;color:var(--red);min-height:16px}
+
+/* Modal de confirmação compartilhado (nvConfirm em app.js) */
+.nv-confirm-overlay{position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:450;display:none;place-items:center;padding:16px}
+.nv-confirm-overlay.visible{display:grid}
+.nv-confirm-box{background:var(--bg2);border:1px solid var(--red);border-top:3px solid var(--red);padding:28px 32px;width:100%;max-width:440px;animation:fadeUp .2s ease}
+.nv-confirm-title{font-size:12px;font-weight:500;letter-spacing:.1em;text-transform:uppercase;color:var(--red);margin-bottom:12px}
+.nv-confirm-msg{font-size:12px;color:var(--text-dim);line-height:1.7;margin-bottom:18px;white-space:pre-wrap}
+.nv-confirm-word-label{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);margin-bottom:6px}
+.nv-confirm-word-input{width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:12px;padding:8px 12px;outline:none;margin-bottom:16px}
+.nv-confirm-word-input:focus{border-color:var(--red)}
+.nv-confirm-actions{display:flex;gap:10px;justify-content:flex-end}
+.nv-confirm-cancel{background:none;border:1px solid var(--border2);color:var(--text-dim);font-family:var(--mono);font-size:11px;padding:7px 16px;cursor:pointer;transition:all .15s}
+.nv-confirm-cancel:hover{border-color:var(--amber);color:var(--amber)}
+.nv-confirm-ok{background:var(--red-dim);border:1px solid var(--red);color:var(--red);font-family:var(--mono);font-size:11px;padding:7px 16px;cursor:pointer;transition:all .15s}
+.nv-confirm-ok:hover:not(:disabled){background:var(--red);color:var(--bg)}
+.nv-confirm-ok:disabled{opacity:.35;cursor:not-allowed}
+
+/* Scrollbar */
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:var(--border2)}
+
+/* Responsivo — regras comuns (grids específicos ficam por página) */
+@media(max-width:768px){
+  main{padding:16px}
+  header{padding:0 16px}
+  .hbtn{min-height:40px;padding:8px 12px}
+  .small-btn{min-height:36px;padding:4px 8px}
+  .login-overlay .login-input{font-size:16px}
+}
+@media(max-width:480px){
+  main{padding:12px 10px}
+  .hbtn{min-height:44px;font-size:12px}
+  .small-btn{min-height:44px}
+  .login-overlay .login-box{padding:28px 20px;max-height:calc(100vh - 32px);overflow-y:auto}
+  .login-overlay .login-btn{min-height:48px}
+}

@@ -7,39 +7,16 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="NestVault">
-<link rel="icon" type="image/png" href="/static/icon_web.png">
+<link rel="icon" type="image/png" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
 <link rel="manifest" href="/static/manifest.json">
 <title>rclone — NestVault</title>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/theme.css">
+<link rel="stylesheet" href="/static/app.css">
 <link rel="stylesheet" href="/static/nav.css">
 <script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
 <style>
-  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
-  body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;min-height:100vh}
-  body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.04) 2px,rgba(0,0,0,.04) 4px);pointer-events:none;z-index:999}
-
-  header{border-bottom:1px solid var(--border);padding:0 32px;display:flex;align-items:center;justify-content:space-between;height:56px;position:sticky;top:0;background:var(--bg);z-index:10}
-  .logo{display:flex;align-items:center;gap:12px}
-  .logo-icon{width:28px;height:28px;border:1.5px solid var(--amber);display:grid;place-items:center;color:var(--amber);font-size:14px}
-  .logo-text{font-size:12px;font-weight:500;letter-spacing:.12em;text-transform:uppercase}
-  .logo-sub{font-size:10px;color:var(--text-dim);letter-spacing:.08em}
-  .header-right{display:flex;align-items:center;gap:16px}
-  .hbtn{display:inline-flex;align-items:center;justify-content:center;background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 12px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s;text-decoration:none;user-select:none}
-  .hbtn:hover,.hbtn:active{border-color:var(--amber);color:var(--amber)}
-  .hbtn.active{border-color:var(--amber);color:var(--amber)}
-  .hbtn:disabled{opacity:.4;cursor:not-allowed;pointer-events:none}
-
-  main{padding:28px 32px;max-width:1300px}
-  @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-  @keyframes spin{to{transform:rotate(360deg)}}
-
-  .error-bar{background:var(--red-dim);border:1px solid var(--red);padding:10px 16px;margin-bottom:20px;color:var(--red);font-size:11px;display:none}
-  .error-bar.visible{display:block}
-
-  .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
-  .section-title{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-dim);display:flex;align-items:center;gap:8px}
-  .section-title::before{content:'';display:block;width:3px;height:12px;background:var(--amber)}
+  main{max-width:1300px}
 
   .table-wrap{border:1px solid var(--border);margin-bottom:24px;animation:fadeUp .4s .1s ease both;overflow-x:auto;-webkit-overflow-scrolling:touch}
   table{width:100%;border-collapse:collapse}
@@ -51,26 +28,8 @@
   td{padding:10px 14px;vertical-align:middle;font-size:12px}
   td:first-child{padding-left:18px}
 
-  .badge{display:inline-block;padding:2px 7px;font-size:10px;letter-spacing:.06em;text-transform:uppercase}
-  .badge-success{background:var(--green-dim);color:var(--green)}
-  .badge-error{background:var(--red-dim);color:var(--red)}
-  .badge-running{background:var(--amber-dim);color:var(--amber)}
-  .badge-running::before{content:'⟳ ';display:inline-block;animation:spin .9s linear infinite}
-  .badge-off{background:var(--bg3);border:1px solid var(--border2);color:var(--text-mute)}
-
-  .small-btn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:2px 8px;font-family:var(--mono);font-size:10px;cursor:pointer;letter-spacing:.04em;transition:all .15s;display:inline-flex;align-items:center;gap:3px;white-space:nowrap;user-select:none;min-height:28px}
-  .small-btn:hover{border-color:var(--amber);color:var(--amber)}
-  .small-btn:disabled{opacity:.35;cursor:not-allowed;pointer-events:none}
-  .small-btn.btn-run:hover{border-color:var(--green);color:var(--green)}
-  .small-btn.btn-run.is-running{border-color:var(--amber-dim);color:var(--amber);pointer-events:none}
-  .small-btn.btn-danger:hover{border-color:var(--red);color:var(--red)}
+  .small-btn{min-height:28px}
   .small-btn.btn-cancel:hover{border-color:var(--amber);color:var(--amber)}
-  .spin{display:inline-block;animation:spin .8s linear infinite}
-
-  .empty{padding:32px;text-align:center;color:var(--text-mute);font-size:11px}
-  .loading{padding:40px;text-align:center;color:var(--text-mute);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
-  .loading::after{content:'...';animation:dots 1.2s steps(4,end) infinite}
-  @keyframes dots{0%,20%{content:'.'}40%{content:'..'}60%,100%{content:'...'}}
 
   .remote-chips{display:flex;flex-wrap:wrap;gap:8px;padding:16px 18px}
   .remote-chip{background:var(--bg3);border:1px solid var(--border2);padding:4px 12px;font-size:11px;color:var(--text-dim)}
@@ -109,35 +68,6 @@
   .log-close{background:none;border:none;color:var(--text-dim);font-size:16px;cursor:pointer;padding:0;min-width:32px;min-height:32px;display:inline-flex;align-items:center;justify-content:center}
   .log-close:hover{color:var(--amber)}
   .log-content{flex:1;overflow-y:auto;background:var(--bg3);border:1px solid var(--border);padding:12px 14px;font-size:11px;line-height:1.7;color:var(--text-dim);white-space:pre-wrap;word-break:break-all;font-family:var(--mono)}
-
-  /* Login */
-  .login-overlay{position:fixed;inset:0;background:var(--overlay-bg);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
-  .login-box{border:1px solid var(--border2);border-top:2px solid var(--amber);background:var(--bg2);padding:40px 48px;width:min(400px,calc(100vw - 32px));animation:fadeUp .3s ease}
-  .login-title{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--amber);margin-bottom:6px}
-  .login-sub{font-size:11px;color:var(--text-dim);margin-bottom:28px}
-  .login-label{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);display:block;margin-bottom:8px}
-  .login-input{width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:13px;padding:10px 14px;outline:none;transition:border-color .15s}
-  .login-input:focus{border-color:var(--amber)}
-  .login-btn{margin-top:16px;width:100%;background:var(--amber);border:none;color:var(--bg);font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;padding:11px;cursor:pointer;transition:opacity .15s;min-height:44px}
-  .login-btn:hover{opacity:.85}
-  .login-error{margin-top:12px;font-size:11px;color:var(--red);min-height:16px}
-
-  @media(max-width:768px){
-    main{padding:16px}
-    header{padding:0 16px}
-    .header-right{gap:10px}
-    .hbtn{min-height:40px;padding:8px 10px}
-    .small-btn{min-height:36px;padding:4px 8px}
-  }
-  @media(max-width:480px){
-    main{padding:12px 10px}
-    .login-box{padding:28px 20px}
-    .login-btn{min-height:48px}
-    .hbtn{min-height:44px}
-  }
-  ::-webkit-scrollbar{width:6px;height:6px}
-  ::-webkit-scrollbar-track{background:var(--bg)}
-  ::-webkit-scrollbar-thumb{background:var(--border2)}
 </style>
 </head>
 <body>
@@ -150,10 +80,10 @@
   <div class="header-right">
     <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
     <button class="hbtn" onclick="loadAll()">↻ Refresh</button>
-    <a class="hbtn" href="/" style="text-decoration:none">← Dashboard</a>
-    <a class="hbtn" href="/activity" style="text-decoration:none">◎ Atividade</a>
-    <a class="hbtn active" href="/rclone-jobs" style="text-decoration:none">⟳ rclone</a>
-    <a class="hbtn" href="/stats" style="text-decoration:none">∑ Stats</a>
+    <a class="hbtn" href="/">← Dashboard</a>
+    <a class="hbtn" href="/activity">◎ Atividade</a>
+    <a class="hbtn active" href="/rclone-jobs">⟳ rclone</a>
+    <a class="hbtn" href="/stats">∑ Stats</a>
     <button class="hbtn always-visible" id="logoutBtn">⌀ API Key</button>
     <button class="nav-hamburger"></button>
   </div>
@@ -262,56 +192,12 @@
   </div>
 </div>
 
+<script src="/static/app.js"></script>
 <script>
-  let API_KEY = localStorage.getItem('backupApiKey') || '';
   let _editingJobId = null;
   let _remotes = [];
   let _browsePath = '';
-
-  const H = () => ({'X-API-Key': API_KEY});
-  const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-
-  // -- Theme ------------------------------------------------------------------
-  function toggleTheme() {
-    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-    if (isLight) {
-      document.documentElement.removeAttribute('data-theme');
-      localStorage.removeItem('nv-theme');
-      document.getElementById('themeBtn').textContent = '☀ Claro';
-    } else {
-      document.documentElement.setAttribute('data-theme','light');
-      localStorage.setItem('nv-theme','light');
-      document.getElementById('themeBtn').textContent = '☾ Escuro';
-    }
-  }
-  (function(){
-    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-    document.getElementById('themeBtn').textContent = isLight ? '☾ Escuro' : '☀ Claro';
-  })();
-
-  // -- Error / Login ----------------------------------------------------------
-  function showError(msg) {
-    const b = document.getElementById('errorBar');
-    b.textContent = '⚠ ' + msg; b.classList.add('visible');
-  }
-  function clearError() { document.getElementById('errorBar').classList.remove('visible'); }
-
-  function showLogin(msg='') {
-    document.getElementById('loginOverlay').style.display = 'flex';
-    document.getElementById('loginError').textContent = msg;
-  }
-  function hideLogin() { document.getElementById('loginOverlay').style.display = 'none'; }
-
-  document.getElementById('loginForm').addEventListener('submit', e => {
-    e.preventDefault();
-    const key = document.getElementById('apiKeyInput').value.trim();
-    if (!key) return;
-    API_KEY = key; localStorage.setItem('backupApiKey', key);
-    hideLogin(); loadAll();
-  });
-  document.getElementById('logoutBtn').addEventListener('click', () => {
-    localStorage.removeItem('backupApiKey'); API_KEY = ''; showLogin();
-  });
+  let _jobsLogCache = {};
 
   // -- Load ------------------------------------------------------------------
   async function loadAll() {
@@ -392,7 +278,7 @@
          <button class="small-btn btn-cancel" onclick="cancelJob(${j.id})" title="Forçar cancelamento">⏹</button>`
       : `<button class="small-btn btn-run" onclick="runJob(${j.id})">▶ Run</button>`;
     const logBtn = j.last_run_message
-      ? `<button class="small-btn" onclick="showLog(${j.id},'${esc(j.display_name)}')" title="${esc(j.last_run_message.slice(0,80))}">≡ Log</button>`
+      ? `<button class="small-btn" data-name="${esc(j.display_name)}" onclick="showLog(${j.id},this.dataset.name)" title="${esc(j.last_run_message.slice(0,80))}">≡ Log</button>`
       : '';
     const lastRun = j.last_run_at
       ? (window.relTime ? relTime(j.last_run_at) : j.last_run_at.slice(0,19).replace('T',' '))
@@ -417,18 +303,15 @@
 
   // -- Log modal --------------------------------------------------------------
   function showLog(jobId, name) {
-    const jobs = Array.from(document.querySelectorAll('#jobsWrap tbody tr'));
-    // find message from rendered jobs cache
-    const job = _jobsLogCache[jobId];
+    const msg = _jobsLogCache[jobId];
     document.getElementById('logTitle').textContent = 'Log — ' + (name || 'job #' + jobId);
-    document.getElementById('logContent').textContent = job || '(sem mensagem)';
+    document.getElementById('logContent').textContent = msg || '(sem mensagem)';
     document.getElementById('logModal').classList.add('open');
   }
   function closeLog() { document.getElementById('logModal').classList.remove('open'); }
   document.getElementById('logModal').addEventListener('click', e => {
     if (e.target === document.getElementById('logModal')) closeLog();
   });
-  let _jobsLogCache = {};
 
   // -- Job actions -----------------------------------------------------------
   async function runJob(id) {
@@ -446,15 +329,17 @@
   }
 
   async function deleteJob(id) {
-    if (!confirm('Excluir este job rclone?\nOs dados já salvos no NestVault não serão removidos.')) return;
+    const ok = await nvConfirm(
+      'Excluir job rclone',
+      'Excluir este job rclone?\nOs dados já salvos no NestVault não serão removidos.'
+    );
+    if (!ok) return;
     const r = await fetch(`/rclone/jobs/${id}`, {method:'DELETE', headers: H()});
     if (!r.ok) { showError('Erro ao excluir job'); return; }
     await loadJobs();
   }
 
   // -- Modal -----------------------------------------------------------------
-  let _jobsCache = {};
-
   function openModal(job = null) {
     _editingJobId = job ? job.id : null;
     document.getElementById('modalTitle').textContent = job ? 'Editar job rclone' : 'Novo job rclone';
@@ -521,7 +406,7 @@
         const fullPath = prefix + f;
         return `<div style="padding:8px 14px;font-size:11px;cursor:pointer;border-bottom:1px solid var(--border)"
                      onmouseover="this.style.background='var(--bg2)'" onmouseout="this.style.background=''"
-                     onclick="selectFolder('${esc(fullPath)}')">
+                     data-path="${esc(fullPath)}" onclick="selectFolder(this.dataset.path)">
                   📁 ${esc(f)}
                 </div>`;
       }).join('');
@@ -585,15 +470,8 @@
     await loadJobs();
   }
 
-  // -- Init ------------------------------------------------------------------
-  async function init() {
-    const resp = await fetch('/health');
-    if (!resp.ok) { showError('Servidor indisponível'); return; }
-    const test = await fetch('/rclone/jobs', {headers: H()});
-    if (test.status === 401) { showLogin(); }
-    else { loadAll(); }
-  }
-  init();
+  // Init — a própria carga inicial faz o auth-check (401 → login)
+  loadAll();
 </script>
 <script src="/static/nav.js"></script>
 </body>

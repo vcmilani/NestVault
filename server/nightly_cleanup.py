@@ -32,15 +32,22 @@ def _delete_versions(db, version_ids: list[int]) -> None:
         db.commit()
 
 
-def _cleanup_orphan_contents(db) -> tuple[int, int]:
+def _cleanup_orphan_contents(db, limit: int | None = None) -> tuple[int, int]:
     """Remove FileContents sem referência e seus arquivos físicos. Retorna (removidos, bytes_liberados).
+
+    Implementação canônica, compartilhada com main.py (era duplicada lá).
+    Cada sha256 é deletado em sua própria mini-transação; não há um commit final
+    agregado — callers que fazem db.commit() depois executam um no-op.
 
     Usa DELETE condicional por sha256 para eliminar a race condition TOCTOU: o banco
     re-verifica no momento da deleção se o sha256 ainda está sem referência, protegendo
     arquivos que foram re-referenciados por uploads concorrentes após o snapshot inicial.
     """
     used_shas = db.query(VersionFile.sha256).distinct().subquery()
-    candidates = db.query(FileContent).filter(~FileContent.sha256.in_(select(used_shas))).all()
+    q = db.query(FileContent).filter(~FileContent.sha256.in_(select(used_shas)))
+    if limit is not None:
+        q = q.limit(limit)
+    candidates = q.all()
 
     if not candidates:
         return 0, 0
@@ -106,14 +113,14 @@ def _cleanup_orphan_contents(db) -> tuple[int, int]:
             except FileNotFoundError:
                 pass
             except OSError as e:
-                log.warning(f"[nightly-cleanup] Não foi possível remover {c['stored_at']}: {e}")
+                log.warning(f"[cleanup-orphans] Não foi possível remover {c['stored_at']}: {e}")
         if not copies:
             try:
                 Path(stored_by_sha[sha256]).unlink()
             except FileNotFoundError:
                 pass
             except OSError as e:
-                log.warning(f"[nightly-cleanup] Não foi possível remover {stored_by_sha[sha256]}: {e}")
+                log.warning(f"[cleanup-orphans] Não foi possível remover {stored_by_sha[sha256]}: {e}")
 
         bytes_freed += size_by_sha.get(sha256, 0)
         removed += 1

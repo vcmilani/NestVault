@@ -7,31 +7,16 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="NestVault">
-<link rel="icon" type="image/png" href="/static/icon_web.png">
+<link rel="icon" type="image/png" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
 <link rel="manifest" href="/static/manifest.json">
 <title>Manutenção — NestVault</title>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/theme.css">
+<link rel="stylesheet" href="/static/app.css">
 <link rel="stylesheet" href="/static/nav.css">
 <script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
 <style>
-  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
-  body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;min-height:100vh}
-  body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.04) 2px,rgba(0,0,0,.04) 4px);pointer-events:none;z-index:999}
-
-  header{border-bottom:1px solid var(--border);padding:0 32px;display:flex;align-items:center;justify-content:space-between;height:56px;position:sticky;top:0;background:var(--bg);z-index:10}
-  .logo{display:flex;align-items:center;gap:12px}
-  .logo-icon{width:28px;height:28px;border:1.5px solid var(--amber);display:grid;place-items:center;color:var(--amber);font-size:14px}
-  .logo-text{font-size:12px;font-weight:500;letter-spacing:.12em;text-transform:uppercase}
-  .logo-sub{font-size:10px;color:var(--text-dim);letter-spacing:.08em}
-  .header-right{display:flex;align-items:center;gap:20px}
-  .hbtn{display:inline-flex;align-items:center;justify-content:center;background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 12px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s;text-decoration:none;user-select:none}
-  .hbtn:hover,.hbtn:active{border-color:var(--amber);color:var(--amber)}
-  .hbtn:disabled{opacity:.4;cursor:not-allowed;pointer-events:none}
-
-  main{padding:28px 32px;max-width:1100px}
-  @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-  @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+  main{max-width:1100px}
 
   .page-title{display:flex;align-items:center;gap:10px;margin-bottom:8px;animation:fadeUp .3s ease}
   .page-title-icon{font-size:18px;color:var(--amber)}
@@ -156,16 +141,11 @@
   .date-preview-total{border-top:1px solid var(--border);margin-top:6px;padding-top:6px;color:var(--red);display:flex;justify-content:space-between;font-weight:500}
 
   @media(max-width:768px){
-    header{padding:0 16px}
-    main{padding:16px}
     .ops-grid{grid-template-columns:1fr}
-    .header-right{gap:12px}
-    .hbtn{min-height:40px;padding:8px 12px}
   }
   @media(max-width:480px){
     .op-footer{flex-direction:column;align-items:flex-start}
     .op-result{text-align:left}
-    .hbtn{min-height:44px}
     .form-row{flex-wrap:wrap}
     .form-label{width:100%}
     .op-input-wide{width:100%}
@@ -550,11 +530,8 @@
   </div>
 </div>
 
+<script src="/static/app.js"></script>
 <script>
-let API_KEY = localStorage.getItem('backupApiKey') || '';
-
-const H = () => ({'X-API-Key': API_KEY});
-
 // ── Modal de confirmação customizado ─────────────────────────────────────
 let _confirmResolve = null;
 let _confirmWord    = null;
@@ -833,10 +810,6 @@ async function loadLabels() {
 }
 
 // -- Excluir Versões por Data -------------------------------------------------
-function esc(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
-
 async function loadCleanupByDatePreview() {
   const before = document.getElementById('cleanupdate-before').value;
   const label  = document.getElementById('cleanupdate-label').value;
@@ -1128,25 +1101,7 @@ function submitLogin() {
 document.getElementById('loginInput').addEventListener('keydown', e => { if (e.key === 'Enter') submitLogin(); });
 document.getElementById('logoutBtn').addEventListener('click', () => showLogin(''));
 
-function toggleTheme() {
-  const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-  if (isLight) {
-    document.documentElement.removeAttribute('data-theme');
-    localStorage.setItem('nv-theme', 'dark');
-  } else {
-    document.documentElement.setAttribute('data-theme', 'light');
-    localStorage.setItem('nv-theme', 'light');
-  }
-  updateThemeBtn();
-}
-
-function updateThemeBtn() {
-  const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-  document.getElementById('themeBtn').textContent = isLight ? '☾ Escuro' : '☀ Claro';
-}
-
 // init
-updateThemeBtn();
 document.getElementById('cleanupdate-before').max = new Date().toISOString().split('T')[0];
 if (!API_KEY) { showLogin(''); }
 else          { loadLabels(); }
