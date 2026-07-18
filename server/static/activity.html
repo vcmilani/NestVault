@@ -7,41 +7,17 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="NestVault">
-<link rel="icon" type="image/png" href="/static/icon_web.png">
+<link rel="icon" type="image/png" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
 <link rel="manifest" href="/static/manifest.json">
 <title>Atividade — NestVault</title>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/theme.css">
+<link rel="stylesheet" href="/static/app.css">
 <link rel="stylesheet" href="/static/nav.css">
 <script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
 <style>
-  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
-  body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;min-height:100vh}
-  body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.04) 2px,rgba(0,0,0,.04) 4px);pointer-events:none;z-index:999}
-
-  header{border-bottom:1px solid var(--border);padding:0 32px;display:flex;align-items:center;justify-content:space-between;height:56px;position:sticky;top:0;background:var(--bg);z-index:10}
-  .logo{display:flex;align-items:center;gap:12px}
-  .logo-icon{width:28px;height:28px;border:1.5px solid var(--amber);display:grid;place-items:center;color:var(--amber);font-size:14px}
-  .logo-text{font-size:12px;font-weight:500;letter-spacing:.12em;text-transform:uppercase}
-  .logo-sub{font-size:10px;color:var(--text-dim);letter-spacing:.08em}
-  .header-right{display:flex;align-items:center;gap:16px}
-  .hbtn{display:inline-flex;align-items:center;justify-content:center;background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 12px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s;text-decoration:none;user-select:none}
-  .hbtn:hover,.hbtn:active{border-color:var(--amber);color:var(--amber)}
-  .hbtn.active{border-color:var(--amber);color:var(--amber)}
-
-  .last-updated{font-size:10px;color:var(--text-mute);letter-spacing:.06em;white-space:nowrap}
-
-  main{padding:28px 32px;max-width:1300px}
-  @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-
-  .error-bar{background:var(--red-dim);border:1px solid var(--red);padding:10px 16px;margin-bottom:20px;color:var(--red);font-size:11px;display:none}
-  .error-bar.visible{display:block}
-
-  /* Section headers */
-  .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
-  .section-title{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-dim);display:flex;align-items:center;gap:8px}
-  .section-title::before{content:'';display:block;width:3px;height:12px;background:var(--amber)}
-  .section-sub{font-size:10px;color:var(--text-mute);letter-spacing:.06em}
+  main{max-width:1300px}
+  .last-updated{font-size:10px}
 
   /* Running cards */
   .running-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}
@@ -51,9 +27,9 @@
   .running-card-meta{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--text-dim)}
   .running-card-meta span{color:var(--text)}
   .running-card-row{display:flex;gap:4px}
+  .running-card.maintenance{border-left-color:var(--text-dim)}
 
   .pulse-dot{width:7px;height:7px;border-radius:50%;background:var(--amber);box-shadow:0 0 8px var(--amber);animation:pulse 1.5s ease-in-out infinite;display:inline-block;flex-shrink:0;margin-top:3px}
-  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
 
   .empty-state{padding:32px;text-align:center;color:var(--text-mute);font-size:11px;letter-spacing:.08em;border:1px solid var(--border);background:var(--bg2)}
 
@@ -105,25 +81,14 @@
   .td-dim{color:var(--text-dim)}
   .td-nb{white-space:nowrap}
   .td-num{color:var(--blue);font-variant-numeric:tabular-nums}
-  .badge{display:inline-block;padding:2px 7px;font-size:10px;letter-spacing:.06em;text-transform:uppercase}
-  .badge-done{background:var(--green-dim);color:var(--green)}
-  .badge-failed{background:var(--red-dim);color:var(--red)}
-  .badge-incomplete{background:var(--bg3);border:1px solid var(--border2);color:var(--text-dim)}
-  .badge-success{background:var(--green-dim);color:var(--green)}
-  .badge-error{background:var(--red-dim);color:var(--red)}
-  .badge-partial{background:var(--amber-dim);color:var(--amber)}
-  .badge-unknown{background:var(--bg3);border:1px solid var(--border2);color:var(--text-dim)}
-  .badge-running{background:var(--amber-dim);color:var(--amber)}
-  .badge-absorb{background:color-mix(in srgb,var(--blue) 12%,var(--bg2));color:var(--blue)}
-  .badge-failed{background:var(--red-dim);color:var(--red)}
-  .diff-add{color:#22c55e;font-size:.85em}
-  .diff-mod{color:#f59e0b;font-size:.85em}
-  .diff-del{color:#ef4444;font-size:.85em}
-  .running-card.maintenance{border-left-color:var(--text-dim)}
+  .diff-add{color:var(--green);font-size:.85em}
+  .diff-mod{color:var(--amber);font-size:.85em}
+  .diff-del{color:var(--red);font-size:.85em}
 
-  .loading{padding:40px;text-align:center;color:var(--text-mute);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
-  .loading::after{content:'...';animation:dots 1.2s steps(4,end) infinite}
-  @keyframes dots{0%,20%{content:'.'}40%{content:'..'}60%,100%{content:'...'}}
+  /* Após a primeira carga, não re-dispara animações a cada poll */
+  body.nv-loaded .running-card,
+  body.nv-loaded .disk-mini,
+  body.nv-loaded .table-wrap{animation:none}
 
   /* Status filter toggles */
   .status-filters{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
@@ -138,37 +103,12 @@
   .notif-bar{display:none;background:color-mix(in srgb,var(--blue) 10%,var(--bg2));border:1px solid var(--blue-dim);padding:8px 18px;font-size:11px;color:var(--blue);align-items:center;gap:10px;margin-bottom:12px}
   .notif-bar.visible{display:flex}
 
-  /* Login overlay */
-  .login-overlay{position:fixed;inset:0;background:var(--overlay-bg);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
-  .login-box{border:1px solid var(--border2);border-top:2px solid var(--amber);background:var(--bg2);padding:40px 48px;width:min(400px,calc(100vw - 32px));animation:fadeUp .3s ease}
-  .login-title{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--amber);margin-bottom:6px}
-  .login-sub{font-size:11px;color:var(--text-dim);margin-bottom:28px}
-  .login-label{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);display:block;margin-bottom:8px}
-  .login-input{width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:13px;padding:10px 14px;outline:none;transition:border-color .15s}
-  .login-input:focus{border-color:var(--amber)}
-  .login-btn{margin-top:16px;width:100%;background:var(--amber);border:none;color:var(--bg);font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;padding:11px;cursor:pointer;transition:opacity .15s;min-height:44px}
-  .login-btn:hover{opacity:.85}
-  .login-error{margin-top:12px;font-size:11px;color:var(--red);min-height:16px}
-
-  ::-webkit-scrollbar{width:6px;height:6px}
-  ::-webkit-scrollbar-track{background:var(--bg)}
-  ::-webkit-scrollbar-thumb{background:var(--border2)}
-
   @media(max-width:768px){
-    main{padding:16px}
-    header{padding:0 16px}
-    .header-right{gap:10px}
-    .hbtn{min-height:40px;padding:8px 10px}
     .storage-nums{grid-template-columns:1fr 1fr}
-    .login-input{font-size:16px}
   }
   @media(max-width:480px){
-    main{padding:12px 10px}
     .running-grid{grid-template-columns:1fr}
     .storage-nums{grid-template-columns:1fr 1fr}
-    .login-box{padding:28px 20px}
-    .login-btn{min-height:48px}
-    .hbtn{min-height:44px}
   }
 </style>
 </head>
@@ -182,12 +122,12 @@
   <div class="header-right">
     <span class="last-updated" id="lastUpdated"></span>
     <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
-    <a class="hbtn" href="/" style="text-decoration:none">← Dashboard</a>
-    <a class="hbtn" href="/disks" style="text-decoration:none">⊞ Discos</a>
-    <a class="hbtn" href="/maintenance" style="text-decoration:none">⚙ Manutenção</a>
-    <a class="hbtn active" href="/activity" style="text-decoration:none">◎ Atividade</a>
-    <a class="hbtn" href="/rclone-jobs" style="text-decoration:none">⟳ rclone</a>
-    <a class="hbtn" href="/stats" style="text-decoration:none">∑ Stats</a>
+    <a class="hbtn" href="/">← Dashboard</a>
+    <a class="hbtn" href="/disks">⊞ Discos</a>
+    <a class="hbtn" href="/maintenance">⚙ Manutenção</a>
+    <a class="hbtn active" href="/activity">◎ Atividade</a>
+    <a class="hbtn" href="/rclone-jobs">⟳ rclone</a>
+    <a class="hbtn" href="/stats">∑ Stats</a>
     <button class="hbtn always-visible" id="logoutBtn">⌀ API Key</button>
     <button class="nav-hamburger"></button>
   </div>
@@ -260,20 +200,11 @@
   </div>
 </div>
 
+<script src="/static/app.js"></script>
 <script>
-  let API_KEY = localStorage.getItem('backupApiKey') || '';
   let _statusFilter = 'all';
   let _lastVersionStatuses = {};  // label -> status (para notificações)
-  const H = () => ({'X-API-Key': API_KEY});
 
-  const fmtSize = b => {
-    if (!b) return '0 B';
-    const u = ['B','KB','MB','GB','TB'];
-    for (const unit of u) { if (Math.abs(b) < 1024) return b.toFixed(1)+' '+unit; b /= 1024; }
-    return b.toFixed(1)+' PB';
-  };
-  const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-  const fmtDate = s => s ? s.replace('T',' ').slice(0,19) : '—';
   const fmtDiff = v => {
     if (v.diff_added == null) return '<span class="td-dim">—</span>';
     const parts = [];
@@ -299,32 +230,6 @@
     return (s/3600).toFixed(1)+'h';
   };
   const badge = s => `<span class="badge badge-${esc(s)}">${esc(s)}</span>`;
-
-  // Error bar
-  function showError(msg) {
-    const b = document.getElementById('errorBar');
-    b.textContent = '⚠ '+msg; b.classList.add('visible');
-  }
-  function clearError() { document.getElementById('errorBar').classList.remove('visible'); }
-
-  // Auth
-  function showLogin(msg='') {
-    document.getElementById('loginOverlay').style.display = 'flex';
-    document.getElementById('loginError').textContent = msg;
-    clearTimeout(_pollTimer);
-  }
-  function hideLogin() { document.getElementById('loginOverlay').style.display = 'none'; }
-
-  document.getElementById('loginForm').addEventListener('submit', e => {
-    e.preventDefault();
-    const key = document.getElementById('apiKeyInput').value.trim();
-    if (!key) return;
-    API_KEY = key; localStorage.setItem('backupApiKey', key);
-    hideLogin(); poll();
-  });
-  document.getElementById('logoutBtn').addEventListener('click', () => {
-    localStorage.removeItem('backupApiKey'); API_KEY = ''; showLogin();
-  });
 
   // Status filter
   function setStatusFilter(f) {
@@ -385,10 +290,10 @@
     });
   }
 
-  // Polling
+  // Polling — adaptativo (2s com algo rodando, 5s ocioso, 10s em erro),
+  // pausado quando a aba fica oculta e retomado ao voltar.
   let _pollTimer = null;
-  let _lastUpdateTime = null;
-  let _tickTimer = null;
+  let _pollPaused = false;
 
   function _interval(data) {
     const hasMaintRunning = (data.maintenance_jobs || []).some(j => j.status === 'running');
@@ -396,13 +301,15 @@
   }
 
   async function poll() {
+    if (document.hidden) { _pollPaused = true; return; }
+    _pollPaused = false;
     try {
       const r = await fetch('/api/activity', {headers: H()});
       if (r.status === 401) { showLogin('API Key inválida.'); return; }
       if (!r.ok) throw new Error('HTTP '+r.status);
       const data = await r.json();
       clearError();
-      _lastUpdateTime = Date.now();
+      nvMarkUpdated();
       render(data);
       clearTimeout(_pollTimer);
       _pollTimer = setTimeout(poll, _interval(data));
@@ -413,23 +320,28 @@
     }
   }
 
-  function _startTick() {
-    clearInterval(_tickTimer);
-    _tickTimer = setInterval(() => {
-      if (!_lastUpdateTime) return;
-      const secs = Math.round((Date.now() - _lastUpdateTime) / 1000);
-      const el = document.getElementById('lastUpdated');
-      if (el) el.textContent = 'atualizado há '+secs+'s';
-    }, 1000);
-  }
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && _pollPaused) poll();
+  });
 
-  // Render
+  // Render — só reconstrói o DOM quando os dados mudam (evita flicker e
+  // perda de scroll). Com algo rodando, força re-render a cada 30s para o
+  // "iniciado há" não congelar.
+  let _lastRenderKey = null;
+
   function render(data) {
     _checkNotifications(data.running_versions || [], data.recent_versions || []);
+    const hasRunning = (data.running_versions || []).length > 0
+      || (data.maintenance_jobs || []).some(j => j.status === 'running');
+    const key = JSON.stringify(data) + (hasRunning ? '|' + Math.floor(Date.now() / 30000) : '');
+    if (key === _lastRenderKey) return;
+    _lastRenderKey = key;
+
     renderRunning(data.running_versions || [], data.maintenance_jobs || []);
     renderStorage(data.storage, data.disks);
     renderRecent(data.recent_versions || [], data.maintenance_jobs || []);
     setTimeout(applyStatusFilter, 0);
+    document.body.classList.add('nv-loaded');
     if (typeof _updateOverflowHints === 'function') _updateOverflowHints();
   }
 
@@ -599,28 +511,9 @@
       </div>`;
   }
 
-  // Theme
-  function toggleTheme() {
-    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-    if (isLight) { document.documentElement.removeAttribute('data-theme'); localStorage.setItem('nv-theme','dark'); }
-    else { document.documentElement.setAttribute('data-theme','light'); localStorage.setItem('nv-theme','light'); }
-    updateThemeBtn();
-  }
-  function updateThemeBtn() {
-    const btn = document.getElementById('themeBtn');
-    if (btn) btn.textContent = document.documentElement.getAttribute('data-theme') === 'light' ? '☾ Escuro' : '☀ Claro';
-  }
-  updateThemeBtn();
-
-  // Init
-  async function init() {
-    const resp = await fetch('/health');
-    if (!resp.ok) { showError('Servidor indisponível'); return; }
-    _startTick();
-    _showNotifBannerIfNeeded();
-    poll();
-  }
-  init();
+  // Init — o próprio poll faz o auth-check (401 → login)
+  _showNotifBannerIfNeeded();
+  poll();
 </script>
 <script src="/static/nav.js"></script>
 </body>

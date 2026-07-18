@@ -1,5 +1,5 @@
 """
-NestVault  v5.1.0
+NestVault  v7.7.0
 Cada execucao de backup cria uma nova versao dentro do label.
 Conteudo identico e armazenado uma unica vez no servidor (deduplicacao por sha256).
 
@@ -11,24 +11,29 @@ Uso:
     nestvault cleanup --label "docs" --keep 5
     nestvault backups --server http://192.168.1.100:8000
 
-Changelog:
-  v5.1.0  Opção de reconectar conta cloud: botão "↺ Reconectar" no dashboard
-          para contas com token revogado (reauth_required); reutiliza a
-          credencial existente preservando todos os jobs associados.
+Changelog (cliente — histórico completo do sistema no README):
+  v7.7  Restore paralelo (--workers, padrao 4) com verificação SHA-256 por
+        arquivo; walk de coleta ordena durante a varredura em vez de acumular
+        a árvore inteira em memória; falha de /check/batch cai para upload
+        direto sem inflar a contagem de erros.
+  v7.0  Modo batch (/check/batch) com hashing em ProcessPoolExecutor e uploads
+        paralelos; retry com backoff e gate global durante reenvio de upload;
+        cache incremental por mtime+size da versão anterior.
+  v5.1  Opção de reconectar conta cloud no dashboard (removida na v7.3 junto
+        com o backend OAuth — cloud backup é via rclone desde então).
   v5.0  Prompt automático de API Key em erros 401 — ao receber autenticação
         negada, o cliente solicita a chave interativamente e retenta a
         operação sem necessidade de re-executar o comando.
   v4.8  Limpeza de versões por data (cleanup-by-date) com execução em background
         e lotes para evitar database is locked; operações de manutenção
         aparecem na tela de atividades da interface web.
-  v4.7  Hamburger menu e responsividade mobile em todas as páginas da UI.
   v4.6  Modo acumulativo (--accumulate): herda arquivos ausentes da versão
         anterior via absorb, ideal para galerias e acervos parciais.
   v4.5  Suporte a criptografia de arquivos existentes (encrypt-existing) e
         reconciliação de replicação (reconcile-replication).
 """
 
-VERSION = "v7.0.0"
+VERSION = "v7.7.0"
 
 import os, sys, hashlib, argparse, base64, socket, threading, time
 from pathlib import Path
@@ -508,18 +513,19 @@ def backup_directory(
     if prev_cache:
         _dim(f"Cache: {len(prev_cache)} arquivo(s) da versao anterior")
 
+    # Ordena dirs/arquivos durante o walk (determinístico) em vez de acumular
+    # a árvore inteira numa lista extra e ordenar globalmente no final.
     pending = []
-    collected: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root, onerror=lambda e: _dim(f"Aviso: {e}")):
-        for name in filenames:
-            collected.append(Path(dirpath) / name)
-    for fp in sorted(collected):
-        if not fp.is_file() or fp.name in IGNORED_NAMES:
-            continue
-        if any(_is_excluded(fp, root, ex) for ex in (exclude or [])):
-            continue
-        op = str(fp) if not path_prefix else str(Path(path_prefix) / fp.relative_to(root))
-        pending.append((fp, op))
+        dirnames.sort()
+        for name in sorted(filenames):
+            fp = Path(dirpath) / name
+            if not fp.is_file() or fp.name in IGNORED_NAMES:
+                continue
+            if any(_is_excluded(fp, root, ex) for ex in (exclude or [])):
+                continue
+            op = str(fp) if not path_prefix else str(Path(path_prefix) / fp.relative_to(root))
+            pending.append((fp, op))
 
     total = len(pending)
     _kv("Arquivos", str(total))
@@ -609,13 +615,14 @@ def backup_directory(
                         else:
                             action_map[op] = ("upload", sha256, size, mtime, fp)
                 except requests.RequestException as e:
-                    _err(f"Batch check: {e}")
+                    # Falha do lote não é falha dos arquivos: cai para upload
+                    # direto (o /upload deduplica no servidor) sem inflar a
+                    # contagem de erros — um aviso único por lote basta.
+                    _warn(f"Batch check falhou ({len(batch)} arquivo(s) → upload direto): {e}")
                     for item in batch:
                         op = item["original_path"]
                         sha256, size, mtime = hashed[op]
                         action_map[op] = ("upload", sha256, size, mtime, fp_map[op])
-                        with lock:
-                            stats["errors"] += 1
 
             # ----- Fase 2: uploads e registers paralelos -----
             def _do_fast(fp, op, mtime, sha256):
@@ -888,7 +895,8 @@ def list_versions(label, server=DEFAULT_SERVER):
 
 # -- Restore ------------------------------------------------------------------
 def restore(destination, label, version_key, server=DEFAULT_SERVER,
-            path_prefix=None, dry_run=False, overwrite=False, exclude=None):
+            path_prefix=None, dry_run=False, overwrite=False, exclude=None,
+            workers=4):
     dest_root = Path(destination)
     dest_root.mkdir(parents=True, exist_ok=True)
 
@@ -916,47 +924,57 @@ def restore(destination, label, version_key, server=DEFAULT_SERVER,
     console.print()
 
     stats = {"restored": 0, "skipped": 0, "errors": 0}
+    lock = threading.Lock()
 
+    # Fase 1 (sequencial, sem I/O): filtros de path e seleção do que processar.
+    to_process: list[tuple[int, str, Path, str, int]] = []
+    for record in files:
+        file_id       = record["id"]
+        original_path = record["original_path"]
+        sha256        = record["sha256"]
+        size          = record["size"]
+
+        relative = (original_path[len(path_prefix):].lstrip("/")
+                    if path_prefix and original_path.startswith(path_prefix)
+                    else original_path.lstrip("/"))
+        dest_file = dest_root / relative
+
+        # Defesa contra path traversal (zip-slip): garante que o destino
+        # resolvido permanece dentro de dest_root, mesmo se o servidor enviar
+        # um original_path com segmentos ".." que escapariam do diretorio.
+        try:
+            dest_file.resolve().relative_to(dest_root.resolve())
+        except ValueError:
+            _err(f"Caminho inseguro ignorado: {original_path!r}")
+            stats["errors"] += 1
+            continue
+
+        if Path(relative).name in IGNORED_NAMES:
+            stats["skipped"] += 1
+            continue
+
+        if any(ex in Path(relative).parts for ex in (exclude or [])):
+            stats["skipped"] += 1
+            continue
+
+        to_process.append((file_id, relative, dest_file, sha256, size))
+
+    # Fase 2 (paralela, mesmo padrão do backup): hash de existentes + download.
     with _make_transfer_progress() as progress:
-        for record in files:
-            file_id       = record["id"]
-            original_path = record["original_path"]
-            sha256        = record["sha256"]
-            size          = record["size"]
-
-            relative = (original_path[len(path_prefix):].lstrip("/")
-                        if path_prefix and original_path.startswith(path_prefix)
-                        else original_path.lstrip("/"))
-            dest_file = dest_root / relative
-
-            # Defesa contra path traversal (zip-slip): garante que o destino
-            # resolvido permanece dentro de dest_root, mesmo se o servidor enviar
-            # um original_path com segmentos ".." que escapariam do diretorio.
-            try:
-                dest_file.resolve().relative_to(dest_root.resolve())
-            except ValueError:
-                _err(f"Caminho inseguro ignorado: {original_path!r}")
-                stats["errors"] += 1
-                continue
-
-            if Path(relative).name in IGNORED_NAMES:
-                stats["skipped"] += 1
-                continue
-
-            if any(ex in Path(relative).parts for ex in (exclude or [])):
-                stats["skipped"] += 1
-                continue
+        def _restore_one(item):
+            file_id, relative, dest_file, sha256, size = item
 
             if dest_file.exists() and not overwrite:
                 match = sha256_file(dest_file) == sha256
                 label_str = "[identico]" if match else "[modificado — use --overwrite]"
                 _dim(f"{'SKIP' if match else 'DIFF'}  {relative}  {label_str}")
-                stats["skipped"] += 1
-                continue
+                with lock:
+                    stats["skipped"] += 1
+                return
 
             if dry_run:
                 _dim(f"DOWN  {relative}  ({fmt_size(size)})  [dry-run]")
-                continue
+                return
 
             try:
                 r = _session.get(f"{server}/files/{file_id}/download",
@@ -968,22 +986,31 @@ def restore(destination, label, version_key, server=DEFAULT_SERVER,
                     Path(relative).name[:40],
                     total=total_bytes / (1024 * 1024),
                 )
-                with open(dest_file, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=65536):
-                        f.write(chunk)
-                        progress.update(task_id, advance=len(chunk) / (1024 * 1024))
-                progress.remove_task(task_id)
+                try:
+                    with open(dest_file, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=65536):
+                            f.write(chunk)
+                            progress.update(task_id, advance=len(chunk) / (1024 * 1024))
+                finally:
+                    progress.remove_task(task_id)
 
                 if sha256_file(dest_file) != sha256:
                     _err(f"Integridade falhou — {relative} removido")
                     dest_file.unlink()
-                    stats["errors"] += 1
-                    continue
-                stats["restored"] += 1
+                    with lock:
+                        stats["errors"] += 1
+                    return
+                with lock:
+                    stats["restored"] += 1
 
             except requests.RequestException as e:
                 _err(f"{relative}: {e}")
-                stats["errors"] += 1
+                with lock:
+                    stats["errors"] += 1
+
+        if to_process:
+            with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+                list(pool.map(_restore_one, to_process))
 
     total_attempted = stats["restored"] + stats["errors"]
     if not stats["errors"]:
@@ -1269,6 +1296,8 @@ def main():
     pr.add_argument("--dry-run", action="store_true")
     pr.add_argument("--exclude", nargs="+", default=[],
                     help="Nomes de diretório a ignorar durante o restore")
+    pr.add_argument("--workers", type=int, default=4,
+                    help="Downloads paralelos (padrao: 4)")
 
     # cleanup
     pc = sub.add_parser("cleanup", help="Remove versoes antigas de um ou todos os backups")
@@ -1340,7 +1369,7 @@ def main():
         restore(
             args.destination, args.label, args.version_key,
             args.server, args.prefix, args.dry_run, args.overwrite,
-            exclude=args.exclude,
+            exclude=args.exclude, workers=args.workers,
         )
 
     elif args.command == "cleanup":

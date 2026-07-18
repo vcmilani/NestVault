@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from cache_state import invalidate_activity
 from database import DATABASE_URL, DB_PATH, SessionLocal, MaintenanceJob, engine
 from sqlalchemy import text
-from storage import healthy_volumes
+from storage import healthy_volumes, fmt_bytes as _fmt_bytes
 
 log = logging.getLogger("backup-server")
 
@@ -78,16 +78,6 @@ def _estimate_db_size() -> int:
             return Path(DB_PATH).stat().st_size
         except OSError:
             return 0
-
-
-def _fmt_bytes(n: int) -> str:
-    if n >= 1 << 30:
-        return f"{n / (1 << 30):.1f} GB"
-    if n >= 1 << 20:
-        return f"{n / (1 << 20):.1f} MB"
-    if n >= 1 << 10:
-        return f"{n / (1 << 10):.1f} KB"
-    return f"{n} B"
 
 
 def run_db_backup() -> dict:

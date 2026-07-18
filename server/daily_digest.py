@@ -22,6 +22,7 @@ from database import (
     VersionFile,
     SessionLocal,
 )
+from storage import fmt_bytes as _fmt_bytes
 
 log = logging.getLogger("backup-server")
 
@@ -39,14 +40,6 @@ def _today_local_range() -> tuple[datetime, datetime, str]:
     start_utc   = start_local.astimezone(timezone.utc).replace(tzinfo=None)
     end_utc     = end_local.astimezone(timezone.utc).replace(tzinfo=None)
     return start_utc, end_utc, now_local.strftime("%d/%m/%Y")
-
-
-def _fmt_bytes(n: int) -> str:
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024:
-            return f"{n:.1f} {unit}"
-        n /= 1024
-    return f"{n:.1f} PB"
 
 
 def _version_diff(db, version: BackupVersion) -> dict:

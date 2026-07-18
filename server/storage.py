@@ -296,26 +296,43 @@ def rereplicate_to_volume(v: Path) -> None:
         db.close()
 
 
+_BACKFILL_BATCH = 1000
+
 def backfill_content_copies() -> None:
+    """Cria FileContentCopy para FileContents antigos sem entrada. Processa em
+    batches via NOT EXISTS para não carregar a tabela inteira na RAM no boot."""
     from database import SessionLocal, FileContent, FileContentCopy
     from sqlalchemy.exc import IntegrityError
+    from sqlalchemy import exists
     db = SessionLocal()
     try:
-        existing_shas = {r.sha256 for r in db.query(FileContentCopy.sha256).distinct().all()}
-        to_fill = (db.query(FileContent).filter(~FileContent.sha256.in_(existing_shas)).all()
-                   if existing_shas else db.query(FileContent).all())
         count = 0
-        for fc in to_fill:
-            p = Path(fc.stored_at)
-            vol = str(p.parents[2])
-            try:
-                db.add(FileContentCopy(sha256=fc.sha256, stored_at=fc.stored_at, volume_path=vol))
-                db.flush()
-                count += 1
-            except IntegrityError:
-                db.rollback()  # upload concorrente já criou a entrada — ok
-        if count:
+        while True:
+            batch = (
+                db.query(FileContent)
+                .filter(~exists().where(FileContentCopy.sha256 == FileContent.sha256))
+                .order_by(FileContent.sha256)
+                .limit(_BACKFILL_BATCH)
+                .all()
+            )
+            if not batch:
+                break
+            for fc in batch:
+                p = Path(fc.stored_at)
+                vol = str(p.parents[2])
+                try:
+                    db.add(FileContentCopy(sha256=fc.sha256, stored_at=fc.stored_at, volume_path=vol))
+                    db.flush()
+                    count += 1
+                except IntegrityError:
+                    # Upload concorrente já criou a entrada; o rollback desfaz o batch
+                    # atual, mas o NOT EXISTS re-seleciona as linhas na próxima volta.
+                    db.rollback()
+                    break
             db.commit()
+            if len(batch) < _BACKFILL_BATCH:
+                break
+        if count:
             log.info(f"[backfill] {count} entrada(s) migradas para file_content_copies")
         else:
             log.info("[backfill] Nenhuma entrada para migrar — file_content_copies já atualizado")
@@ -370,12 +387,27 @@ def ssd_cache_write_dir(db) -> "Path | None":
     return SSD_CACHE_DIR
 
 
-def _file_sha256_raw(path: Path) -> str:
+def fmt_bytes(n: float) -> str:
+    """Formata bytes de forma legível. Helper único do servidor (era duplicado
+    em db_backup, daily_digest e rclone_runner)."""
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} PB"
+
+
+def file_sha256(path: Path) -> str:
+    """SHA-256 de um arquivo em chunks de 1 MB. Helper único do servidor."""
     h = hashlib.sha256()
     with open(path, "rb") as f:
         while chunk := f.read(1 << 20):
             h.update(chunk)
     return h.hexdigest()
+
+
+# Alias retrocompatível (nome antigo usado pelos workers de SSD cache).
+_file_sha256_raw = file_sha256
 
 
 def _copy_with_sha256(src: Path, dst: Path) -> str:

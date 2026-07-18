@@ -79,6 +79,9 @@ from sqlalchemy.exc import IntegrityError
 from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob, SsdCachePendingMove, RcloneBackupJob, DiskSnapshot
 import crypto
 import storage
+# Implementação canônica do cleanup de órfãos (era duplicada aqui). O nome antigo
+# é mantido: cada sha256 é commitado individualmente, sem commit final agregado.
+from nightly_cleanup import _cleanup_orphan_contents as _cleanup_orphan_contents_no_commit
 from auth import require_api_key, API_KEY, AUTH_ENABLED
 from cloud.rclone_router import router as rclone_router
 import scheduler as sched
@@ -257,20 +260,35 @@ def _backup_labels_for_sha256s(db, sha256s: list[str]) -> list[str]:
     return sorted(r[0] for r in rows)
 
 
-def _bg_process_ssd_pending_moves():
+def _process_ssd_moves_worker(*, recovery: bool) -> None:
+    """Núcleo comum dos workers de move SSD → HDD.
+
+    recovery=False: worker normal (disparado por espaço/monitoramento).
+    recovery=True: retomada pós-reinício — recupera arquivos presos no SSD antes
+    de processar os moves pendentes e prefixa o resumo do job com "Recovery:".
+    """
+    if recovery and not storage.SSD_CACHE_DIR:
+        return
     if not _ssd_move_lock.acquire(blocking=False):
         log.debug("[ssd-cache] worker já em execução — ignorando chamada duplicada")
         return
     db = SessionLocal()
     job_id = None
+    prefix = "Recovery: " if recovery else ""
     try:
-        from database import SsdCachePendingMove
+        recovered = storage.recover_stuck_ssd_files(db) if recovery else 0
         total_pending = db.query(SsdCachePendingMove).count()
         if not total_pending:
-            storage.reconcile_orphaned_ssd_copies(db)
+            if not recovery:
+                storage.reconcile_orphaned_ssd_copies(db)
             return
-        job = MaintenanceJob(job_type="ssd-cache-move", status="running",
-                             summary=f"Movendo: 0 / {total_pending} arquivo(s) (0%)")
+        if recovery:
+            log.info(f"[ssd-cache] {total_pending} move(s) pendentes encontrados — retomando")
+            summary = (f"Recovery: {total_pending} pendente(s)"
+                       + (f", {recovered} recuperado(s) do SSD" if recovered else ""))
+        else:
+            summary = f"Movendo: 0 / {total_pending} arquivo(s) (0%)"
+        job = MaintenanceJob(job_type="ssd-cache-move", status="running", summary=summary)
         db.add(job)
         db.commit()
         db.refresh(job)
@@ -286,18 +304,22 @@ def _bg_process_ssd_pending_moves():
             all_moved.extend(sha256s)
             pct = round(processed / total_pending * 100)
             job = db.get(MaintenanceJob, job_id)
-            job.summary = f"Movendo: {processed} / {total_pending} arquivo(s) ({pct}%)"
-            db.commit()
-            invalidate_activity()
+            if job:
+                job.summary = f"{prefix}Movendo: {processed} / {total_pending} arquivo(s) ({pct}%)"
+                db.commit()
+                invalidate_activity()
         storage.reconcile_orphaned_ssd_copies(db)
         labels = _backup_labels_for_sha256s(db, all_moved)
         label_str = ", ".join(labels) if labels else "—"
         job = db.get(MaintenanceJob, job_id)
-        job.status = "done"
-        job.finished_at = datetime.now()
-        job.summary = f"{processed} arquivo(s) movidos SSD → HDD — backups: {label_str}"
+        if job:
+            job.status = "done"
+            job.finished_at = datetime.now()
+            job.summary = f"{prefix}{processed} arquivo(s) movidos SSD → HDD — backups: {label_str}"
+        if recovery:
+            log.info(f"[ssd-cache] recovery concluída — {processed} arquivo(s) movidos para HDD")
     except Exception as e:
-        log.error(f"[ssd-cache] Erro no worker de move: {e}")
+        log.error(f"[ssd-cache] Erro no worker de move{' (recovery)' if recovery else ''}: {e}")
         job = db.get(MaintenanceJob, job_id) if job_id is not None else None
         if job:
             job.status = "error"
@@ -310,61 +332,12 @@ def _bg_process_ssd_pending_moves():
         _ssd_move_lock.release()
 
 
+def _bg_process_ssd_pending_moves():
+    _process_ssd_moves_worker(recovery=False)
+
+
 def _resume_ssd_pending_moves():
-    if not storage.SSD_CACHE_DIR:
-        return
-    if not _ssd_move_lock.acquire(blocking=False):
-        log.debug("[ssd-cache] worker já em execução — recovery ignorada")
-        return
-    db = SessionLocal()
-    try:
-        recovered = storage.recover_stuck_ssd_files(db)
-        total_pending = db.query(SsdCachePendingMove).count()
-        if not total_pending:
-            return
-        log.info(f"[ssd-cache] {total_pending} move(s) pendentes encontrados — retomando")
-        summary_prefix = f"Recovery: {total_pending} pendente(s)" + (f", {recovered} recuperado(s) do SSD" if recovered else "")
-        job = MaintenanceJob(job_type="ssd-cache-move", status="running", summary=summary_prefix)
-        db.add(job)
-        db.commit()
-        db.refresh(job)
-        job_id = job.id
-        processed = 0
-        all_moved: list[str] = []
-        while True:
-            done, sha256s = storage.process_ssd_pending_moves(db)
-            if done == 0:
-                break
-            processed += done
-            all_moved.extend(sha256s)
-            pct = round(processed / total_pending * 100)
-            job = db.get(MaintenanceJob, job_id)
-            if job:
-                job.summary = f"Recovery: Movendo: {processed} / {total_pending} arquivo(s) ({pct}%)"
-                db.commit()
-                invalidate_activity()
-        storage.reconcile_orphaned_ssd_copies(db)
-        labels = _backup_labels_for_sha256s(db, all_moved)
-        label_str = ", ".join(labels) if labels else "—"
-        job = db.get(MaintenanceJob, job_id)
-        if job:
-            job.status = "done"
-            job.finished_at = datetime.now()
-            job.summary = f"Recovery: {processed} arquivo(s) movidos SSD → HDD — backups: {label_str}"
-        log.info(f"[ssd-cache] recovery concluída — {processed} arquivo(s) movidos para HDD")
-    except Exception as e:
-        log.error(f"[ssd-cache] Erro na recovery de moves pendentes: {e}")
-        if 'job_id' in locals():
-            job = db.get(MaintenanceJob, job_id)
-            if job:
-                job.status = "error"
-                job.finished_at = datetime.now()
-                job.summary = str(e)
-    finally:
-        db.commit()
-        invalidate_activity()
-        db.close()
-        _ssd_move_lock.release()
+    _process_ssd_moves_worker(recovery=True)
 
 
 async def _ssd_space_monitor():
@@ -745,10 +718,8 @@ class StatsResponse(BaseModel):
 
 
 # -- Helpers ------------------------------------------------------------------
-def _content_path(sha256: str, volume: Path) -> Path:
-    dest = volume / "_content" / sha256[:2] / sha256
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    return dest
+# Implementação canônica em storage.content_path (era duplicada aqui).
+_content_path = storage.content_path
 
 
 def _verify_stored_file(sha256: str, dest: Path, encrypted: bool) -> None:
@@ -1005,106 +976,6 @@ def _cleanup_orphan_contents(db: Session) -> tuple[int, int]:
     return removed, bytes_freed
 
 
-def _cleanup_orphan_contents_no_commit(db: Session, limit: int | None = None) -> tuple[int, int]:
-    """Remove FileContents órfãos usando DELETE condicional por sha256.
-
-    Cada sha256 é deletado em sua própria mini-transação que re-verifica no banco se o
-    conteúdo ainda está sem referência. Isso elimina a race condition TOCTOU onde uploads
-    concorrentes commitam VersionFiles para sha256s identificados como órfãos no snapshot
-    inicial mas antes da deleção ser efetivada.
-
-    O 'no_commit' no nome indica que não há um commit final agregado — cada sha256 deletado
-    é commitado individualmente. Callers que fazem db.commit() após esta função executam um
-    no-op se algum sha256 foi processado.
-    """
-    used_shas = db.query(VersionFile.sha256).distinct().subquery()
-    q = db.query(FileContent).filter(~FileContent.sha256.in_(select(used_shas)))
-    if limit is not None:
-        q = q.limit(limit)
-    candidates = q.all()
-
-    if not candidates:
-        return 0, 0
-
-    # Extrai dados antes do commit (objetos expiram após db.commit())
-    orphan_shas   = [fc.sha256 for fc in candidates]
-    size_by_sha   = {fc.sha256: fc.size      for fc in candidates}
-    stored_by_sha = {fc.sha256: fc.stored_at for fc in candidates}
-    copies_by_sha: dict[str, list[dict]] = {}
-    for c in db.query(FileContentCopy).filter(FileContentCopy.sha256.in_(orphan_shas)).all():
-        copies_by_sha.setdefault(c.sha256, []).append({"id": c.id, "stored_at": c.stored_at})
-    # SsdCachePendingMove é FK child de FileContent — deve ser deletado antes do parent.
-    ssd_moves_by_sha: dict[str, str] = {}
-    for m in db.query(SsdCachePendingMove).filter(SsdCachePendingMove.sha256.in_(orphan_shas)).all():
-        ssd_moves_by_sha[m.sha256] = m.ssd_path
-
-    # Encerra a transação de leitura (inclusive quaisquer pendências do caller, ex: deleções de
-    # VersionFile em _auto_cleanup_if_needed) para que as mini-transações por sha256 enxerguem
-    # o estado mais recente do DB.
-    db.commit()
-
-    bytes_freed = 0
-    removed = 0
-
-    for sha256 in orphan_shas:
-        copies   = copies_by_sha.get(sha256, [])
-        copy_ids = [c["id"] for c in copies]
-        try:
-            # FK children de FileContent: deletar antes do parent (respeita PRAGMA foreign_keys=ON).
-            if sha256 in ssd_moves_by_sha:
-                db.query(SsdCachePendingMove).filter(
-                    SsdCachePendingMove.sha256 == sha256
-                ).delete(synchronize_session=False)
-            if copy_ids:
-                db.query(FileContentCopy).filter(
-                    FileContentCopy.id.in_(copy_ids)
-                ).delete(synchronize_session=False)
-
-            # DELETE atômico: só remove se ainda não há VersionFile apontando para este sha256.
-            result = db.execute(
-                delete(FileContent).where(
-                    (FileContent.sha256 == sha256) &
-                    ~exists().where(VersionFile.sha256 == sha256)
-                )
-            )
-            if result.rowcount == 0:
-                # Re-referenciado por upload concurrent — desfaz deleção das cópias e segue.
-                db.rollback()
-                continue
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
-
-        # Deleção física (best-effort): falha deixa arquivo órfão no disco, mas o DB é consistente.
-        if sha256 in ssd_moves_by_sha:
-            try:
-                Path(ssd_moves_by_sha[sha256]).unlink()
-            except (FileNotFoundError, OSError):
-                pass
-        for c in copies:
-            try:
-                Path(c["stored_at"]).unlink()
-            except FileNotFoundError:
-                pass
-            except OSError as e:
-                log.warning(f"[cleanup-orphans] Não foi possível remover {c['stored_at']}: {e}")
-        if not copies:
-            try:
-                Path(stored_by_sha[sha256]).unlink()
-            except FileNotFoundError:
-                pass
-            except OSError as e:
-                log.warning(f"[cleanup-orphans] Não foi possível remover {stored_by_sha[sha256]}: {e}")
-
-        bytes_freed += size_by_sha.get(sha256, 0)
-        removed += 1
-
-    if removed:
-        log.debug(f"[cleanup-orphans] {removed} arquivo(s) — {bytes_freed / 1024:.1f} KB liberados")
-    return removed, bytes_freed
-
-
 _BG_CLEANUP_BATCH = 500
 _CLEANUP_BY_DATE_BATCH = 50  # versões por lote para evitar lock prolongado
 
@@ -1267,11 +1138,7 @@ def _bg_cleanup_by_date(version_ids: list[int], scope: str) -> None:
 _MIGRATE_BATCH = 50
 
 def _verify_file_sha256(path: Path, expected: str) -> bool:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest() == expected
+    return storage.file_sha256(path) == expected
 
 
 def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
@@ -1498,6 +1365,16 @@ def stats_page():
     if not page.exists():
         return HTMLResponse("<h1>Página não encontrada</h1>", status_code=404)
     return HTMLResponse(page.read_text(encoding="utf-8"))
+
+
+@app.get("/sw.js", include_in_schema=False)
+def service_worker():
+    # Servido na raiz (não em /static/) para que o service worker tenha
+    # escopo "/" e a PWA seja instalável.
+    sw = STATIC_DIR / "sw.js"
+    if not sw.exists():
+        raise HTTPException(404)
+    return FileResponse(sw, media_type="application/javascript")
 
 
 def _build_stats_data(db: Session) -> StatsResponse:
@@ -2712,14 +2589,104 @@ def _store_new_content(
             db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(volume)))
         db.flush()
     except IntegrityError:
-        # Upload concorrente do mesmo sha256 venceu — usar o registro já criado
+        # Upload concorrente do mesmo sha256 venceu — usar o registro já criado.
+        # NÃO apagar dest: é o MESMO path content-addressed do vencedor (apagar
+        # aqui deletava a única cópia do conteúdo e o download passava a dar 410).
+        # O arquivo em dest é válido — acabou de ser escrito/cifrado/verificado.
         db.rollback()
-        dest.unlink(missing_ok=True)
         fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
         return fc, None
     # _ensure_replicas é chamado APÓS db.commit() em upload_file para não manter
     # o write lock do SQLite durante as cópias de arquivo para volumes réplica.
     return fc, (dest if not use_ssd else None)
+
+
+def _register_existing_content_sync(sha256: str, db: Session) -> None:
+    """Modo "só registrar": valida que o conteúdo existe e garante réplicas.
+    Bloqueante (queries + I/O de réplica) — roda via asyncio.to_thread."""
+    fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+    if not fc:
+        raise HTTPException(400, f"Conteudo sha256={sha256} nao encontrado no storage")
+    first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).first()
+    if first_copy:
+        _ensure_replicas(sha256, Path(first_copy.stored_at), db)
+
+
+def _dedup_or_store_content_sync(
+    sha256: str,
+    size: int,
+    tmp_path: Path,
+    volume: Path,
+    ssd_dir: Optional[Path],
+    backup_label: str,
+    version_key: str,
+    original_path: str,
+    db: Session,
+) -> Optional[Path]:
+    """Dedup/verificação de integridade e armazenamento de conteúdo novo.
+    Bloqueante (queries + stat + I/O) — roda via asyncio.to_thread.
+    Retorna replica_source quando as réplicas devem ser criadas após o commit."""
+    replica_source: Optional[Path] = None
+    fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+    if fc:
+        first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).first()
+        if first_copy:
+            stored = Path(first_copy.stored_at)
+            # Checagem leve: existência + tamanho esperado no disco. A verificação
+            # profunda (decifrar e re-hashear) fica com o job validate-integrity.
+            try:
+                stored_size = stored.stat().st_size
+            except OSError:
+                stored_size = None
+            if stored_size is None:
+                log.warning(f"[integrity] {sha256[:8]}… ausente no disco — purgando e re-enviando")
+                _purge_corrupted_content(sha256, db)
+                fc = None
+            elif stored_size != _expected_stored_size(fc.size, fc.encrypted):
+                log.warning(
+                    f"[integrity] {sha256[:8]}… tamanho no disco ({stored_size}) difere do esperado "
+                    f"({_expected_stored_size(fc.size, fc.encrypted)}) — purgando e re-enviando"
+                )
+                _purge_corrupted_content(sha256, db)
+                fc = None
+            else:
+                log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — dedup sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
+                _ensure_replicas(sha256, stored, db)
+                tmp_path.unlink(missing_ok=True)
+        else:
+            tmp_path.unlink(missing_ok=True)
+
+    if not fc:
+        _, replica_source = _store_new_content(
+            sha256, size, tmp_path, volume, ssd_dir,
+            backup_label, version_key, original_path, db,
+        )
+    return replica_source
+
+
+def _upsert_version_file_sync(version_id: int, original_path: str, sha256: str,
+                              mtime: float, db: Session) -> int:
+    """Upsert do VersionFile + commit. Roda via asyncio.to_thread.
+    Retorna o id (valor plano — o ORM expira atributos após commits posteriores)."""
+    vf = (db.query(VersionFile)
+          .filter(VersionFile.version_id    == version_id,
+                  VersionFile.original_path == original_path)
+          .first())
+    if vf:
+        vf.sha256 = sha256
+        vf.mtime  = mtime
+    else:
+        vf = VersionFile(version_id=version_id, original_path=original_path,
+                         sha256=sha256, mtime=mtime)
+        db.add(vf)
+    db.commit()
+    db.refresh(vf)
+    return vf.id
+
+
+def _finish_replicas_sync(sha256: str, replica_source: Path, db: Session) -> None:
+    _ensure_replicas(sha256, replica_source, db)
+    db.commit()
 
 
 @app.post("/upload", response_model=UploadResponse, dependencies=[Depends(require_api_key)])
@@ -2738,8 +2705,13 @@ async def upload_file(
     O body da request E o arquivo diretamente. Sem encoding/decoding MIME.
     Metadados vao nos headers X-*.
     Modo "so registrar": enviar X-Content-Sha256 sem body (content_exists=True no /check).
+
+    Todas as queries/commits rodam via asyncio.to_thread: sob contenção do
+    write-lock do SQLite (timeout de até 60s) uma query síncrona aqui
+    serializaria o event loop inteiro.
     """
-    v = _get_version_or_404(backup_label, version_key, db)
+    v = await asyncio.to_thread(_get_version_or_404, backup_label, version_key, db)
+    version_id = v.id
 
     try:
         original_path = base64.b64decode(original_path.encode("ascii")).decode("utf-8")
@@ -2750,13 +2722,8 @@ async def upload_file(
 
     # Modo "so registrar" — conteudo ja existe no storage
     if content_sha256:
-        fc = db.query(FileContent).filter(FileContent.sha256 == content_sha256).first()
-        if not fc:
-            raise HTTPException(400, f"Conteudo sha256={content_sha256} nao encontrado no storage")
         sha256 = content_sha256
-        first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).first()
-        if first_copy:
-            await asyncio.to_thread(_ensure_replicas, sha256, Path(first_copy.stored_at), db)
+        await asyncio.to_thread(_register_existing_content_sync, sha256, db)
         log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — registrada sha256={sha256[:8]}…")
     else:
         # Escolhe volume HDD de destino final; decide se usa SSD como staging.
@@ -2776,74 +2743,31 @@ async def upload_file(
                 volume = _pick_volume()
             except storage.StorageThresholdExceeded:
                 volume = storage.pick_volume_last_resort()
-        ssd_dir   = _ssd_cache_write_dir(db)
+        ssd_dir   = await asyncio.to_thread(_ssd_cache_write_dir, db)
         write_dir = ssd_dir if ssd_dir else volume
         sha256, size, tmp_path = await _stream_request_to_disk(request, write_dir)
 
         try:
-            fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
-            if fc:
-                first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).first()
-                if first_copy:
-                    stored = Path(first_copy.stored_at)
-                    # Checagem leve: existência + tamanho esperado no disco. A verificação
-                    # profunda (decifrar e re-hashear) fica com o job validate-integrity.
-                    try:
-                        stored_size = stored.stat().st_size
-                    except OSError:
-                        stored_size = None
-                    if stored_size is None:
-                        log.warning(f"[integrity] {sha256[:8]}… ausente no disco — purgando e re-enviando")
-                        _purge_corrupted_content(sha256, db)
-                        fc = None
-                    elif stored_size != _expected_stored_size(fc.size, fc.encrypted):
-                        log.warning(
-                            f"[integrity] {sha256[:8]}… tamanho no disco ({stored_size}) difere do esperado "
-                            f"({_expected_stored_size(fc.size, fc.encrypted)}) — purgando e re-enviando"
-                        )
-                        _purge_corrupted_content(sha256, db)
-                        fc = None
-                    else:
-                        log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — dedup sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
-                        await asyncio.to_thread(_ensure_replicas, sha256, stored, db)
-                        tmp_path.unlink(missing_ok=True)
-                else:
-                    tmp_path.unlink(missing_ok=True)
-
-            if not fc:
-                fc, replica_source = await asyncio.to_thread(
-                    _store_new_content, sha256, size, tmp_path, volume, ssd_dir,
-                    backup_label, version_key, original_path, db,
-                )
+            replica_source = await asyncio.to_thread(
+                _dedup_or_store_content_sync, sha256, size, tmp_path, volume, ssd_dir,
+                backup_label, version_key, original_path, db,
+            )
         except Exception:
             tmp_path.unlink(missing_ok=True)
             raise
 
-    # Upsert VersionFile
-    vf = (db.query(VersionFile)
-          .filter(VersionFile.version_id    == v.id,
-                  VersionFile.original_path == original_path)
-          .first())
-    if vf:
-        vf.sha256 = sha256
-        vf.mtime  = mtime
-    else:
-        vf = VersionFile(version_id=v.id, original_path=original_path,
-                         sha256=sha256, mtime=mtime)
-        db.add(vf)
-
-    db.commit()
-    db.refresh(vf)
+    vf_id = await asyncio.to_thread(
+        _upsert_version_file_sync, version_id, original_path, sha256, mtime, db
+    )
 
     # Replica copies are created AFTER the write lock is released so that
     # concurrent uploads are not blocked during potentially slow file I/O.
     if replica_source is not None:
-        await asyncio.to_thread(_ensure_replicas, sha256, replica_source, db)
-        db.commit()
+        await asyncio.to_thread(_finish_replicas_sync, sha256, replica_source, db)
 
     return UploadResponse(
         status="registered",
-        file_id=vf.id,
+        file_id=vf_id,
         sha256=sha256,
         uploaded=not bool(content_sha256),
     )

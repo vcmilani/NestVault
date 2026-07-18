@@ -7,39 +7,17 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="NestVault">
-<link rel="icon" type="image/png" href="/static/icon_web.png">
+<link rel="icon" type="image/png" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
 <link rel="manifest" href="/static/manifest.json">
 <title>Estatísticas — NestVault</title>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/theme.css">
+<link rel="stylesheet" href="/static/app.css">
 <link rel="stylesheet" href="/static/nav.css">
 <script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
 <style>
-  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
-  body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;min-height:100vh}
-  body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.04) 2px,rgba(0,0,0,.04) 4px);pointer-events:none;z-index:999}
-
-  header{border-bottom:1px solid var(--border);padding:0 32px;display:flex;align-items:center;justify-content:space-between;height:56px;position:sticky;top:0;background:var(--bg);z-index:10}
-  .logo{display:flex;align-items:center;gap:12px}
-  .logo-icon{width:28px;height:28px;border:1.5px solid var(--amber);display:grid;place-items:center;color:var(--amber);font-size:14px}
-  .logo-text{font-size:12px;font-weight:500;letter-spacing:.12em;text-transform:uppercase}
-  .logo-sub{font-size:10px;color:var(--text-dim);letter-spacing:.08em}
-  .header-right{display:flex;align-items:center;gap:16px}
-  .hbtn{display:inline-flex;align-items:center;justify-content:center;background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 12px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s;text-decoration:none;user-select:none}
-  .hbtn:hover,.hbtn:active{border-color:var(--amber);color:var(--amber)}
-  .hbtn.active{border-color:var(--amber);color:var(--amber)}
-  .last-updated{font-size:10px;color:var(--text-mute);letter-spacing:.06em;white-space:nowrap}
-
-  main{padding:28px 32px;max-width:1300px}
-  @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-
-  .error-bar{background:var(--red-dim);border:1px solid var(--red);padding:10px 16px;margin-bottom:20px;color:var(--red);font-size:11px;display:none}
-  .error-bar.visible{display:block}
-
-  .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
-  .section-title{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-dim);display:flex;align-items:center;gap:8px}
-  .section-title::before{content:'';display:block;width:3px;height:12px;background:var(--amber)}
-  .section-sub{font-size:10px;color:var(--text-mute);letter-spacing:.06em}
+  main{max-width:1300px}
+  .last-updated{font-size:10px}
 
   /* Stats bar */
   .stats-bar{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;border:1px solid var(--border);margin-bottom:28px;background:var(--border)}
@@ -74,22 +52,6 @@
   .snum-value.dim{color:var(--text-dim)}
   .snum-sub{font-size:10px;color:var(--text-mute);margin-top:4px}
 
-  /* Disk mini cards */
-  .disks-mini{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;margin-bottom:24px}
-  .disk-mini{border:1px solid var(--border);background:var(--bg2);padding:14px 16px;animation:fadeUp .3s ease}
-  .disk-mini-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:8px}
-  .disk-mini-path{font-size:11px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
-  .disk-mini-badge{font-size:9px;letter-spacing:.06em;text-transform:uppercase;padding:1px 6px;flex-shrink:0}
-  .disk-mini-badge.ok{background:var(--green-dim);color:var(--green)}
-  .disk-mini-badge.warn{background:var(--amber-dim);color:var(--amber)}
-  .disk-mini-badge.crit{background:var(--red-dim);color:var(--red)}
-  .disk-mini-bar{height:4px;background:var(--bg3);border:1px solid var(--border);margin-bottom:6px}
-  .disk-mini-fill{height:100%;transition:width .5s}
-  .disk-mini-fill.ok{background:var(--green)}
-  .disk-mini-fill.warn{background:var(--amber)}
-  .disk-mini-fill.crit{background:var(--red)}
-  .disk-mini-meta{font-size:10px;color:var(--text-dim);display:flex;justify-content:space-between}
-
   /* Tables */
   .table-wrap{border:1px solid var(--border);overflow-x:auto;-webkit-overflow-scrolling:touch;animation:fadeUp .35s ease both}
   table{width:100%;border-collapse:collapse}
@@ -103,16 +65,8 @@
   .td-nb{white-space:nowrap}
   .td-num{color:var(--blue);font-variant-numeric:tabular-nums}
   .td-amber{color:var(--amber)}
-  .badge{display:inline-block;padding:2px 7px;font-size:10px;letter-spacing:.06em;text-transform:uppercase}
-  .badge-done{background:var(--green-dim);color:var(--green)}
-  .badge-error{background:var(--red-dim);color:var(--red)}
-  .badge-running{background:var(--amber-dim);color:var(--amber)}
-  .badge-unknown{background:var(--bg3);border:1px solid var(--border2);color:var(--text-dim)}
 
   .empty-state{padding:32px;text-align:center;color:var(--text-mute);font-size:11px;letter-spacing:.08em;border:1px solid var(--border);background:var(--bg2)}
-  .loading{padding:40px;text-align:center;color:var(--text-mute);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
-  .loading::after{content:'...';animation:dots 1.2s steps(4,end) infinite}
-  @keyframes dots{0%,20%{content:'.'}40%{content:'..'}60%,100%{content:'...'}}
 
   /* Trend chart */
   .trend-wrap{border:1px solid var(--border);background:var(--bg2);padding:16px 20px;margin-bottom:28px}
@@ -146,46 +100,22 @@
   .cloud-card-row{display:flex;justify-content:space-between;font-size:11px;color:var(--text-dim);margin-bottom:4px}
   .cloud-card-row span{color:var(--text)}
 
-  /* Login overlay */
-  .login-overlay{position:fixed;inset:0;background:var(--overlay-bg);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
-  .login-box{border:1px solid var(--border2);border-top:2px solid var(--amber);background:var(--bg2);padding:40px 48px;width:min(400px,calc(100vw - 32px));animation:fadeUp .3s ease}
-  .login-title{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--amber);margin-bottom:6px}
-  .login-sub{font-size:11px;color:var(--text-dim);margin-bottom:28px}
-  .login-label{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);display:block;margin-bottom:8px}
-  .login-input{width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:13px;padding:10px 14px;outline:none;transition:border-color .15s}
-  .login-input:focus{border-color:var(--amber)}
-  .login-btn{margin-top:16px;width:100%;background:var(--amber);border:none;color:var(--bg);font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;padding:11px;cursor:pointer;transition:opacity .15s;min-height:44px}
-  .login-btn:hover{opacity:.85}
-  .login-error{margin-top:12px;font-size:11px;color:var(--red);min-height:16px}
-
-  ::-webkit-scrollbar{width:6px;height:6px}
-  ::-webkit-scrollbar-track{background:var(--bg)}
-  ::-webkit-scrollbar-thumb{background:var(--border2)}
-
-  @media(max-width:768px){
-    main{padding:16px}
-    header{padding:0 16px}
-    .header-right{gap:10px}
-    .hbtn{min-height:40px;padding:8px 10px}
-    .stats-bar{grid-template-columns:repeat(2,1fr)}
-    .storage-nums{grid-template-columns:1fr 1fr}
-    .login-input{font-size:16px}
-  }
-  @media(max-width:480px){
-    main{padding:12px 10px}
-    .stats-bar{grid-template-columns:repeat(2,1fr)}
-    .stat-box{padding:14px 12px}
-    .stat-value{font-size:20px}
-    .storage-nums{grid-template-columns:1fr 1fr}
-    .login-box{padding:28px 20px}
-    .login-btn{min-height:48px}
-    .hbtn{min-height:44px}
-    .activity-grid{grid-template-columns:1fr}
-  }
   .activity-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem}
   .sub-title{font-size:.7rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.6rem}
   tr.row-stale td{color:var(--amber)}
   .badge-stale{background:rgba(245,176,65,.12);color:var(--amber);border:1px solid rgba(245,176,65,.35);border-radius:4px;padding:1px 6px;font-size:.75em;white-space:nowrap}
+
+  @media(max-width:768px){
+    .stats-bar{grid-template-columns:repeat(2,1fr)}
+    .storage-nums{grid-template-columns:1fr 1fr}
+  }
+  @media(max-width:480px){
+    .stats-bar{grid-template-columns:repeat(2,1fr)}
+    .stat-box{padding:14px 12px}
+    .stat-value{font-size:20px}
+    .storage-nums{grid-template-columns:1fr 1fr}
+    .activity-grid{grid-template-columns:1fr}
+  }
 </style>
 </head>
 <body>
@@ -198,12 +128,12 @@
   <div class="header-right">
     <span class="last-updated" id="lastUpdated"></span>
     <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
-    <a class="hbtn" href="/" style="text-decoration:none">← Dashboard</a>
-    <a class="hbtn" href="/disks" style="text-decoration:none">⊞ Discos</a>
-    <a class="hbtn" href="/maintenance" style="text-decoration:none">⚙ Manutenção</a>
-    <a class="hbtn" href="/activity" style="text-decoration:none">◎ Atividade</a>
-    <a class="hbtn" href="/rclone-jobs" style="text-decoration:none">⟳ rclone</a>
-    <a class="hbtn active" href="/stats" style="text-decoration:none">∑ Stats</a>
+    <a class="hbtn" href="/">← Dashboard</a>
+    <a class="hbtn" href="/disks">⊞ Discos</a>
+    <a class="hbtn" href="/maintenance">⚙ Manutenção</a>
+    <a class="hbtn" href="/activity">◎ Atividade</a>
+    <a class="hbtn" href="/rclone-jobs">⟳ rclone</a>
+    <a class="hbtn active" href="/stats">∑ Stats</a>
     <button class="hbtn always-visible" id="logoutBtn">⌀ API Key</button>
     <button class="nav-hamburger"></button>
   </div>
@@ -376,20 +306,8 @@
   </div>
 </div>
 
+<script src="/static/app.js"></script>
 <script>
-  let API_KEY = localStorage.getItem('backupApiKey') || '';
-  let _lastUpdateTime = null;
-  let _tickTimer = null;
-  const H = () => ({'X-API-Key': API_KEY});
-
-  const fmtSize = b => {
-    if (!b) return '0 B';
-    const u = ['B','KB','MB','GB','TB'];
-    for (const unit of u) { if (Math.abs(b) < 1024) return b.toFixed(1)+' '+unit; b /= 1024; }
-    return b.toFixed(1)+' PB';
-  };
-  const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-  const fmtDate = s => s ? s.replace('T',' ').slice(0,19) : '—';
   const fmtDuration = s => {
     if (s == null) return '—';
     if (s < 60) return s.toFixed(0)+'s';
@@ -423,39 +341,6 @@
     'reconcile-replication': 'Reconciliação de réplicas',
   };
 
-  function showError(msg) {
-    const b = document.getElementById('errorBar');
-    b.textContent = '⚠ '+msg; b.classList.add('visible');
-  }
-  function clearError() { document.getElementById('errorBar').classList.remove('visible'); }
-
-  function showLogin(msg='') {
-    document.getElementById('loginOverlay').style.display = 'flex';
-    document.getElementById('loginError').textContent = msg;
-  }
-  function hideLogin() { document.getElementById('loginOverlay').style.display = 'none'; }
-
-  document.getElementById('loginForm').addEventListener('submit', e => {
-    e.preventDefault();
-    const key = document.getElementById('apiKeyInput').value.trim();
-    if (!key) return;
-    API_KEY = key; localStorage.setItem('backupApiKey', key);
-    hideLogin(); load();
-  });
-  document.getElementById('logoutBtn').addEventListener('click', () => {
-    localStorage.removeItem('backupApiKey'); API_KEY = ''; showLogin();
-  });
-
-  function _startTick() {
-    clearInterval(_tickTimer);
-    _tickTimer = setInterval(() => {
-      if (!_lastUpdateTime) return;
-      const secs = Math.round((Date.now() - _lastUpdateTime) / 1000);
-      const el = document.getElementById('lastUpdated');
-      if (el) el.textContent = 'atualizado há '+secs+'s';
-    }, 1000);
-  }
-
   async function load() {
     try {
       const r = await fetch('/api/stats', {headers: H()});
@@ -463,7 +348,7 @@
       if (!r.ok) throw new Error('HTTP '+r.status);
       const data = await r.json();
       clearError();
-      _lastUpdateTime = Date.now();
+      nvMarkUpdated();
       render(data);
     } catch(e) {
       showError('Não foi possível conectar: '+e.message);
@@ -765,27 +650,7 @@
     el.innerHTML = `<div class="cloud-grid">${cards.join('')}</div>`;
   }
 
-  // Theme
-  function toggleTheme() {
-    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-    if (isLight) {
-      document.documentElement.removeAttribute('data-theme');
-      localStorage.removeItem('nv-theme');
-    } else {
-      document.documentElement.setAttribute('data-theme', 'light');
-      localStorage.setItem('nv-theme', 'light');
-    }
-    updateThemeBtn();
-  }
-  function updateThemeBtn() {
-    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-    const btn = document.getElementById('themeBtn');
-    if (btn) btn.textContent = isLight ? '◑ Escuro' : '☀ Claro';
-  }
-  updateThemeBtn();
-
-  _startTick();
-
+  // Init — a própria carga inicial faz o auth-check (401 → login)
   if (!API_KEY) {
     showLogin();
   } else {

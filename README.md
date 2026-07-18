@@ -776,6 +776,7 @@ nestvault restore /tmp/restore \
 | `--prefix` | | Restaurar apenas arquivos com esse prefixo |
 | `--exclude` | | Nomes de diretório a ignorar — aceita múltiplos valores |
 | `--overwrite` | | Sobrescreve arquivos existentes |
+| `--workers` | | Downloads paralelos (padrão: `4`) |
 | `--dry-run` | | Apenas lista, não baixa |
 
 A integridade de cada arquivo é validada após o download pelo SHA-256.
@@ -1062,6 +1063,7 @@ pytest tests/ --cov=server --cov-report=term-missing
 | `test_auth.py` | Rejeição sem chave, rejeição com chave errada, acesso liberado com chave válida |
 | `test_replication.py` | `/maintenance/rereplicate` e `/maintenance/reconcile-replication` — sub-replicação e sobre-replicação |
 | `test_disks.py` | `GET /storage/disks` — status de volumes, contagem de cópias físicas por volume |
+| `test_rclone_walk.py` | Walk incremental do rclone — conclusão + limpeza de checkpoint, resume de diretório falho, falha de listagem isolada, skip por mtime, dispatch por backend, override de `strategy`, `_MAX_RESUMES`, batching cross-directory, pastas protegidas |
 
 ---
 
@@ -1242,9 +1244,20 @@ O NestVault usa o `rclone.conf` padrão do usuário que roda o servidor. Para um
 
 ### Funcionamento interno
 
-- O servidor chama `rclone lsjson --recursive` para listar a pasta e `rclone cat` para baixar cada arquivo em streaming
-- SHA-256 calculado em single-pass durante o stream — sem buffer completo em memória
-- Arquivos idênticos (mesmo SHA-256) são detectados por deduplicação — nenhum byte extra no disco
+Cada job usa uma de duas estratégias de listagem, escolhida automaticamente por backend ou forçada pelo campo **Estratégia** do job (`auto` | `fast`/recursiva | `walk`/incremental):
+
+**Caminho rápido (`fast`)** — OneDrive, Google Drive, iCloud Drive e demais backends com listagem recursiva eficiente:
+- Uma única `rclone lsjson --recursive --fast-list` varre a pasta inteira num só processo
+- Download em **lotes** via `rclone copy --files-from` (até 250 arquivos ou 3 GB por lote), escopado à raiz do job — resolve nomes unicode/acentuados que falhavam com paths explícitos
+- Pipeline producer/consumer: enquanto um lote baixa, o anterior é hasheado/registrado
+
+**Walk incremental (`walk`)** — iCloud Photos (lento, com rate-limit, listagem recursiva não completa):
+- Lista **um diretório por vez** (`rclone lsjson` não recursivo), enfileirando subpastas
+- O download reaproveita o mesmo mecanismo de lotes do caminho rápido, agrupando arquivos de qualquer diretório
+- **Checkpoint resumível** em `BackupVersion.progress_json` (salvo a cada 5 min): um run interrompido retoma na mesma versão sem re-listar diretórios concluídos; diretórios com falha são re-tentados no próximo resume; após 3 resumes sem concluir, a versão é abandonada e uma nova é criada
+
+Comum às duas estratégias:
+- SHA-256 calculado após o download do lote; arquivos idênticos são detectados por deduplicação — nenhum byte extra no disco
 - Criptografia e replicação funcionam normalmente — o backup cloud é tratado igual ao backup via cliente CLI
 - Arquivos com `mtime` inalterado em relação à versão anterior são ignorados sem re-download — runs recorrentes em pastas estáticas são significativamente mais rápidos
 - Erros por arquivo são tolerados — o job continua e registra o erro na última mensagem

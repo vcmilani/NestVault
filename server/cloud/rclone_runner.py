@@ -33,7 +33,6 @@ unicode/acentuados falha em vários backends ('directory not found'); a listagem
 usa as entradas reais devolvidas pelo servidor.
 """
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -78,13 +77,8 @@ _WALK_SERVICES = {"photos"}
 _MAX_RESUMES   = 3   # versão incompleta é abandonada após este número de resumes falhados
 
 
-def _fmt_size(n: int) -> str:
-    """Formata bytes em string legível (ex: 12.3 MB)."""
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024:
-            return f"{n:.1f} {unit}"
-        n /= 1024
-    return f"{n:.1f} PB"
+# Formatação de bytes: helper único do servidor (storage.fmt_bytes).
+_fmt_size = storage.fmt_bytes
 
 
 # Pastas do OneDrive que exigem autenticação adicional — ignoradas em todos os jobs.
@@ -315,20 +309,14 @@ async def list_files_recursive(
 
 def _hash_file(path: Path) -> tuple[str, int]:
     """Calcula SHA-256 e tamanho de um arquivo local (bloqueante)."""
-    h = hashlib.sha256()
-    total = 0
-    with open(path, "rb") as f:
-        while chunk := f.read(storage.CHUNK_SIZE):
-            h.update(chunk)
-            total += len(chunk)
-    return h.hexdigest(), total
+    return storage.file_sha256(path), path.stat().st_size
 
 
 # ---------------------------------------------------------------------------
 # Dedup, store, encrypt, replicate
 # ---------------------------------------------------------------------------
 
-def _register_version_file_sync(version_id: int, entry, sha256: str, db) -> None:
+def _register_version_file(db, version_id: int, entry, sha256: str) -> None:
     """Registra o VersionFile (idempotente — seguro em re-processamento/resume)."""
     existing = (
         db.query(VersionFile)
@@ -349,6 +337,17 @@ def _register_version_file_sync(version_id: int, entry, sha256: str, db) -> None
     db.commit()
 
 
+def _register_version_file_sync(version_id: int, entry, sha256: str) -> None:
+    """Versão para asyncio.to_thread: abre a própria Session em vez de
+    compartilhar a do event loop entre threads (Session não é thread-safe;
+    commits concorrentes expirariam objetos ORM em uso por outra coroutine)."""
+    db = SessionLocal()
+    try:
+        _register_version_file(db, version_id, entry, sha256)
+    finally:
+        db.close()
+
+
 def _process_file_sync(
     version_id: int,
     entry,
@@ -357,36 +356,40 @@ def _process_file_sync(
     size: int,
     volume: Path,
     enc_key: bytes | None,
-    db,
 ) -> None:
     """Dedup, store, encrypt, replicate e registro no banco de um arquivo baixado.
-    Bloqueante (I/O + criptografia) — roda via asyncio.to_thread."""
-    fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
-    if fc:
-        tmp_path.unlink(missing_ok=True)
-        first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).first()
-        if first_copy:
-            storage.ensure_replicas(sha256, Path(first_copy.stored_at), db)
-    else:
-        dest = storage.content_path(sha256, volume)
-        shutil.move(str(tmp_path), str(dest))
-        if enc_key:
-            _fd, _tmp_enc = tempfile.mkstemp(dir=dest.parent, prefix="_enc_")
-            os.close(_fd)
-            tmp_enc = Path(_tmp_enc)
-            try:
-                crypto.encrypt_stream(dest, tmp_enc, enc_key)
-                shutil.move(str(tmp_enc), str(dest))
-            except Exception:
-                tmp_enc.unlink(missing_ok=True)
-                raise
-        fc = FileContent(sha256=sha256, stored_at=str(dest), size=size, encrypted=bool(enc_key))
-        db.add(fc)
-        db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(volume)))
-        db.commit()
-        storage.ensure_replicas(sha256, dest, db)
+    Bloqueante (I/O + criptografia) — roda via asyncio.to_thread com Session
+    própria (ver _register_version_file_sync)."""
+    db = SessionLocal()
+    try:
+        fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+        if fc:
+            tmp_path.unlink(missing_ok=True)
+            first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).first()
+            if first_copy:
+                storage.ensure_replicas(sha256, Path(first_copy.stored_at), db)
+        else:
+            dest = storage.content_path(sha256, volume)
+            shutil.move(str(tmp_path), str(dest))
+            if enc_key:
+                _fd, _tmp_enc = tempfile.mkstemp(dir=dest.parent, prefix="_enc_")
+                os.close(_fd)
+                tmp_enc = Path(_tmp_enc)
+                try:
+                    crypto.encrypt_stream(dest, tmp_enc, enc_key)
+                    shutil.move(str(tmp_enc), str(dest))
+                except Exception:
+                    tmp_enc.unlink(missing_ok=True)
+                    raise
+            fc = FileContent(sha256=sha256, stored_at=str(dest), size=size, encrypted=bool(enc_key))
+            db.add(fc)
+            db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(volume)))
+            db.commit()
+            storage.ensure_replicas(sha256, dest, db)
 
-    _register_version_file_sync(version_id, entry, sha256, db)
+        _register_version_file(db, version_id, entry, sha256)
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -409,18 +412,27 @@ def _load_checkpoint(version) -> tuple[set[str], list[str], int]:
 
 
 def _save_checkpoint_sync(
-    version, done_dirs: set[str], pending_dirs: list[str], resume_count: int, db
+    version_id: int, done_dirs: set[str], pending_dirs: list[str], resume_count: int
 ) -> None:
-    """Persiste o checkpoint do walk no progress_json da versão."""
-    version.progress_json = json.dumps({
-        # Ordem não importa — _load_checkpoint carrega como set(). sorted()
-        # custava caro repetido a cada save numa biblioteca com milhares de
-        # diretórios (done_dirs cresce ao longo do run).
-        "done_dirs": list(done_dirs),
-        "pending_dirs": pending_dirs,
-        "resume_count": resume_count,
-    })
-    db.commit()
+    """Persiste o checkpoint do walk no progress_json da versão.
+    Abre a própria Session (roda via asyncio.to_thread — ver
+    _register_version_file_sync) e recebe o id como valor plano."""
+    db = SessionLocal()
+    try:
+        version = db.get(BackupVersion, version_id)
+        if version is None:
+            return
+        version.progress_json = json.dumps({
+            # Ordem não importa — _load_checkpoint carrega como set(). sorted()
+            # custava caro repetido a cada save numa biblioteca com milhares de
+            # diretórios (done_dirs cresce ao longo do run).
+            "done_dirs": list(done_dirs),
+            "pending_dirs": pending_dirs,
+            "resume_count": resume_count,
+        })
+        db.commit()
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -569,7 +581,6 @@ async def _producer(
 async def _consumer(
     queue: asyncio.Queue,
     version_id: int,
-    db,
     enc_key: bytes | None,
     errors: list,
     abort: asyncio.Event,
@@ -589,14 +600,13 @@ async def _consumer(
             _, entry, sha256 = item
             try:
                 await asyncio.to_thread(
-                    _register_version_file_sync, version_id, entry, sha256, db
+                    _register_version_file_sync, version_id, entry, sha256
                 )
                 processed += 1
                 skipped   += 1
             except Exception as e:
                 errors.append(f"{entry.path}: {e}")
                 log.error(f"[rclone-runner] Erro ao registrar skip {entry.path}: {e}")
-                db.rollback()
             continue
 
         _, entry, tmp_path, sha256, size, volume = item
@@ -604,7 +614,7 @@ async def _consumer(
         try:
             await asyncio.to_thread(
                 _process_file_sync,
-                version_id, entry, tmp_path, sha256, size, volume, enc_key, db,
+                version_id, entry, tmp_path, sha256, size, volume, enc_key,
             )
             processed += 1
             bytes_dl  += size
@@ -613,7 +623,6 @@ async def _consumer(
             msg = f"{entry.path}: {e}"
             errors.append(msg)
             log.error(f"[rclone-runner] Erro ao processar {msg}")
-            db.rollback()
 
     return processed, skipped, bytes_dl
 
@@ -806,20 +815,15 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
         # diretórios): o walker varre e enfileira arquivo por arquivo, o
         # batcher agrupa até _BATCH_MAX_FILES (250) — cruzando diretórios
         # livremente — e baixa via _download_batch/_bulk_copy (as MESMAS
-        # funções que o caminho rápido já usa, sem alteração), e só o
-        # consumer final toca o banco. Isso elimina o overhead de 1 processo
-        # rclone por diretório pequeno, que era o gargalo real do
-        # experimento anterior (listar em paralelo não ajuda se o
-        # download/registro continua sendo 1 diretório de cada vez).
-        # Captura como strings simples ANTES do TaskGroup — job é um objeto
-        # ORM preso à Session `db`; com expire_on_commit=True (padrão), os
-        # commits frequentes do consumer expiram os atributos de `job`, e
-        # acessá-los de novo (job.remote_name) dispararia um lazy-load na
-        # MESMA sessão a partir de outra coroutine — concorrência real entre
-        # threads (to_thread) que corrompe o estado da Session. Strings
-        # puras não têm esse problema.
+        # funções que o caminho rápido já usa, sem alteração). Os helpers
+        # _*_sync que rodam via to_thread abrem a própria Session — nada
+        # cruza a Session do event loop com threads. Valores usados dentro
+        # do pipeline são capturados como planos (strings/int) ANTES do
+        # TaskGroup: objetos ORM presos à Session `db` expiram a cada commit
+        # e um lazy-load cross-coroutine corromperia o estado da Session.
         remote_name = job.remote_name
         remote_path = job.remote_path
+        version_id  = version.id
 
         file_queue: asyncio.Queue = asyncio.Queue()
         process_queue: asyncio.Queue = asyncio.Queue()
@@ -967,7 +971,7 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                     try:
                         await asyncio.to_thread(
                             _register_version_file_sync,
-                            version.id, entry, prev_files[entry.path][1], db,
+                            version_id, entry, prev_files[entry.path][1],
                         )
                         skipped_total   += 1
                         processed_total += 1
@@ -976,7 +980,6 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                     except Exception as e:
                         errors.append(f"{entry.path}: {e}")
                         log.error(f"[rclone-runner] Erro ao registrar skip {entry.path}: {e}")
-                        db.rollback()
                 else:
                     _, entry, tmp_path, sha256, size, volume = item
                     tmp_path = Path(tmp_path)
@@ -984,7 +987,7 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                     try:
                         await asyncio.to_thread(
                             _process_file_sync,
-                            version.id, entry, tmp_path, sha256, size, volume, enc_key, db,
+                            version_id, entry, tmp_path, sha256, size, volume, enc_key,
                         )
                         downloaded_total += 1
                         bytes_total      += size
@@ -995,7 +998,6 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                         tmp_path.unlink(missing_ok=True)
                         errors.append(f"{entry.path}: {e}")
                         log.error(f"[rclone-runner] Erro ao processar {entry.path}: {e}")
-                        db.rollback()
 
                 _tnow = time.monotonic()
                 # Checkpoint por tempo, não por contagem de itens — desacopla
@@ -1004,8 +1006,8 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                 if _tnow - t_last_checkpoint >= _CHECKPOINT_INTERVAL:
                     t_last_checkpoint = _tnow
                     await asyncio.to_thread(
-                        _save_checkpoint_sync, version, set(done_dirs),
-                        pending + failed_dirs, resume_count, db,
+                        _save_checkpoint_sync, version_id, set(done_dirs),
+                        pending + failed_dirs, resume_count,
                     )
 
                 if _tnow - t_last_progress >= 60:
@@ -1018,8 +1020,8 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
 
             # Varredura final — garante que o último lote parcial é persistido.
             await asyncio.to_thread(
-                _save_checkpoint_sync, version, set(done_dirs),
-                pending + failed_dirs, resume_count, db,
+                _save_checkpoint_sync, version_id, set(done_dirs),
+                pending + failed_dirs, resume_count,
             )
 
         async with asyncio.TaskGroup() as tg:
@@ -1050,12 +1052,17 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
             # 'incomplete' (resumível); o próximo run re-tenta failed_dirs.
             version.status = "incomplete"
             await asyncio.to_thread(
-                _save_checkpoint_sync, version, done_dirs, failed_dirs, resume_count, db
+                _save_checkpoint_sync, version_id, done_dirs, failed_dirs, resume_count
             )
         else:
-            version.status = "failed" if (processed_total == 0 and errors) else "done"
-            version.progress_json = None   # walk concluído — limpa o checkpoint
-            version.finished_at = datetime.now().astimezone().replace(tzinfo=None)
+            # UPDATE explícito: o checkpoint foi gravado por outra Session, então
+            # na Session `db` o progress_json ainda parece None — uma atribuição
+            # ORM não geraria UPDATE e o checkpoint sobreviveria no banco.
+            db.query(BackupVersion).filter(BackupVersion.id == version_id).update({
+                "status": "failed" if (processed_total == 0 and errors) else "done",
+                "progress_json": None,   # walk concluído — limpa o checkpoint
+                "finished_at": datetime.now().astimezone().replace(tzinfo=None),
+            }, synchronize_session=False)
         db.commit()
 
         summary = (
@@ -1163,7 +1170,7 @@ async def _run_fast_strategy(job: RcloneBackupJob, db) -> None:
         t_start = time.monotonic()
         _, (processed, skipped, bytes_dl) = await asyncio.gather(
             _producer(queue, all_files, prev_files, job.remote_name, job.remote_path, errors, abort),
-            _consumer(queue, version.id, db, enc_key, errors, abort),
+            _consumer(queue, version.id, enc_key, errors, abort),
         )
         elapsed = time.monotonic() - t_start
 

@@ -7,39 +7,18 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="NestVault">
-<link rel="icon" type="image/png" href="/static/icon_web.png">
+<link rel="icon" type="image/png" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
 <link rel="manifest" href="/static/manifest.json">
 <title>NestVault</title>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/theme.css">
+<link rel="stylesheet" href="/static/app.css">
 <link rel="stylesheet" href="/static/nav.css">
 <script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
 <style>
-  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
-  body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;min-height:100vh}
-  body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.04) 2px,rgba(0,0,0,.04) 4px);pointer-events:none;z-index:999}
-
-  /* Header */
-  header{border-bottom:1px solid var(--border);padding:0 32px;display:flex;align-items:center;justify-content:space-between;height:56px;position:sticky;top:0;background:var(--bg);z-index:10}
-  .logo{display:flex;align-items:center;gap:12px}
-  .logo-icon{width:28px;height:28px;border:1.5px solid var(--amber);display:grid;place-items:center;color:var(--amber);font-size:14px}
-  .logo-text{font-size:12px;font-weight:500;letter-spacing:.12em;text-transform:uppercase}
-  .logo-sub{font-size:10px;color:var(--text-dim);letter-spacing:.08em}
-  .header-right{display:flex;align-items:center;gap:20px}
+  main{max-width:1500px}
   .status-dot{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 2s ease-in-out infinite}
-  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-  .hbtn{display:inline-flex;align-items:center;justify-content:center;background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 12px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s;user-select:none}
-  .hbtn:hover,.hbtn:active{border-color:var(--amber);color:var(--amber)}
-  .hbtn:disabled{opacity:.4;cursor:not-allowed;pointer-events:none}
-  .small-btn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:2px 8px;font-family:var(--mono);font-size:10px;cursor:pointer;letter-spacing:.04em;transition:all .15s;display:inline-flex;align-items:center;gap:3px;white-space:nowrap;user-select:none}
-  .small-btn:hover,.small-btn:active{border-color:var(--amber);color:var(--amber)}
-  .small-btn:disabled{opacity:.35;cursor:not-allowed;pointer-events:none}
-  .small-btn.btn-run:hover{border-color:var(--green);color:var(--green)}
-  .small-btn.btn-run.is-running{border-color:var(--amber-dim);color:var(--amber);pointer-events:none}
-  .small-btn.btn-danger:hover{border-color:var(--red);color:var(--red)}
-  @keyframes spin{to{transform:rotate(360deg)}}
-  .spin{display:inline-block;animation:spin .8s linear infinite}
-  .last-updated{font-size:11px;color:var(--text-mute)}
+
   /* Failed backup alert banner */
   .failed-alert{display:none;background:var(--red-dim);border:1px solid var(--red);border-left:3px solid var(--red);padding:10px 18px;margin-bottom:16px;font-size:11px;color:var(--red);animation:fadeUp .3s ease}
   .failed-alert.visible{display:flex;align-items:center;gap:10px}
@@ -47,10 +26,6 @@
   .backup-search{width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:12px;padding:8px 14px;outline:none;margin-bottom:10px;transition:border-color .15s;box-sizing:border-box}
   .backup-search:focus{border-color:var(--amber)}
   .backup-search::placeholder{color:var(--text-mute)}
-
-  /* Layout */
-  main{padding:28px 32px;max-width:1500px}
-  @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
 
   /* Stats */
   .stats-bar{display:grid;grid-template-columns:repeat(6,1fr);gap:1px;border:1px solid var(--border);margin-bottom:28px;background:var(--border)}
@@ -69,16 +44,6 @@
   .disk-bar-fill.warn{background:var(--amber)}
   .disk-bar-fill.crit{background:var(--red)}
 
-  /* Error */
-  .error-bar{background:var(--red-dim);border:1px solid var(--red);padding:10px 16px;margin-bottom:20px;color:var(--red);font-size:11px;display:none}
-  .error-bar.visible{display:block}
-
-  /* Section */
-  .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
-  .section-title{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-dim);display:flex;align-items:center;gap:8px}
-  .section-title::before{content:'';display:block;width:3px;height:12px;background:var(--amber)}
-  .count-badge{background:var(--bg3);border:1px solid var(--border2);padding:2px 8px;font-size:10px;color:var(--text-dim)}
-
   /* Table */
   .table-wrap{border:1px solid var(--border);margin-bottom:24px;animation:fadeUp .4s .2s ease both;overflow-x:auto;-webkit-overflow-scrolling:touch}
   table{width:100%;border-collapse:collapse}
@@ -95,19 +60,11 @@
   .size-cell{text-align:right;color:var(--blue);font-variant-numeric:tabular-nums}
   .date-cell{color:var(--text-dim);white-space:nowrap}
   .dim-cell{color:var(--text-dim)}
-  .badge{display:inline-block;padding:2px 7px;font-size:10px;letter-spacing:.06em;text-transform:uppercase}
-  .badge-active,.badge-done{background:var(--green-dim);color:var(--green)}
-  .badge-failed{background:var(--red-dim);color:var(--red)}
-  .badge-running{background:var(--amber-dim);color:var(--amber)}
-  .badge-incomplete{background:var(--bg3);border:1px solid var(--border2);color:var(--text-dim)}
-  .badge-absorb{background:color-mix(in srgb,var(--blue) 12%,var(--bg2));color:var(--blue)}
-  @keyframes spin{to{transform:rotate(360deg)}}
-  .badge-running::before{content:'⟳ ';display:inline-block;animation:spin .9s linear infinite}
   tr.row-running>td:first-child{border-left:2px solid var(--amber)}
   tr.row-running{background:color-mix(in srgb,var(--amber) 5%,var(--bg2))}
   .running-pill{display:none;align-items:center;gap:5px;font-size:10px;color:var(--amber);letter-spacing:.06em}
   .running-pill.visible{display:inline-flex}
-  .running-pill .spin{display:inline-block;animation:spin .9s linear infinite}
+  .running-pill .spin{animation-duration:.9s}
 
   /* Versions sub-table */
   .versions-row td{padding:0}
@@ -127,22 +84,6 @@
   .files-inner table td{font-size:11px;padding:8px 14px 8px 52px}
   .path-cell{max-width:480px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
   .hash-cell{color:var(--text-mute);font-size:10px}
-  .empty{padding:32px;text-align:center;color:var(--text-mute);font-size:11px}
-  .loading{padding:40px;text-align:center;color:var(--text-mute);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
-  .loading::after{content:'...';animation:dots 1.2s steps(4,end) infinite}
-  @keyframes dots{0%,20%{content:'.'}40%{content:'..'}60%,100%{content:'...'}}
-
-  /* Login */
-  .login-overlay{position:fixed;inset:0;background:var(--overlay-bg);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px)}
-  .login-box{border:1px solid var(--border2);border-top:2px solid var(--amber);background:var(--bg2);padding:40px 48px;width:min(400px,calc(100vw - 32px));animation:fadeUp .3s ease}
-  .login-title{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--amber);margin-bottom:6px}
-  .login-sub{font-size:11px;color:var(--text-dim);margin-bottom:28px}
-  .login-label{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);display:block;margin-bottom:8px}
-  .login-input{width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:13px;padding:10px 14px;outline:none;transition:border-color .15s}
-  .login-input:focus{border-color:var(--amber)}
-  .login-btn{margin-top:16px;width:100%;background:var(--amber);border:none;color:var(--bg);font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;padding:11px;cursor:pointer;transition:opacity .15s;min-height:44px}
-  .login-btn:hover{opacity:.85}
-  .login-error{margin-top:12px;font-size:11px;color:var(--red);min-height:16px}
 
   /* Compare */
   .cmp-bar{padding:8px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
@@ -179,10 +120,6 @@
   .disk-tag-loading{color:var(--text-mute);font-size:10px}
   .disk-empty{color:var(--text-mute)}
 
-  ::-webkit-scrollbar{width:6px;height:6px}
-  ::-webkit-scrollbar-track{background:var(--bg)}
-  ::-webkit-scrollbar-thumb{background:var(--border2)}
-
   /* ── Scroll interno nas sub-tabelas ── */
   .files-inner{overflow-x:auto;-webkit-overflow-scrolling:touch}
   .diff-section-body{overflow-x:auto;-webkit-overflow-scrolling:touch}
@@ -190,17 +127,9 @@
   /* ── 768px — tablet/landscape ── */
   @media(max-width:768px){
     .stats-bar{grid-template-columns:repeat(3,1fr)}
-    main{padding:16px}
-    header{padding:0 16px}
-    .header-right{gap:12px}
-    .hbtn{min-height:40px;padding:8px 12px}
-    .small-btn{min-height:40px;padding:4px 10px}
     tbody tr td{padding:12px 10px}
     tbody tr td:first-child{padding-left:14px}
     .row-version td{padding:11px 14px 11px 28px}
-    .login-input{font-size:16px}
-    #jCredential,#jFolderSelect,#jFolderId,#jFolderName,#jLabel,#jCron{font-size:16px}
-    #authPastedUrl{font-size:16px}
   }
 
   /* ── 600px — tablet portrait ── */
@@ -211,15 +140,10 @@
   /* ── 480px — mobile ── */
   @media(max-width:480px){
     .stats-bar{grid-template-columns:repeat(2,1fr)}
-    main{padding:12px 10px}
     .stat-box{padding:14px 12px}
     .stat-value{font-size:20px}
-    .hbtn{min-height:44px;font-size:12px}
-    .login-box{padding:28px 20px;max-height:calc(100vh - 32px);overflow-y:auto}
-    .login-btn{min-height:48px}
     .diff-head{flex-wrap:wrap;gap:8px}
     .cmp-bar{flex-wrap:wrap;gap:8px}
-    .small-btn{min-height:44px}
     .cmp-btn{min-height:44px}
   }
 </style>
@@ -229,18 +153,18 @@
 <header>
   <div class="logo">
     <div class="logo-icon">◈</div>
-    <div><div class="logo-text">NestVault</div><div class="logo-sub">v7.0</div></div>
+    <div><div class="logo-text">NestVault</div><div class="logo-sub">v7.7</div></div>
   </div>
   <div class="header-right">
     <div class="status-dot" id="statusDot"></div>
     <span class="last-updated" id="lastUpdated">—</span>
     <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
     <button class="hbtn" onclick="loadAll()">↻ Refresh</button>
-    <a class="hbtn" href="/disks" style="text-decoration:none">⊞ Discos</a>
-    <a class="hbtn" href="/maintenance" style="text-decoration:none">⚙ Manutenção</a>
-    <a class="hbtn" href="/activity" style="text-decoration:none">◎ Atividade</a>
-    <a class="hbtn" href="/rclone-jobs" style="text-decoration:none">⟳ rclone</a>
-    <a class="hbtn" href="/stats" style="text-decoration:none">∑ Stats</a>
+    <a class="hbtn" href="/disks">⊞ Discos</a>
+    <a class="hbtn" href="/maintenance">⚙ Manutenção</a>
+    <a class="hbtn" href="/activity">◎ Atividade</a>
+    <a class="hbtn" href="/rclone-jobs">⟳ rclone</a>
+    <a class="hbtn" href="/stats">∑ Stats</a>
     <button class="hbtn always-visible" id="logoutBtn">⌀ API Key</button>
     <button class="nav-hamburger"></button>
   </div>
@@ -307,16 +231,12 @@
   </div>
 </div>
 
+<script src="/static/app.js"></script>
 <script>
-  let API_KEY = localStorage.getItem('backupApiKey') || '';
   let expandedLabel = null;
   let expandedVersion = {};  // label -> version_key
   let checkedVersions = {};  // label -> Set of version_keys (max 2)
-  let _lastLoadTime = null;
-  let _tickTimer    = null;
   let _allBackups   = [];    // cache para filtro
-
-  const H = () => ({'X-API-Key': API_KEY});
 
   const fmtDuration = s => {
     if (s === null || s === undefined) return '—';
@@ -324,48 +244,7 @@
     if (s < 3600)  return (s / 60).toFixed(1) + 'min';
     return (s / 3600).toFixed(1) + 'h';
   };
-
-  const fmtSize = b => {
-    const u = ['B','KB','MB','GB','TB'];
-    for (const unit of u) { if (b < 1024) return b.toFixed(1)+' '+unit; b /= 1024; }
-    return b.toFixed(1)+' PB';
-  };
-  const fmtDate = s => s ? s.replace('T',' ').slice(0,19) : '—';
-  const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   const badge = s => `<span class="badge badge-${s}">${s}</span>`;
-
-  function _startTick() {
-    clearInterval(_tickTimer);
-    _tickTimer = setInterval(function() {
-      if (!_lastLoadTime) return;
-      const secs = Math.round((Date.now() - _lastLoadTime) / 1000);
-      const el = document.getElementById('lastUpdated');
-      if (el) el.textContent = 'atualizado há ' + secs + 's';
-    }, 1000);
-  }
-
-  function showError(msg) {
-    const b = document.getElementById('errorBar');
-    b.textContent = '⚠ '+msg; b.classList.add('visible');
-  }
-  function clearError() { document.getElementById('errorBar').classList.remove('visible'); }
-
-  function showLogin(msg='') {
-    document.getElementById('loginOverlay').style.display = 'flex';
-    document.getElementById('loginError').textContent = msg;
-  }
-  function hideLogin() { document.getElementById('loginOverlay').style.display = 'none'; }
-
-  document.getElementById('loginForm').addEventListener('submit', e => {
-    e.preventDefault();
-    const key = document.getElementById('apiKeyInput').value.trim();
-    if (!key) return;
-    API_KEY = key; localStorage.setItem('backupApiKey', key);
-    hideLogin(); loadAll();
-  });
-  document.getElementById('logoutBtn').addEventListener('click', () => {
-    localStorage.removeItem('backupApiKey'); API_KEY = ''; showLogin();
-  });
 
   async function loadAll() {
     clearError();
@@ -383,8 +262,7 @@
 
       renderStats(backups, disk);
       renderBackups(backups);
-      _lastLoadTime = Date.now();
-      _startTick();
+      nvMarkUpdated();
       filterBackups(document.getElementById('backupSearch').value);
 
       // Preenche células de disco quando o fetch (já em andamento) completar
@@ -428,7 +306,7 @@
       const label = (tr.cells[0] ? tr.cells[0].textContent : '').toLowerCase();
       const client = (tr.cells[1] ? tr.cells[1].textContent : '').toLowerCase();
       tr.style.display = (!q || label.includes(q) || client.includes(q)) ? '' : 'none';
-      const vrow = document.getElementById('vrow-' + tr.cells[0].textContent.replace(/[▶▸]/g,'').trim());
+      const vrow = document.getElementById('vrow-' + tr.dataset.label);
       if (vrow) vrow.style.display = 'none';
     });
     const count = Array.from(rows).filter(tr => tr.style.display !== 'none').length;
@@ -465,7 +343,7 @@
       const isExp = b.label === expandedLabel;
       const runCls = b.has_running ? ' row-running' : '';
       return `
-        <tr class="${isExp?'expanded':''}${runCls}" onclick="toggleVersions('${esc(b.label)}',this)">
+        <tr class="${isExp?'expanded':''}${runCls}" data-label="${esc(b.label)}" onclick="toggleVersions(this.dataset.label,this)">
           <td><span class="chevron">▶</span>${esc(b.label)}</td>
           <td class="dim-cell">${esc(b.client_name||'—')}</td>
           <td>${badge(b.status)}</td>
@@ -567,11 +445,12 @@
       const vid = `${label}__${v.version_key}`;
       return `
         <tr class="row-version ${isExp?'expanded':''}"
-            onclick="toggleFiles('${esc(label)}','${esc(v.version_key)}',this)">
+            data-label="${esc(label)}" data-vkey="${esc(v.version_key)}"
+            onclick="toggleFiles(this.dataset.label,this.dataset.vkey,this)">
           <td style="width:44px;padding:0">
             <label class="version-cb-wrap" onclick="event.stopPropagation()">
               <input type="checkbox" class="version-cb" ${isChk?'checked':''}
-                onclick="toggleVersionCheck('${esc(label)}','${esc(v.version_key)}',this)">
+                onclick="toggleVersionCheck(this.closest('tr').dataset.label,this.closest('tr').dataset.vkey,this)">
             </label>
           </td>
           <td><span class="chevron">▶</span>${esc(v.version_key)}</td>
@@ -583,7 +462,7 @@
           <td style="padding:4px 14px 4px 6px">
             <a href="/explorer?label=${encodeURIComponent(label)}&version=${encodeURIComponent(v.version_key)}"
                onclick="event.stopPropagation()"
-               class="hbtn" style="font-size:10px;padding:2px 8px;text-decoration:none;letter-spacing:.04em">⊞ Explorer</a>
+               class="hbtn" style="font-size:10px;padding:2px 8px;letter-spacing:.04em">⊞ Explorer</a>
           </td>
         </tr>
         <tr class="files-row" id="frow-${esc(vid)}" style="display:${isExp?'':'none'}">
@@ -602,7 +481,7 @@
       <div class="cmp-bar">
         <span style="font-size:10px;color:var(--text-mute);letter-spacing:.08em">Selecione 2 versões para comparar</span>
         <button class="cmp-btn ${hasTwoChecked?'active':''}" id="cmpbtn-${esc(label)}"
-          onclick="compareVersions('${esc(label)}')">⇄ Comparar selecionadas</button>
+          data-label="${esc(label)}" onclick="compareVersions(this.dataset.label)">⇄ Comparar selecionadas</button>
       </div>
       <table>
         <thead><tr>
@@ -767,7 +646,7 @@
             <span class="diff-tag diff-tag-mod">~${nMod} modificado${nMod!==1?'s':''}</span>
             <span class="diff-tag diff-tag-unch">${nUnch} igual${nUnch!==1?'is':''}</span>
           </div>
-          <button class="diff-close" onclick="closeDiff('${esc(label)}')" title="Fechar">✕</button>
+          <button class="diff-close" data-label="${esc(label)}" onclick="closeDiff(this.dataset.label)" title="Fechar">✕</button>
         </div>
         ${section('Adicionados','diff-tag-add', data.added.map(f=>fileRow(f,'diff-add')), thBase)}
         ${section('Removidos','diff-tag-del', data.deleted.map(f=>fileRow(f,'diff-del')), thBase)}
@@ -776,29 +655,8 @@
       </div>`;
   }
 
-  // Init
-  async function init() {
-    const resp = await fetch('/health');
-    if (!resp.ok) { showError('Servidor indisponível'); return; }
-    const test = await fetch('/backups', {headers: H()});
-    if (test.status === 401) { showLogin(); }
-    else { loadAll(); }
-  }
-  init();
-
-  const statusColor = {success:'#4c4', partial:'#fa0', error:'#e05', running:'var(--amber)'};
-
-  function toggleTheme() {
-    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-    if (isLight) { document.documentElement.removeAttribute('data-theme'); localStorage.setItem('nv-theme','dark'); }
-    else { document.documentElement.setAttribute('data-theme','light'); localStorage.setItem('nv-theme','light'); }
-    updateThemeBtn();
-  }
-  function updateThemeBtn() {
-    const btn = document.getElementById('themeBtn');
-    if (btn) btn.textContent = document.documentElement.getAttribute('data-theme') === 'light' ? '☾ Escuro' : '☀ Claro';
-  }
-  updateThemeBtn();
+  // Init — a própria carga inicial faz o auth-check (401 → login)
+  loadAll();
 </script>
 <script src="/static/nav.js"></script>
 </body>
