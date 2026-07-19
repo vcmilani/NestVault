@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v7.7.0`
+# 🗄️ NestVault  `v7.8.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
 
@@ -6,6 +6,8 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v7.8.0** — novo endpoint `POST /register/batch`: registra em lote (até 500 arquivos por request) conteúdo cujo sha256 já existe no storage — o caminho que antes custava um request + ~4 queries + 1 commit *por arquivo* (via `/upload` em modo "só registrar") passa a custar duas queries `IN` + bulk insert + **um único commit por lote**. Itens cujo conteúdo não é encontrado voltam `registered: false` sem abortar o lote, e o cliente escala esses casos para upload completo; réplicas são garantidas em background após a resposta, no mesmo padrão do `/upload`. Cliente Python (`nestvault.py`) e cliente macOS adotados nesta versão — detecção automática pela versão do `/health`, com fallback ao registro individual em servidores mais antigos.
+>
 > **v7.7.0** — `cleanup-orphans` (`POST /maintenance/cleanup-orphans`) convertido para background com progresso em tempo real, no mesmo padrão já usado por `encrypt-existing`/`migrate-disk`: o request retorna imediatamente (`{"scheduled": true}`) em vez de bloquear até toda a limpeza terminar, e o job aparece como "em execução" na tela de Atividades desde o início, com progresso `X / Y arquivo(s) (Z%)`, não só o resultado final. As chamadas automáticas de limpeza de órfãos disparadas após a exclusão de um label também passam a registrar esse progresso.
 >
 > **v7.6.0** — backup incremental e resumível para iCloud Photos: walk descendente diretório a diretório com checkpoint em `BackupVersion.progress_json` — retomadas continuam na mesma versão a partir de onde pararam, sem re-baixar o já processado. Bibliotecas de 5k–50k fotos que não completavam listagem recursiva nem em 4 horas agora fazem backup progressivo sem perder progresso em caso de falha. Para os demais backends (OneDrive, Google Drive, iCloud Drive normal), o caminho rápido original (uma listagem recursiva única + download em lote na raiz) é preservado; o dispatch é automático via `rclone config dump` — `service=photos` aciona o walk, todo o resto usa o caminho rápido. Corrigido: download agora usa `rclone copy --files-from` em vez de `rclone cat`, resolvendo "directory not found" para nomes unicode/acentuados em todos os backends. Corrigido: dangling shortcuts do Google Drive não causam mais abort do job (`--drive-skip-dangling-shortcuts`). Corrigido: diretórios de staging órfãos (`_rclone_stage_*`) são removidos no startup e na limpeza noturna. Corrigido: path traversal e deadlock no shutdown.
@@ -673,6 +675,8 @@ Backup 3 — HD com fotos de março (80 fotos):
 
 > **Atenção:** com `--accumulate`, arquivos deletados do cliente são **intencionalmente preservados** no servidor. Se precisar remover um arquivo do acervo acumulado, a forma correta é deletar a versão manualmente pelo dashboard ou pela API.
 
+**Otimização client-side (v7.8+):** clientes com `--accumulate`/`accumulate` identificam arquivos inalterados cujo path + sha256 já estão na versão anterior e os retiram do pipeline de registro — eles são herdados pelo mesmo `/absorb` final em vez de gerar um request de registro cada. Isso reduz ainda mais o número de requests num backup incremental típico, sem mudar a semântica do absorb no servidor.
+
 ---
 
 ### backups
@@ -1313,6 +1317,18 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 
 ## ⚡ Otimizações
 
+### v7.8.0
+
+| Componente | Mudança |
+|---|---|
+| **`server/main.py` — `POST /register/batch`** | Novo endpoint: registra até 500 arquivos por request. Duas queries `IN` (conteúdos existentes no storage + `VersionFile`s já registrados nesta versão para os paths do lote) substituem N queries; upsert dividido em update (path já existente na versão) + `bulk_insert_mappings` (novos), respeitando `uq_version_path` sem depender de `ON CONFLICT` — portável entre SQLite e PostgreSQL; **um único `db.commit()` por lote** |
+| **`server/main.py` — schemas** | Novos `RegisterBatchItem`, `RegisterBatchRequest`, `RegisterBatchResultItem`, `RegisterBatchResponse` |
+| **`server/main.py` — `_bg_ensure_replicas_batch`** | Réplicas dos conteúdos do lote garantidas via `BackgroundTasks` após a resposta — mesmo padrão do `/upload`, que cria réplicas fora do write-lock |
+| **Semântica de erro parcial** | Item cujo sha256 não existe no storage volta `registered: false` sem abortar o lote (o cliente escala para upload); versão não-`running`: 409, como o `/absorb` |
+| **`tests/test_register_batch.py`** | 7 casos novos: lote todo novo, conteúdo ausente no meio do lote, upsert de path existente, path duplicado no lote (último vence), versão não-running, versão inexistente, lote vazio |
+| **`client/nestvault.py`** | CLI adota o endpoint: registers (cache hits + conteúdo existente) coalescidos em lotes de `--batch-size`; gate único `_server_version()` (substitui `_server_supports_batch`) alimenta os gates de `/check/batch` (≥2.6) e `/register/batch` (≥7.8); lote que falha cai para registro individual por arquivo |
+| **Cliente macOS (`NestVaultClient`)** | Mesma adoção — registers do pipeline coalescidos em lotes de 200, compartilhando o pool de workers com os uploads; fallback simétrico ao do CLI |
+
 ### v7.1.0
 
 | Componente | Mudança |
@@ -1645,6 +1661,7 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 |--------|----------|-----------|
 | `POST` | `/check` | Verifica se um arquivo precisa upload |
 | `POST` | `/check/batch` | Verifica N arquivos em uma única request |
+| `POST` | `/register/batch` | Registra em lote (até 500) conteúdo já existente no storage — um commit por lote (v7.8+) |
 | `POST` | `/upload` | Registra arquivo na versão |
 | `POST` | `/sync` | Confirma sincronização da versão com o cliente |
 | `GET` | `/files` | Lista arquivos de uma versão |
@@ -2032,6 +2049,7 @@ A resposta de `/check/batch` é `list[CheckBatchResultItem]` na mesma ordem dos 
 | `GET /backups/{label}/compare` | query: `v1`, `v2` | `CompareResponse` |
 | `POST /check` | `CheckRequest` | `CheckResponse` |
 | `POST /check/batch` | `CheckBatchRequest` | `list[CheckBatchResultItem]` |
+| `POST /register/batch` | `RegisterBatchRequest` | `RegisterBatchResponse` |
 | `POST /upload` | binary stream + headers `X-*` | `UploadResponse` |
 | `POST /sync` | `SyncRequest` | `SyncResponse` |
 | `GET /files` | query: `backup_label`, `version_key` | `list[FileInfo]` |
