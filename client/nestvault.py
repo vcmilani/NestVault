@@ -1,5 +1,5 @@
 """
-NestVault  v7.7.0
+NestVault  v7.8.0
 Cada execucao de backup cria uma nova versao dentro do label.
 Conteudo identico e armazenado uma unica vez no servidor (deduplicacao por sha256).
 
@@ -12,6 +12,10 @@ Uso:
     nestvault backups --server http://192.168.1.100:8000
 
 Changelog (cliente — histórico completo do sistema no README):
+  v7.8  Registro em lote (/register/batch, servidor v7.8+): cache hits e
+        conteúdo já existente registrados em lotes com um commit por request
+        no servidor; conteúdo ausente escala para upload e falha do lote cai
+        para o registro individual por arquivo.
   v7.7  Restore paralelo (--workers, padrao 4) com verificação SHA-256 por
         arquivo; walk de coleta ordena durante a varredura em vez de acumular
         a árvore inteira em memória; falha de /check/batch cai para upload
@@ -33,7 +37,7 @@ Changelog (cliente — histórico completo do sistema no README):
         reconciliação de replicação (reconcile-replication).
 """
 
-VERSION = "v7.7.0"
+VERSION = "v7.8.0"
 
 import os, sys, hashlib, argparse, base64, socket, threading, time
 from pathlib import Path
@@ -395,6 +399,20 @@ def check_batch(server, label, version_key, items: list[dict]) -> list[dict]:
     return r.json()
 
 
+def register_batch(server, label, version_key, items: list[dict]) -> dict:
+    """Registra em lote conteúdo já existente no storage (servidor v7.8+).
+    Itens: {original_path, sha256, mtime}. Um único commit por lote no servidor,
+    em vez de um request + commit por arquivo."""
+    r = _session.post(
+        f"{server}/register/batch",
+        json={"backup_label": label, "version_key": version_key, "files": items},
+        headers=build_headers(),
+        timeout=60,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
 def absorb_version(server: str, label: str, version_key: str, source_version_key: str) -> dict:
     r = _session.post(
         f"{server}/backups/{label}/versions/{version_key}/absorb",
@@ -406,16 +424,18 @@ def absorb_version(server: str, label: str, version_key: str, source_version_key
     return r.json()
 
 
-def _server_supports_batch(server: str) -> bool:
+def _server_version(server: str) -> tuple[int, int]:
+    """(major, minor) reportados pelo /health — (0, 0) se indisponível.
+    Uma única chamada alimenta todos os gates de feature (batch check >= 2.6,
+    batch register >= 7.8)."""
     try:
         r = _session.get(f"{server}/health", headers=build_headers(), timeout=5)
         if not r.ok:
-            return False
+            return (0, 0)
         parts = r.json().get("version", "0.0.0").split(".")
-        major, minor = int(parts[0]), int(parts[1])
-        return (major, minor) >= (2, 6)
+        return (int(parts[0]), int(parts[1]))
     except Exception:
-        return False
+        return (0, 0)
 
 
 def delete_label_api(server, label):
@@ -537,12 +557,16 @@ def backup_directory(
     _abort_event = threading.Event()
     all_paths = [op for _, op in pending]
 
-    use_batch = not dry_run and _server_supports_batch(server)
+    server_ver = (0, 0) if dry_run else _server_version(server)
+    use_batch          = server_ver >= (2, 6)
+    use_batch_register = server_ver >= (7, 8)
     effective = 1 if dry_run else workers
     effective_hash = 1 if dry_run else (hash_workers or os.cpu_count() or 4)
 
     if use_batch:
         _dim(f"Modo batch {batch_size} arq/req  ·  {effective} threads upload  ·  {effective_hash} proc hash")
+    if use_batch_register:
+        _dim("Registro em lote (/register/batch, servidor v7.8+)")
 
     console.print()
 
@@ -669,12 +693,81 @@ def backup_directory(
                 finally:
                     _update_bar()
 
+            def _do_register_batch(chunk):
+                """Registra um lote (conteúdo já no storage) em uma request.
+                Conteúdo ausente no servidor escala para upload; falha do lote
+                inteiro cai para o registro individual por arquivo."""
+                if _abort_event.is_set():
+                    return
+                items = [{"original_path": op, "sha256": sha256, "mtime": mtime}
+                         for _fp, op, mtime, sha256, _kind in chunk]
+                try:
+                    resp = _with_retries(
+                        lambda: register_batch(server, label, version_key, items),
+                        f"register/batch ({len(items)} arq)")
+                except requests.RequestException as e:
+                    _warn(f"Register em lote falhou ({len(chunk)} arquivo(s) → registro individual): {e}")
+                    for _fp, op, mtime, sha256, kind in chunk:
+                        if _abort_event.is_set():
+                            return
+                        try:
+                            _with_retries(lambda: register_file(server, label, version_key, op, mtime, sha256), op)
+                            with lock:
+                                stats[kind] += 1
+                        except requests.RequestException as e2:
+                            _err(f"{op}: {e2}")
+                            with lock:
+                                stats["errors"] += 1
+                        finally:
+                            _update_bar()
+                    return
+
+                # Resultados são posicionais (o servidor responde na ordem do request)
+                for (fp, op, mtime, sha256, kind), result in zip(chunk, resp["results"]):
+                    if _abort_event.is_set():
+                        return
+                    try:
+                        if result.get("registered"):
+                            _dim(f"BREG  {op}")
+                            with lock:
+                                stats[kind] += 1
+                        else:
+                            # Conteúdo sumiu do storage — escala para upload completo
+                            _dim(f"UP    {op}  (conteudo ausente no servidor)")
+                            _upload_with_backoff(
+                                lambda: upload_file(server, fp, label, version_key, op, mtime, progress),
+                                op, _retry_gate, _abort_event,
+                            )
+                            if not _abort_event.is_set():
+                                with lock:
+                                    stats["uploaded"] += 1
+                    except requests.RequestException as e:
+                        _err(f"{op}: {e}")
+                        with lock:
+                            stats["errors"] += 1
+                    finally:
+                        _update_bar()
+
             with ThreadPoolExecutor(max_workers=effective) as pool:
                 futures = []
-                for fp, op, mtime, sha256 in fast_files:
-                    futures.append(pool.submit(_do_fast, fp, op, mtime, sha256))
-                for op, (action, sha256, size, mtime, fp) in action_map.items():
-                    futures.append(pool.submit(_do_action, op, action, sha256, size, mtime, fp))
+                if use_batch_register:
+                    # Registers (cache hits + conteúdo existente) vão em lotes;
+                    # uploads e skips seguem individuais no mesmo pool.
+                    register_work = [(fp, op, mtime, sha256, "fast")
+                                     for fp, op, mtime, sha256 in fast_files]
+                    register_work += [(fp, op, mtime, sha256, "registered")
+                                      for op, (action, sha256, size, mtime, fp) in action_map.items()
+                                      if action == "register"]
+                    for chunk in _chunked(register_work, batch_size):
+                        futures.append(pool.submit(_do_register_batch, chunk))
+                    for op, (action, sha256, size, mtime, fp) in action_map.items():
+                        if action != "register":
+                            futures.append(pool.submit(_do_action, op, action, sha256, size, mtime, fp))
+                else:
+                    for fp, op, mtime, sha256 in fast_files:
+                        futures.append(pool.submit(_do_fast, fp, op, mtime, sha256))
+                    for op, (action, sha256, size, mtime, fp) in action_map.items():
+                        futures.append(pool.submit(_do_action, op, action, sha256, size, mtime, fp))
                 for future in as_completed(futures):
                     if exc := future.exception():
                         _err(f"Erro inesperado: {exc}")
