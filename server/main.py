@@ -388,7 +388,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="7.7.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="7.8.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
@@ -434,6 +434,26 @@ class CheckBatchResultItem(BaseModel):
     content_exists: bool
     reason: str
     file_id: Optional[int] = None
+
+class RegisterBatchItem(BaseModel):
+    original_path: str
+    sha256: str = Field(..., min_length=64, max_length=64)
+    mtime: float
+
+class RegisterBatchRequest(BaseModel):
+    backup_label: str
+    version_key: str
+    files: list[RegisterBatchItem] = Field(..., min_length=1, max_length=500)
+
+class RegisterBatchResultItem(BaseModel):
+    original_path: str
+    registered: bool
+    reason: str
+
+class RegisterBatchResponse(BaseModel):
+    registered: int
+    missing: int
+    results: list[RegisterBatchResultItem]
 
 class SyncRequest(BaseModel):
     backup_label: str
@@ -2535,6 +2555,93 @@ def check_batch(req: CheckBatchRequest, db: Session = Depends(get_db)):
                 needs_upload=True, content_exists=ce,
                 reason="Conteudo ja no storage — apenas registrar" if ce else "Upload necessario"))
     return results
+
+
+# -- Register batch -----------------------------------------------------------
+def _bg_ensure_replicas_batch(sha256s: list[str]) -> None:
+    """Garante réplicas dos conteúdos registrados em lote. Roda após a resposta
+    (BackgroundTasks) — espelha o upload, que cria réplicas fora do write-lock."""
+    db = SessionLocal()
+    try:
+        for sha in sha256s:
+            first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha).first()
+            if first_copy:
+                _ensure_replicas(sha, Path(first_copy.stored_at), db)
+        db.commit()
+    except Exception as e:
+        log.warning(f"[register/batch] réplicas em background falharam: {e}")
+    finally:
+        db.close()
+
+
+@app.post("/register/batch", response_model=RegisterBatchResponse, dependencies=[Depends(require_api_key)])
+def register_batch(req: RegisterBatchRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """
+    Versão em lote do modo "só registrar" do /upload (X-Content-Sha256 sem body):
+    registra N arquivos com duas queries IN + um único commit, em vez de N
+    requests com um commit cada. Itens cujo sha256 não existe no storage voltam
+    registered=False (o cliente escala para upload) sem abortar o lote.
+    Disponível a partir do servidor 7.8.
+    """
+    v = _get_version_or_404(req.backup_label, req.version_key, db)
+    if v.status != "running":
+        raise HTTPException(409, f"Versão está '{v.status}' — register só permitido em versões running")
+
+    # Conteúdos presentes no storage — uma query IN
+    sha256s = {i.sha256 for i in req.files}
+    existing: set[str] = {
+        row.sha256
+        for row in db.query(FileContent.sha256).filter(FileContent.sha256.in_(sha256s)).all()
+    }
+
+    # VersionFiles já registrados nesta versão para estas paths — uma query IN
+    paths = [i.original_path for i in req.files]
+    current: dict[str, VersionFile] = {
+        vf.original_path: vf
+        for vf in db.query(VersionFile)
+                    .filter(VersionFile.version_id == v.id,
+                            VersionFile.original_path.in_(paths))
+                    .all()
+    }
+
+    results: list[RegisterBatchResultItem] = []
+    pending: dict[str, RegisterBatchItem] = {}   # path duplicado no lote: último vence
+    registered = 0
+    missing = 0
+
+    for item in req.files:
+        if item.sha256 not in existing:
+            results.append(RegisterBatchResultItem(
+                original_path=item.original_path, registered=False,
+                reason=f"Conteudo sha256={item.sha256} nao encontrado no storage"))
+            missing += 1
+            continue
+        vf = current.get(item.original_path)
+        if vf is not None:
+            # Upsert: respeita uq_version_path sem depender de ON CONFLICT
+            vf.sha256 = item.sha256
+            vf.mtime = item.mtime
+        else:
+            pending[item.original_path] = item
+        results.append(RegisterBatchResultItem(
+            original_path=item.original_path, registered=True, reason="Registrado"))
+        registered += 1
+
+    if pending:
+        db.bulk_insert_mappings(VersionFile, [
+            {"version_id": v.id, "original_path": it.original_path,
+             "sha256": it.sha256, "mtime": it.mtime}
+            for it in pending.values()
+        ])
+    db.commit()
+
+    ok_shas = sorted({i.sha256 for i in req.files if i.sha256 in existing})
+    if ok_shas:
+        background_tasks.add_task(_bg_ensure_replicas_batch, ok_shas)
+
+    log.info(f"[register/batch] {req.backup_label}/{req.version_key}: "
+             f"{registered} registrado(s), {missing} sem conteudo (lote de {len(req.files)})")
+    return RegisterBatchResponse(registered=registered, missing=missing, results=results)
 
 
 # -- Upload -------------------------------------------------------------------
