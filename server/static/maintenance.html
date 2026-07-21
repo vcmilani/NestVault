@@ -178,6 +178,7 @@
     <a class="hbtn" href="/activity" style="text-decoration:none">◎ Atividade</a>
     <a class="hbtn" href="/rclone-jobs" style="text-decoration:none">⟳ rclone</a>
     <a class="hbtn" href="/stats" style="text-decoration:none">∑ Stats</a>
+    <a class="hbtn" href="/manage-users">☺ Usuários</a>
     <button class="hbtn always-visible" id="logoutBtn">⌀ API Key</button>
     <button class="nav-hamburger"></button>
   </div>
@@ -188,6 +189,7 @@
   <a href="/activity">◎ Atividade</a>
   <a href="/rclone-jobs">⟳ rclone</a>
   <a href="/stats">∑ Stats</a>
+  <a href="/manage-users">☺ Usuários</a>
 </nav>
 <div class="mobile-nav-backdrop"></div>
 
@@ -672,6 +674,7 @@ async function runOp(key) {
   try {
     const r = await apiCall('POST', op.endpoint);
     if (r.status === 401) { showLogin('API Key inválida.'); setRunning(key, false); return; }
+    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); setRunning(key, false); return; }
     if (!r.ok) {
       let detail = `HTTP ${r.status}`;
       try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}
@@ -696,6 +699,7 @@ async function runCleanup() {
   try {
     const r = await apiCall('POST', `/backups/${encodeURIComponent(label)}/cleanup`, {backup_label: label, keep});
     if (r.status === 401) { showLogin('API Key inválida.'); setRunning('cleanup', false); return; }
+    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); setRunning('cleanup', false); return; }
     if (!r.ok) {
       let detail = `HTTP ${r.status}`;
       try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}
@@ -730,6 +734,7 @@ async function runDeleteLabel() {
   try {
     const r = await apiCall('DELETE', `/backups/${encodeURIComponent(label)}`);
     if (r.status === 401) { showLogin('API Key inválida.'); setRunning('delete-label', false, '✕ Excluir'); return; }
+    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); setRunning('delete-label', false, '✕ Excluir'); return; }
     if (!r.ok) {
       let detail = `HTTP ${r.status}`;
       try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}
@@ -756,6 +761,7 @@ async function runRenameLabel() {
   try {
     const r = await apiCall('PATCH', `/backups/${encodeURIComponent(label)}`, { new_label: newLbl });
     if (r.status === 401) { showLogin('API Key inválida.'); setRunning('rename-label', false, '✎ Renomear'); return; }
+    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); setRunning('rename-label', false, '✎ Renomear'); return; }
     if (!r.ok) {
       const data = await r.json().catch(() => ({}));
       showError('rename-label', data.detail || `Erro ${r.status}`);
@@ -784,11 +790,11 @@ async function loadLabels() {
 
   try {
     const r = await fetch('/backups', {headers: H()});
-    if (r.status === 401) {
+    if (r.status === 401 || r.status === 403) {
       ids.forEach(id => { const s = document.getElementById(id); s.disabled = false; s.innerHTML = '<option value="">— selecione —</option>'; });
       cdl.disabled = false;
       cdl.innerHTML = '<option value="">Todos os labels</option>';
-      showLogin('API Key inválida.');
+      showLogin(r.status === 403 ? 'Esta chave não tem permissão de administrador.' : 'API Key inválida.');
       return;
     }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -824,6 +830,7 @@ async function loadCleanupByDatePreview() {
     const qs = `before=${encodeURIComponent(before)}` + (label ? `&label=${encodeURIComponent(label)}` : '');
     const r = await fetch(`/maintenance/cleanup-by-date/preview?${qs}`, {headers: H()});
     if (r.status === 401) { showLogin('API Key inválida.'); wrap.innerHTML = ''; return; }
+    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); wrap.innerHTML = ''; return; }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
     if (d.total === 0) {
@@ -858,6 +865,7 @@ async function runCleanupByDate() {
     const qs = `before=${encodeURIComponent(before)}` + (label ? `&label=${encodeURIComponent(label)}` : '');
     const r = await apiCall('POST', `/maintenance/cleanup-by-date?${qs}`);
     if (r.status === 401) { showLogin('API Key inválida.'); setRunning('cleanupdate', false, '✕ Excluir versões'); return; }
+    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); setRunning('cleanupdate', false, '✕ Excluir versões'); return; }
     if (!r.ok) {
       let detail = `HTTP ${r.status}`;
       try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}
@@ -899,6 +907,7 @@ async function openMigrateModal() {
   try {
     const r = await fetch('/storage/disks', {headers: H()});
     if (r.status === 401) { showLogin('API Key inválida.'); closeMigrateModal(); return; }
+    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); closeMigrateModal(); return; }
     const disks = await r.json();
     _migrateDisks = disks.filter(d => !d.is_cache);
 
@@ -997,6 +1006,7 @@ async function runMigratePreview() {
     const qs = `source=${encodeURIComponent(source)}&` + dests.map(d => `destinations=${encodeURIComponent(d)}`).join('&');
     const r = await fetch(`/maintenance/migrate-disk/preview?${qs}`, {headers: H()});
     if (r.status === 401) { showLogin('API Key inválida.'); closeMigrateModal(); return; }
+    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); closeMigrateModal(); return; }
     if (!r.ok) {
       let detail = `HTTP ${r.status}`;
       try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}
@@ -1062,6 +1072,7 @@ async function runMigrate() {
       body: JSON.stringify({source, destinations: dests}),
     });
     if (r.status === 401) { showLogin('API Key inválida.'); closeMigrateModal(); return; }
+    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); closeMigrateModal(); return; }
     if (!r.ok) {
       let detail = `HTTP ${r.status}`;
       try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}

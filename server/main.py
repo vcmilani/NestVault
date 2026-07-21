@@ -67,7 +67,7 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
-import asyncio, os, tempfile, hashlib, base64, shutil, logging, time, threading, re
+import asyncio, os, tempfile, hashlib, base64, shutil, logging, time, threading, re, secrets
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from urllib.parse import quote
@@ -76,13 +76,17 @@ from sqlalchemy import func, select, insert, literal, case, delete, exists
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
-from database import init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob, SsdCachePendingMove, RcloneBackupJob, DiskSnapshot
+from database import (
+    init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy,
+    VersionFile, MaintenanceJob, SsdCachePendingMove, RcloneBackupJob, DiskSnapshot,
+    User, hash_api_key, bootstrap_admin_user,
+)
 import crypto
 import storage
 # Implementação canônica do cleanup de órfãos (era duplicada aqui). O nome antigo
 # é mantido: cada sha256 é commitado individualmente, sem commit final agregado.
 from nightly_cleanup import _cleanup_orphan_contents as _cleanup_orphan_contents_no_commit
-from auth import require_api_key, API_KEY, AUTH_ENABLED
+from auth import get_current_user, require_admin, require_owner_or_admin
 from cloud.rclone_router import router as rclone_router
 import scheduler as sched
 from cache_state import _activity_wake, invalidate_activity
@@ -355,6 +359,7 @@ async def _ssd_space_monitor():
 
 async def lifespan(_: FastAPI):
     init_db()
+    bootstrap_admin_user(os.getenv("BACKUP_API_KEY", ""))
     _cleanup_stale_running_states()
     if ENCRYPTION_ENABLED:
         storage.encryption_key = crypto.load_key()  # lança ValueError se inválida — falha rápido
@@ -376,7 +381,7 @@ async def lifespan(_: FastAPI):
     log.info(f"Servidor iniciado — {len(STORAGE_VOLUMES)} volume(s): {[str(v) for v in STORAGE_VOLUMES]}")
     if storage.SSD_CACHE_ENABLED and storage.SSD_CACHE_DIR:
         log.info(f"SSD cache: habilitado — {storage.SSD_CACHE_DIR} (max {storage.SSD_CACHE_MAX_GB} GB)")
-    log.info(f"Auth: {'habilitada' if AUTH_ENABLED else 'desabilitada'}")
+    log.info("Auth: habilitada (por usuario)")
     yield
     # Libera a thread do executor presa em _activity_wake.wait() antes de cancelar,
     # senão o fechamento do event loop bloqueia no join do executor (até 5 min).
@@ -403,6 +408,16 @@ class BackupCreate(BaseModel):
 
 class BackupRename(BaseModel):
     new_label: str
+
+class BackupOwnerUpdate(BaseModel):
+    owner_user_id: int
+
+class UserCreate(BaseModel):
+    username: str = Field(..., min_length=1, max_length=64)
+    role: Literal["admin", "user"] = "user"
+
+class UserActiveUpdate(BaseModel):
+    is_active: bool
 
 class VersionCreate(BaseModel):
     version_key: str = Field(..., description="ISO datetime: 2026-04-25T10:42:31")
@@ -491,6 +506,8 @@ class BackupInfo(BaseModel):
     file_count: int
     total_size_bytes: int
     has_running: bool = False
+    owner_user_id: Optional[int] = None
+    owner_username: Optional[str] = None
 
 class BackupCreatedResponse(BaseModel):
     created: bool
@@ -499,6 +516,21 @@ class BackupCreatedResponse(BaseModel):
 class BackupDeletedResponse(BaseModel):
     status: Literal["deleted"]
     label: str
+
+class UserInfo(BaseModel):
+    id: int
+    username: str
+    role: str
+    is_active: bool
+    created_at: str
+
+class UserCreatedResponse(BaseModel):
+    user: UserInfo
+    api_key: str = Field(..., description="Exibida uma unica vez — nao e recuperavel depois")
+
+class UserKeyRotatedResponse(BaseModel):
+    user: UserInfo
+    api_key: str = Field(..., description="Exibida uma unica vez — nao e recuperavel depois")
 
 class VersionInfo(BaseModel):
     """Detalhes de uma versao especifica."""
@@ -810,14 +842,18 @@ async def _stream_request_to_disk(request: Request, volume: Path) -> tuple[str, 
         raise
 
 
-def _get_backup_or_404(label: str, db: Session) -> BackupID:
+def _get_backup_or_404(label: str, db: Session, user: Optional[User] = None) -> BackupID:
     b = db.query(BackupID).filter(BackupID.label == label).first()
     if not b:
         raise HTTPException(404, f"Backup '{label}' nao encontrado")
+    if user is not None:
+        require_owner_or_admin(b.owner_user_id, user)
     return b
 
 
-def _get_version_or_404(label: str, version_key: str, db: Session) -> BackupVersion:
+def _get_version_or_404(label: str, version_key: str, db: Session, user: Optional[User] = None) -> BackupVersion:
+    if user is not None:
+        _get_backup_or_404(label, db, user)
     v = (db.query(BackupVersion)
          .filter(BackupVersion.backup_label == label,
                  BackupVersion.version_key  == version_key)
@@ -909,6 +945,8 @@ def _backup_info(b: BackupID, db: Session) -> BackupInfo:
         file_count=file_count,
         total_size_bytes=int(total_size),
         has_running=has_running,
+        owner_user_id=b.owner_user_id,
+        owner_username=b.owner.username if b.owner else None,
     )
 
 
@@ -1387,6 +1425,14 @@ def stats_page():
     return HTMLResponse(page.read_text(encoding="utf-8"))
 
 
+@app.get("/manage-users", response_class=HTMLResponse, include_in_schema=False)
+def users_page():
+    page = STATIC_DIR / "users.html"
+    if not page.exists():
+        return HTMLResponse("<h1>Página não encontrada</h1>", status_code=404)
+    return HTMLResponse(page.read_text(encoding="utf-8"))
+
+
 @app.get("/sw.js", include_in_schema=False)
 def service_worker():
     # Servido na raiz (não em /static/) para que o service worker tenha
@@ -1709,7 +1755,7 @@ def _build_stats_data(db: Session) -> StatsResponse:
     )
 
 
-@app.get("/api/stats", response_model=StatsResponse, dependencies=[Depends(require_api_key)])
+@app.get("/api/stats", response_model=StatsResponse, dependencies=[Depends(require_admin)])
 def get_stats(db: Session = Depends(get_db)):
     data = _stats_cache["data"]
     if data is None or time.monotonic() - _stats_cache["ts"] > _STATS_TTL:
@@ -1986,7 +2032,7 @@ async def _activity_refresh_loop() -> None:
             log.exception("[activity-hist] Erro ao atualizar cache histórico")
 
 
-@app.get("/api/activity", response_model=ActivityResponse, dependencies=[Depends(require_api_key)])
+@app.get("/api/activity", response_model=ActivityResponse, dependencies=[Depends(require_admin)])
 def get_activity(db: Session = Depends(get_db)):
     running_versions, storage_obj, disks = _build_fast_data(db)
 
@@ -2014,7 +2060,7 @@ def health():
     return HealthResponse(status="ok", version=app.version, time=datetime.now(timezone.utc).isoformat())
 
 
-@app.get("/storage/info", response_model=StorageInfoResponse, dependencies=[Depends(require_api_key)])
+@app.get("/storage/info", response_model=StorageInfoResponse, dependencies=[Depends(require_admin)])
 def storage_info(db: Session = Depends(get_db)):
     usages = [u for u in (_safe_disk_usage(v) for v in STORAGE_VOLUMES) if u]
     usage_total = sum(u.total for u in usages)
@@ -2029,7 +2075,7 @@ def storage_info(db: Session = Depends(get_db)):
     )
 
 
-@app.get("/storage/disks", response_model=list[DiskVolumeInfo], dependencies=[Depends(require_api_key)])
+@app.get("/storage/disks", response_model=list[DiskVolumeInfo], dependencies=[Depends(require_admin)])
 def storage_disks(db: Session = Depends(get_db)):
     rows = (
         db.query(
@@ -2113,20 +2159,26 @@ def storage_disks(db: Session = Depends(get_db)):
 
 
 # -- Backups ------------------------------------------------------------------
-@app.post("/backups", response_model=BackupCreatedResponse, dependencies=[Depends(require_api_key)])
-def create_backup(req: BackupCreate, db: Session = Depends(get_db)):
+@app.post("/backups", response_model=BackupCreatedResponse)
+def create_backup(req: BackupCreate, db: Session = Depends(get_db),
+                   user: User = Depends(get_current_user)):
     existing = db.query(BackupID).filter(BackupID.label == req.label).first()
     if existing:
+        require_owner_or_admin(existing.owner_user_id, user)
         return BackupCreatedResponse(created=False, backup=_backup_info(existing, db))
-    b = BackupID(label=req.label, client_name=req.client_name, prefix=req.prefix)
+    b = BackupID(label=req.label, client_name=req.client_name, prefix=req.prefix,
+                 owner_user_id=user.id)
     db.add(b); db.commit(); db.refresh(b)
     return BackupCreatedResponse(created=True, backup=_backup_info(b, db))
 
 
-@app.get("/backups", response_model=list[BackupInfo], dependencies=[Depends(require_api_key)])
-def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db)):
+@app.get("/backups", response_model=list[BackupInfo])
+def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db),
+                  user: User = Depends(get_current_user)):
     """Lista backups com stats — 4 queries fixas independente de N (sem N+1)."""
     q = db.query(BackupID).order_by(BackupID.created_at.desc())
+    if user.role != "admin":
+        q = q.filter(BackupID.owner_user_id == user.id)
     if client_name:
         q = q.filter(BackupID.client_name == client_name)
     backups = q.all()
@@ -2181,6 +2233,11 @@ def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db
         .all()
     }
 
+    owner_ids = {b.owner_user_id for b in backups if b.owner_user_id is not None}
+    username_by_id: dict[int, str] = {
+        row.id: row.username for row in db.query(User.id, User.username).filter(User.id.in_(owner_ids))
+    } if owner_ids else {}
+
     result = []
     for b in backups:
         latest = latest_by_label.get(b.label)
@@ -2192,11 +2249,13 @@ def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db
             last_version=latest_key, version_count=version_count,
             file_count=fc_count, total_size_bytes=total_size,
             has_running=b.label in running_labels,
+            owner_user_id=b.owner_user_id,
+            owner_username=username_by_id.get(b.owner_user_id) if b.owner_user_id else None,
         ))
     return result
 
 
-@app.get("/backups/disk-summary", response_model=dict[str, list[BackupDiskEntry]], dependencies=[Depends(require_api_key)])
+@app.get("/backups/disk-summary", response_model=dict[str, list[BackupDiskEntry]], dependencies=[Depends(require_admin)])
 def all_backup_disk_summary(db: Session = Depends(get_db)):
     """Retorna disk info da última versão done de cada backup, numa única chamada."""
     from collections import defaultdict
@@ -2265,14 +2324,73 @@ def all_backup_disk_summary(db: Session = Depends(get_db)):
     }
 
 
-@app.get("/backups/{label}", response_model=BackupInfo, dependencies=[Depends(require_api_key)])
-def get_backup(label: str, db: Session = Depends(get_db)):
-    return _backup_info(_get_backup_or_404(label, db), db)
+# -- Users (admin) --------------------------------------------------------------
+def _user_info(u: User) -> UserInfo:
+    return UserInfo(id=u.id, username=u.username, role=u.role,
+                     is_active=u.is_active, created_at=str(u.created_at))
 
 
-@app.patch("/backups/{label}", response_model=BackupInfo, dependencies=[Depends(require_api_key)])
-def rename_backup(label: str, req: BackupRename, db: Session = Depends(get_db)):
+@app.post("/users", response_model=UserCreatedResponse, dependencies=[Depends(require_admin)])
+def create_user(req: UserCreate, db: Session = Depends(get_db)):
+    if db.query(User).filter(User.username == req.username).first():
+        raise HTTPException(409, f"Usuario '{req.username}' ja existe")
+    api_key = secrets.token_urlsafe(32)
+    u = User(username=req.username, role=req.role, is_active=True,
+              api_key_hash=hash_api_key(api_key))
+    db.add(u); db.commit(); db.refresh(u)
+    log.info(f"[users] Usuario '{u.username}' (role={u.role}) criado")
+    return UserCreatedResponse(user=_user_info(u), api_key=api_key)
+
+
+@app.get("/users", response_model=list[UserInfo], dependencies=[Depends(require_admin)])
+def list_users(db: Session = Depends(get_db)):
+    return [_user_info(u) for u in db.query(User).order_by(User.created_at.asc()).all()]
+
+
+@app.post("/users/{user_id}/rotate-key", response_model=UserKeyRotatedResponse, dependencies=[Depends(require_admin)])
+def rotate_user_key(user_id: int, db: Session = Depends(get_db)):
+    u = db.query(User).filter(User.id == user_id).first()
+    if not u:
+        raise HTTPException(404, "Usuario nao encontrado")
+    api_key = secrets.token_urlsafe(32)
+    u.api_key_hash = hash_api_key(api_key)
+    db.commit(); db.refresh(u)
+    log.info(f"[users] Chave rotacionada para '{u.username}'")
+    return UserKeyRotatedResponse(user=_user_info(u), api_key=api_key)
+
+
+@app.patch("/users/{user_id}", response_model=UserInfo, dependencies=[Depends(require_admin)])
+def update_user_active(user_id: int, req: UserActiveUpdate, db: Session = Depends(get_db)):
+    u = db.query(User).filter(User.id == user_id).first()
+    if not u:
+        raise HTTPException(404, "Usuario nao encontrado")
+    u.is_active = req.is_active
+    db.commit(); db.refresh(u)
+    log.info(f"[users] Usuario '{u.username}' {'ativado' if u.is_active else 'desativado'}")
+    return _user_info(u)
+
+
+@app.patch("/backups/{label}/owner", response_model=BackupInfo, dependencies=[Depends(require_admin)])
+def reassign_backup_owner(label: str, req: BackupOwnerUpdate, db: Session = Depends(get_db)):
     b = _get_backup_or_404(label, db)
+    new_owner = db.query(User).filter(User.id == req.owner_user_id).first()
+    if not new_owner:
+        raise HTTPException(404, "Usuario de destino nao encontrado")
+    b.owner_user_id = new_owner.id
+    db.commit(); db.refresh(b)
+    log.info(f"[users] Backup '{label}' reatribuido a '{new_owner.username}'")
+    return _backup_info(b, db)
+
+
+@app.get("/backups/{label}", response_model=BackupInfo)
+def get_backup(label: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return _backup_info(_get_backup_or_404(label, db, user), db)
+
+
+@app.patch("/backups/{label}", response_model=BackupInfo)
+def rename_backup(label: str, req: BackupRename, db: Session = Depends(get_db),
+                   user: User = Depends(get_current_user)):
+    b = _get_backup_or_404(label, db, user)
     new = req.new_label.strip()
     if not new:
         raise HTTPException(status_code=422, detail="new_label não pode ser vazio")
@@ -2290,9 +2408,9 @@ def rename_backup(label: str, req: BackupRename, db: Session = Depends(get_db)):
     return _backup_info(b, db)
 
 
-@app.get("/backups/{label}/disks", response_model=list[BackupDiskEntry], dependencies=[Depends(require_api_key)])
-def backup_disks(label: str, db: Session = Depends(get_db)):
-    _get_backup_or_404(label, db)
+@app.get("/backups/{label}/disks", response_model=list[BackupDiskEntry])
+def backup_disks(label: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _get_backup_or_404(label, db, user)
     # Escopo: apenas a versão done mais recente — evita escanear todas as versões históricas
     latest_vid = (
         db.query(BackupVersion.id)
@@ -2331,9 +2449,10 @@ def backup_disks(label: str, db: Session = Depends(get_db)):
     ]
 
 
-@app.delete("/backups/{label}", response_model=BackupDeletedResponse, dependencies=[Depends(require_api_key)])
-def delete_backup(label: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    b = _get_backup_or_404(label, db)
+@app.delete("/backups/{label}", response_model=BackupDeletedResponse)
+def delete_backup(label: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db),
+                   user: User = Depends(get_current_user)):
+    b = _get_backup_or_404(label, db, user)
     version_ids = [
         r.id for r in db.query(BackupVersion.id).filter(BackupVersion.backup_label == label).all()
     ]
@@ -2353,9 +2472,10 @@ def delete_backup(label: str, background_tasks: BackgroundTasks, db: Session = D
 
 
 # -- Versions -----------------------------------------------------------------
-@app.post("/backups/{label}/versions", response_model=VersionCreatedResponse, dependencies=[Depends(require_api_key)])
-def create_version(label: str, req: VersionCreate, db: Session = Depends(get_db)):
-    _get_backup_or_404(label, db)
+@app.post("/backups/{label}/versions", response_model=VersionCreatedResponse)
+def create_version(label: str, req: VersionCreate, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    _get_backup_or_404(label, db, user)
     existing = (db.query(BackupVersion)
                 .filter(BackupVersion.backup_label == label,
                         BackupVersion.version_key  == req.version_key)
@@ -2375,10 +2495,10 @@ def create_version(label: str, req: VersionCreate, db: Session = Depends(get_db)
     return VersionCreatedResponse(created=True, version=_version_stats(v, db))
 
 
-@app.get("/backups/{label}/versions", response_model=list[VersionInfo], dependencies=[Depends(require_api_key)])
-def list_versions(label: str, db: Session = Depends(get_db)):
+@app.get("/backups/{label}/versions", response_model=list[VersionInfo])
+def list_versions(label: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Lista versoes com stats — 2 queries fixas (sem N+1)."""
-    _get_backup_or_404(label, db)
+    _get_backup_or_404(label, db, user)
     versions = (db.query(BackupVersion)
                 .filter(BackupVersion.backup_label == label)
                 .order_by(BackupVersion.created_at.desc())
@@ -2415,14 +2535,16 @@ def list_versions(label: str, db: Session = Depends(get_db)):
     return result
 
 
-@app.get("/backups/{label}/versions/{version_key}", response_model=VersionInfo, dependencies=[Depends(require_api_key)])
-def get_version(label: str, version_key: str, db: Session = Depends(get_db)):
-    return _version_stats(_get_version_or_404(label, version_key, db), db)
+@app.get("/backups/{label}/versions/{version_key}", response_model=VersionInfo)
+def get_version(label: str, version_key: str, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    return _version_stats(_get_version_or_404(label, version_key, db, user), db)
 
 
-@app.patch("/backups/{label}/versions/{version_key}", response_model=VersionInfo, dependencies=[Depends(require_api_key)])
-def finish_version(label: str, version_key: str, req: VersionFinish, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    v = _get_version_or_404(label, version_key, db)
+@app.patch("/backups/{label}/versions/{version_key}", response_model=VersionInfo)
+def finish_version(label: str, version_key: str, req: VersionFinish, background_tasks: BackgroundTasks,
+                    db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    v = _get_version_or_404(label, version_key, db, user)
     v.status = req.status
     v.finished_at = datetime.now()
     db.commit()
@@ -2434,17 +2556,18 @@ def finish_version(label: str, version_key: str, req: VersionFinish, background_
     return _version_stats(v, db)
 
 
-@app.post("/backups/{label}/versions/{version_key}/absorb", response_model=AbsorbResponse, dependencies=[Depends(require_api_key)])
-def absorb_version(label: str, version_key: str, req: AbsorbRequest, db: Session = Depends(get_db)):
+@app.post("/backups/{label}/versions/{version_key}/absorb", response_model=AbsorbResponse)
+def absorb_version(label: str, version_key: str, req: AbsorbRequest, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
     """
     Herda arquivos da versao fonte que nao existem na versao destino (por original_path).
     Usado no modo acumulativo: novos arquivos sao adicionados pelo upload normal;
     arquivos ausentes do cliente (deletados) sao preservados via absorb da versao anterior.
     """
-    dest = _get_version_or_404(label, version_key, db)
+    dest = _get_version_or_404(label, version_key, db, user)
     if dest.status != "running":
         raise HTTPException(409, f"Versão destino está '{dest.status}' — absorb só permitido em versões running")
-    src = _get_version_or_404(label, req.source_version_key, db)
+    src = _get_version_or_404(label, req.source_version_key, db, user)
 
     total_src = (
         db.query(func.count(VersionFile.id))
@@ -2475,9 +2598,10 @@ def absorb_version(label: str, version_key: str, req: AbsorbRequest, db: Session
     return AbsorbResponse(inherited=inherited, skipped=skipped)
 
 
-@app.delete("/backups/{label}/versions/{version_key}", response_model=VersionDeletedResponse, dependencies=[Depends(require_api_key)])
-def delete_version(label: str, version_key: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    v = _get_version_or_404(label, version_key, db)
+@app.delete("/backups/{label}/versions/{version_key}", response_model=VersionDeletedResponse)
+def delete_version(label: str, version_key: str, background_tasks: BackgroundTasks,
+                    db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    v = _get_version_or_404(label, version_key, db, user)
     db.delete(v)
     db.commit()
     invalidate_activity()
@@ -2491,10 +2615,10 @@ def delete_version(label: str, version_key: str, background_tasks: BackgroundTas
 
 
 # -- Check --------------------------------------------------------------------
-@app.post("/check", response_model=CheckResponse, dependencies=[Depends(require_api_key)])
-def check_file(req: CheckRequest, db: Session = Depends(get_db)):
+@app.post("/check", response_model=CheckResponse)
+def check_file(req: CheckRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Apenas duas queries no caso comum — tudo indexado."""
-    v = _get_version_or_404(req.backup_label, req.version_key, db)
+    v = _get_version_or_404(req.backup_label, req.version_key, db, user)
 
     # Ja registrado nesta versao com mesmo conteudo? — usa indice (version_id, original_path)
     vf = (db.query(VersionFile.id)
@@ -2519,10 +2643,10 @@ def check_file(req: CheckRequest, db: Session = Depends(get_db)):
 
 
 # -- Check batch --------------------------------------------------------------
-@app.post("/check/batch", response_model=list[CheckBatchResultItem], dependencies=[Depends(require_api_key)])
-def check_batch(req: CheckBatchRequest, db: Session = Depends(get_db)):
+@app.post("/check/batch", response_model=list[CheckBatchResultItem])
+def check_batch(req: CheckBatchRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Verifica N arquivos em duas queries IN — sem N+1."""
-    v = _get_version_or_404(req.backup_label, req.version_key, db)
+    v = _get_version_or_404(req.backup_label, req.version_key, db, user)
     paths   = [i.original_path for i in req.files]
     sha256s = [i.sha256 for i in req.files]
 
@@ -2574,8 +2698,9 @@ def _bg_ensure_replicas_batch(sha256s: list[str]) -> None:
         db.close()
 
 
-@app.post("/register/batch", response_model=RegisterBatchResponse, dependencies=[Depends(require_api_key)])
-def register_batch(req: RegisterBatchRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+@app.post("/register/batch", response_model=RegisterBatchResponse)
+def register_batch(req: RegisterBatchRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
     """
     Versão em lote do modo "só registrar" do /upload (X-Content-Sha256 sem body):
     registra N arquivos com duas queries IN + um único commit, em vez de N
@@ -2583,7 +2708,7 @@ def register_batch(req: RegisterBatchRequest, background_tasks: BackgroundTasks,
     registered=False (o cliente escala para upload) sem abortar o lote.
     Disponível a partir do servidor 7.8.
     """
-    v = _get_version_or_404(req.backup_label, req.version_key, db)
+    v = _get_version_or_404(req.backup_label, req.version_key, db, user)
     if v.status != "running":
         raise HTTPException(409, f"Versão está '{v.status}' — register só permitido em versões running")
 
@@ -2796,7 +2921,7 @@ def _finish_replicas_sync(sha256: str, replica_source: Path, db: Session) -> Non
     db.commit()
 
 
-@app.post("/upload", response_model=UploadResponse, dependencies=[Depends(require_api_key)])
+@app.post("/upload", response_model=UploadResponse)
 async def upload_file(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -2806,6 +2931,7 @@ async def upload_file(
     mtime:          float         = Header(..., alias="X-Mtime"),
     content_sha256: Optional[str] = Header(None, alias="X-Content-Sha256"),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     """
     Stream binario puro — sem multipart.
@@ -2817,7 +2943,7 @@ async def upload_file(
     write-lock do SQLite (timeout de até 60s) uma query síncrona aqui
     serializaria o event loop inteiro.
     """
-    v = await asyncio.to_thread(_get_version_or_404, backup_label, version_key, db)
+    v = await asyncio.to_thread(_get_version_or_404, backup_label, version_key, db, user)
     version_id = v.id
 
     try:
@@ -2881,22 +3007,23 @@ async def upload_file(
 
 
 # -- Sync ---------------------------------------------------------------------
-@app.post("/sync", response_model=SyncResponse, dependencies=[Depends(require_api_key)])
-def sync(req: SyncRequest, db: Session = Depends(get_db)):
+@app.post("/sync", response_model=SyncResponse)
+def sync(req: SyncRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Confirma que a versao foi sincronizada com o cliente."""
-    _get_version_or_404(req.backup_label, req.version_key, db)
+    _get_version_or_404(req.backup_label, req.version_key, db, user)
     return SyncResponse(synced=True)
 
 
 # -- Files --------------------------------------------------------------------
-@app.get("/files", response_model=list[FileInfo], dependencies=[Depends(require_api_key)])
+@app.get("/files", response_model=list[FileInfo])
 def list_files(
     backup_label: str,
     version_key: str,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     """Lista arquivos com size — usa JOIN explicito em vez de lazy load (N+1)."""
-    v = _get_version_or_404(backup_label, version_key, db)
+    v = _get_version_or_404(backup_label, version_key, db, user)
 
     rows = (db.query(
                 VersionFile.id,
@@ -2924,13 +3051,16 @@ def list_files(
     ]
 
 
-@app.get("/files/{file_id}/download", dependencies=[Depends(require_api_key)])
-def download_file(file_id: int, db: Session = Depends(get_db)):
-    row = (db.query(VersionFile.original_path, VersionFile.sha256)
+@app.get("/files/{file_id}/download")
+def download_file(file_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    row = (db.query(VersionFile.original_path, VersionFile.sha256, BackupID.owner_user_id)
+           .join(BackupVersion, BackupVersion.id == VersionFile.version_id)
+           .join(BackupID, BackupID.label == BackupVersion.backup_label)
            .filter(VersionFile.id == file_id)
            .first())
     if not row:
         raise HTTPException(404, "Arquivo nao encontrado")
+    require_owner_or_admin(row.owner_user_id, user)
 
     fc           = db.query(FileContent).filter(FileContent.sha256 == row.sha256).first()
     is_encrypted = fc.encrypted if fc else False
@@ -2977,11 +3107,12 @@ def download_file(file_id: int, db: Session = Depends(get_db)):
 
 
 # -- Compare ------------------------------------------------------------------
-@app.get("/backups/{label}/compare", response_model=CompareResponse, dependencies=[Depends(require_api_key)])
-def compare_versions(label: str, v1: str, v2: str, db: Session = Depends(get_db)):
+@app.get("/backups/{label}/compare", response_model=CompareResponse)
+def compare_versions(label: str, v1: str, v2: str, db: Session = Depends(get_db),
+                      user: User = Depends(get_current_user)):
     """Compara arquivos entre duas versoes. v1 = base, v2 = nova. Duas queries SQL + diff em Python."""
-    ver1 = _get_version_or_404(label, v1, db)
-    ver2 = _get_version_or_404(label, v2, db)
+    ver1 = _get_version_or_404(label, v1, db, user)
+    ver2 = _get_version_or_404(label, v2, db, user)
 
     def _load_files(version_id):
         rows = (db.query(
@@ -3033,14 +3164,14 @@ def _bg_run_nightly_cleanup() -> None:
     run_nightly_cleanup()
 
 
-@app.post("/maintenance/nightly-cleanup", dependencies=[Depends(require_api_key)])
+@app.post("/maintenance/nightly-cleanup", dependencies=[Depends(require_admin)])
 def force_nightly_cleanup(background_tasks: BackgroundTasks):
     """Executa manualmente a rotina de limpeza noturna em background."""
     background_tasks.add_task(_bg_run_nightly_cleanup)
     return {"status": "started"}
 
 
-@app.post("/maintenance/cleanup-orphans", dependencies=[Depends(require_api_key)])
+@app.post("/maintenance/cleanup-orphans", dependencies=[Depends(require_admin)])
 def force_cleanup_orphans(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """Agenda em background a remoção de FileContents não referenciados por nenhuma versão ativa."""
     mj = MaintenanceJob(job_type="cleanup-orphans", status="running", summary="Iniciando limpeza de órfãos...")
@@ -3051,7 +3182,7 @@ def force_cleanup_orphans(background_tasks: BackgroundTasks, db: Session = Depen
     return {"scheduled": True, "job_id": mj.id}
 
 
-@app.post("/maintenance/rereplicate", response_model=RereplicateResponse, dependencies=[Depends(require_api_key)])
+@app.post("/maintenance/rereplicate", response_model=RereplicateResponse, dependencies=[Depends(require_admin)])
 def force_rereplicate(db: Session = Depends(get_db)):
     """Re-replica conteúdos com menos cópias que REPLICATION_FACTOR. Útil após adicionar um disco novo."""
     replicated, skipped = _rereplicate_all(db)
@@ -3068,7 +3199,7 @@ def force_rereplicate(db: Session = Depends(get_db)):
     return RereplicateResponse(replicated=replicated, skipped=skipped, target_copies=target)
 
 
-@app.post("/maintenance/reconcile-replication", response_model=ReconcileResponse, dependencies=[Depends(require_api_key)])
+@app.post("/maintenance/reconcile-replication", response_model=ReconcileResponse, dependencies=[Depends(require_admin)])
 def reconcile_replication(db: Session = Depends(get_db)):
     """Remove cópias excedentes e preenche arquivos sub-replicados conforme REPLICATION_FACTOR."""
     cleaned = _cleanup_excess_copies(db)
@@ -3132,7 +3263,7 @@ def _bg_validate_integrity(job_id: int) -> None:
         db.close()
 
 
-@app.post("/maintenance/validate-integrity", dependencies=[Depends(require_api_key)])
+@app.post("/maintenance/validate-integrity", dependencies=[Depends(require_admin)])
 def validate_integrity(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """Verifica se os arquivos das últimas versões done existem no disco; invalida e limpa registros ausentes."""
     mj = MaintenanceJob(
@@ -3152,7 +3283,7 @@ def _bg_run_db_backup() -> None:
     run_db_backup()
 
 
-@app.post("/maintenance/db-backup", dependencies=[Depends(require_api_key)])
+@app.post("/maintenance/db-backup", dependencies=[Depends(require_admin)])
 def force_db_backup(background_tasks: BackgroundTasks):
     """Exporta o banco de dados para os volumes de storage e aplica rotação de backups."""
     background_tasks.add_task(_bg_run_db_backup)
@@ -3250,7 +3381,7 @@ def _bg_encrypt_existing(job_id: int) -> None:
         db.close()
 
 
-@app.post("/maintenance/encrypt-existing", dependencies=[Depends(require_api_key)])
+@app.post("/maintenance/encrypt-existing", dependencies=[Depends(require_admin)])
 def encrypt_existing_files(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """Cifra todos os FileContents ainda não cifrados. Requer ENCRYPTION_ENABLED=true no servidor."""
     if not ENCRYPTION_ENABLED:
@@ -3268,9 +3399,10 @@ def encrypt_existing_files(background_tasks: BackgroundTasks, db: Session = Depe
 
 
 # -- Cleanup ------------------------------------------------------------------
-@app.post("/backups/{label}/cleanup", response_model=CleanupResponse, dependencies=[Depends(require_api_key)])
-def cleanup_versions(label: str, req: CleanupRequest, db: Session = Depends(get_db)):
-    _get_backup_or_404(label, db)
+@app.post("/backups/{label}/cleanup", response_model=CleanupResponse)
+def cleanup_versions(label: str, req: CleanupRequest, db: Session = Depends(get_db),
+                      user: User = Depends(get_current_user)):
+    _get_backup_or_404(label, db, user)
     # Considera TODAS as versoes (done, failed, running) ordenadas por data desc.
     # As `keep` mais recentes sao mantidas independente do status.
     all_versions = (db.query(BackupVersion.id, BackupVersion.version_key)
@@ -3324,7 +3456,7 @@ def _latest_done_subquery(db: Session):
     )
 
 
-@app.get("/maintenance/cleanup-by-date/preview", dependencies=[Depends(require_api_key)])
+@app.get("/maintenance/cleanup-by-date/preview", dependencies=[Depends(require_admin)])
 def cleanup_by_date_preview(before: str, label: Optional[str] = None, db: Session = Depends(get_db)):
     scope = f"label={label}" if label else "todos os labels"
     log.info(f"[cleanup-by-date/preview] consultando antes de {before}, escopo={scope}")
@@ -3345,7 +3477,7 @@ def cleanup_by_date_preview(before: str, label: Optional[str] = None, db: Sessio
     return {"total": total, "per_label": [{"label": r[0], "count": r[1]} for r in rows]}
 
 
-@app.post("/maintenance/cleanup-by-date", dependencies=[Depends(require_api_key)])
+@app.post("/maintenance/cleanup-by-date", dependencies=[Depends(require_admin)])
 def cleanup_by_date(
     before: str,
     background_tasks: BackgroundTasks,
@@ -3484,7 +3616,7 @@ def _migrate_disk_preview_data(
 @app.get(
     "/maintenance/migrate-disk/preview",
     response_model=MigrateDiskPreviewResponse,
-    dependencies=[Depends(require_api_key)],
+    dependencies=[Depends(require_admin)],
 )
 def migrate_disk_preview(
     source: str,
@@ -3497,7 +3629,7 @@ def migrate_disk_preview(
 
 @app.post(
     "/maintenance/migrate-disk",
-    dependencies=[Depends(require_api_key)],
+    dependencies=[Depends(require_admin)],
 )
 def migrate_disk(
     req: MigrateDiskRequest,

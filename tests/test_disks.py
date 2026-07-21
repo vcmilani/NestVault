@@ -22,6 +22,18 @@ def _make_engine():
     )
 
 
+def _seed_admin(Session):
+    """Cria o usuário admin (chave 'testkey') usado por todos os clients deste
+    módulo — auth é sempre obrigatória, então todo TestClient precisa de um."""
+    db = Session()
+    try:
+        db.add(db_mod.User(username="admin", api_key_hash=db_mod.hash_api_key("testkey"),
+                            role="admin", is_active=True))
+        db.commit()
+    finally:
+        db.close()
+
+
 def _client_ctx(monkeypatch, volumes, disk_usage_fn=None):
     """Contexto de TestClient com volumes e disk_usage opcionalmente mockado."""
     from fastapi.testclient import TestClient
@@ -29,6 +41,7 @@ def _client_ctx(monkeypatch, volumes, disk_usage_fn=None):
     engine = _make_engine()
     db_mod.Base.metadata.create_all(bind=engine)
     Session = sessionmaker(bind=engine)
+    _seed_admin(Session)
 
     monkeypatch.setattr(m, "STORAGE_VOLUMES", volumes)
     monkeypatch.setattr(m, "STORAGE_DIR", volumes[0])
@@ -47,6 +60,7 @@ def _client_ctx(monkeypatch, volumes, disk_usage_fn=None):
 
     def _run(patch_ctx=None):
         with TestClient(m.app) as c:
+            c.headers.update({"X-API-Key": "testkey"})
             yield c
         m.app.dependency_overrides.clear()
 

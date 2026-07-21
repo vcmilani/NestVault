@@ -91,6 +91,7 @@
     <a class="hbtn" href="/activity">◎ Atividade</a>
     <a class="hbtn" href="/rclone-jobs">⟳ rclone</a>
     <a class="hbtn" href="/stats">∑ Stats</a>
+    <a class="hbtn" href="/manage-users">☺ Usuários</a>
     <button class="hbtn always-visible" id="logoutBtn">⌀ API Key</button>
     <button class="nav-hamburger"></button>
   </div>
@@ -102,6 +103,7 @@
   <a href="/activity">◎ Atividade</a>
   <a href="/rclone-jobs">⟳ rclone</a>
   <a href="/stats">∑ Stats</a>
+  <a href="/manage-users">☺ Usuários</a>
 </nav>
 <div class="mobile-nav-backdrop"></div>
 
@@ -161,6 +163,7 @@
     try {
       const r = await fetch('/storage/disks', {headers: H()});
       if (r.status === 401) { showLogin('API Key inválida.'); container.innerHTML = ''; return; }
+      if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); container.innerHTML = ''; return; }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const disks = await r.json();
       renderDisks(disks);

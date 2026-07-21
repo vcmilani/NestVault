@@ -205,6 +205,15 @@ class _AuthSession(requests.Session):
             if 'headers' in kwargs and API_KEY:
                 kwargs['headers']['X-API-Key'] = API_KEY
             r = super().request(method, url, **kwargs)
+        if r.status_code == 403:
+            # Chave valida mas sem posse deste backup — retentar nao ajuda
+            # (diferente de 401/5xx/429), entao falha com mensagem clara em
+            # vez do "403 Client Error: Forbidden" generico do raise_for_status.
+            try:
+                detail = r.json().get("detail", "Sem permissao sobre este backup")
+            except Exception:
+                detail = "Sem permissao sobre este backup"
+            raise requests.HTTPError(f"Acesso negado: {detail}", response=r)
         return r
 
 

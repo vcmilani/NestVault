@@ -4,10 +4,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-import auth as auth_mod
 import database as db_mod
 import main as m
 import storage as storage_mod
+
+ADMIN_KEY = "testkey"
 
 
 def _make_engine():
@@ -44,8 +45,10 @@ def tmp_vol(tmp_path):
     return vol
 
 
-@pytest.fixture
-def client(tmp_vol, monkeypatch):
+def _setup_app(tmp_vol, monkeypatch):
+    """Cria engine/Session in-memory isolada e registra os overrides comuns
+    (storage, get_db, SessionLocal). Retorna o sessionmaker para os testes
+    poderem inserir dados de setup (ex: usuários) direto no banco."""
     engine = _make_engine()
     db_mod.Base.metadata.create_all(bind=engine)
     Session = sessionmaker(bind=engine)
@@ -67,39 +70,61 @@ def client(tmp_vol, monkeypatch):
             db.close()
 
     m.app.dependency_overrides[db_mod.get_db] = override_get_db
+    return Session
+
+
+def _create_user(Session, username, api_key, role="user"):
+    db = Session()
+    try:
+        u = db_mod.User(username=username, api_key_hash=db_mod.hash_api_key(api_key),
+                         role=role, is_active=True)
+        db.add(u); db.commit(); db.refresh(u)
+        return u.id
+    finally:
+        db.close()
+
+
+@pytest.fixture
+def client(tmp_vol, monkeypatch):
+    """Client autenticado como admin por padrão (chave fixa 'testkey') — cobre a
+    maioria dos testes, que exercitam a mecânica de backup e não o modelo de
+    permissão em si. Admin não sofre restrição de posse, então o comportamento
+    observado é equivalente ao antigo modo "sem autenticação"."""
+    Session = _setup_app(tmp_vol, monkeypatch)
+    _create_user(Session, "admin", ADMIN_KEY, role="admin")
     with TestClient(m.app) as c:
+        c.headers.update({"X-API-Key": ADMIN_KEY})
         yield c
     m.app.dependency_overrides.clear()
 
 
 @pytest.fixture
 def auth_client(tmp_vol, monkeypatch):
-    """Client com autenticação habilitada (API_KEY=testkey)."""
-    engine = _make_engine()
-    db_mod.Base.metadata.create_all(bind=engine)
-    Session = sessionmaker(bind=engine)
-
-    monkeypatch.setattr(m, "STORAGE_VOLUMES", [tmp_vol])
-    monkeypatch.setattr(m, "STORAGE_DIR", tmp_vol)
-    monkeypatch.setattr(storage_mod, "STORAGE_VOLUMES", [tmp_vol])
-    monkeypatch.setattr(storage_mod, "STORAGE_DIR", tmp_vol)
-    # require_api_key (auth.py) lê os globais do módulo auth, não os aliases em main.
-    monkeypatch.setattr(auth_mod, "API_KEY", "testkey")
-    monkeypatch.setattr(auth_mod, "AUTH_ENABLED", True)
-    monkeypatch.setattr(m, "API_KEY", "testkey")
-    monkeypatch.setattr(m, "AUTH_ENABLED", True)
-    monkeypatch.setattr(m, "SessionLocal", Session)
-
-    def override_get_db():
-        db = Session()
-        try:
-            yield db
-        finally:
-            db.close()
-
-    m.app.dependency_overrides[db_mod.get_db] = override_get_db
+    """Client SEM chave padrão nos headers — usado para testar o mecanismo de
+    autenticação em si (sem chave / chave errada / chave correta). O banco já
+    tem um usuário admin válido com a chave ADMIN_KEY."""
+    Session = _setup_app(tmp_vol, monkeypatch)
+    _create_user(Session, "admin", ADMIN_KEY, role="admin")
     with TestClient(m.app) as c:
         yield c
+    m.app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def two_users(tmp_vol, monkeypatch):
+    """Três clients sobre o MESMO banco: admin, alice e bob — para testar que
+    um usuário comum não enxerga/restaura/escreve backups de outro."""
+    Session = _setup_app(tmp_vol, monkeypatch)
+    _create_user(Session, "admin", ADMIN_KEY, role="admin")
+    _create_user(Session, "alice", "alice-key", role="user")
+    _create_user(Session, "bob", "bob-key", role="user")
+    with TestClient(m.app) as admin_c:
+        admin_c.headers.update({"X-API-Key": ADMIN_KEY})
+        alice_c = TestClient(m.app)
+        alice_c.headers.update({"X-API-Key": "alice-key"})
+        bob_c = TestClient(m.app)
+        bob_c.headers.update({"X-API-Key": "bob-key"})
+        yield admin_c, alice_c, bob_c
     m.app.dependency_overrides.clear()
 
 

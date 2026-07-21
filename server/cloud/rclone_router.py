@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
-from auth import require_api_key
+from auth import require_admin
 from database import RcloneBackupJob, SessionLocal, get_db
 import scheduler as sched
 
@@ -150,7 +150,7 @@ def _require_job(job_id: int, db: Session) -> RcloneBackupJob:
 # Remotes
 # ---------------------------------------------------------------------------
 
-@router.get("/remotes", dependencies=[Depends(require_api_key)])
+@router.get("/remotes", dependencies=[Depends(require_admin)])
 async def list_remotes():
     """Lista os remotes configurados no rclone config do servidor."""
     from cloud.rclone_runner import list_remotes as _list
@@ -161,7 +161,7 @@ async def list_remotes():
     return {"remotes": remotes}
 
 
-@router.get("/remotes/{remote_name}/browse", dependencies=[Depends(require_api_key)])
+@router.get("/remotes/{remote_name}/browse", dependencies=[Depends(require_admin)])
 async def browse_remote(remote_name: str, path: str = ""):
     """Lista subpastas em remote_name:path (não recursivo)."""
     if not _REMOTE_NAME_RE.match(remote_name):
@@ -178,13 +178,13 @@ async def browse_remote(remote_name: str, path: str = ""):
 # Jobs — CRUD
 # ---------------------------------------------------------------------------
 
-@router.get("/jobs", response_model=list[RcloneJobOut], dependencies=[Depends(require_api_key)])
+@router.get("/jobs", response_model=list[RcloneJobOut], dependencies=[Depends(require_admin)])
 def list_jobs(db: Session = Depends(get_db)):
     jobs = db.query(RcloneBackupJob).order_by(RcloneBackupJob.created_at.desc()).all()
     return [_job_out(j) for j in jobs]
 
 
-@router.post("/jobs", response_model=RcloneJobOut, status_code=201, dependencies=[Depends(require_api_key)])
+@router.post("/jobs", response_model=RcloneJobOut, status_code=201, dependencies=[Depends(require_admin)])
 def create_job(req: RcloneJobCreate, db: Session = Depends(get_db)):
     job = RcloneBackupJob(
         remote_name=req.remote_name,
@@ -209,12 +209,12 @@ def create_job(req: RcloneJobCreate, db: Session = Depends(get_db)):
     return _job_out(job)
 
 
-@router.get("/jobs/{job_id}", response_model=RcloneJobOut, dependencies=[Depends(require_api_key)])
+@router.get("/jobs/{job_id}", response_model=RcloneJobOut, dependencies=[Depends(require_admin)])
 def get_job(job_id: int, db: Session = Depends(get_db)):
     return _job_out(_require_job(job_id, db))
 
 
-@router.patch("/jobs/{job_id}", response_model=RcloneJobOut, dependencies=[Depends(require_api_key)])
+@router.patch("/jobs/{job_id}", response_model=RcloneJobOut, dependencies=[Depends(require_admin)])
 def update_job(job_id: int, req: RcloneJobUpdate, db: Session = Depends(get_db)):
     job = _require_job(job_id, db)
 
@@ -244,7 +244,7 @@ def update_job(job_id: int, req: RcloneJobUpdate, db: Session = Depends(get_db))
     return _job_out(job)
 
 
-@router.delete("/jobs/{job_id}", status_code=204, dependencies=[Depends(require_api_key)])
+@router.delete("/jobs/{job_id}", status_code=204, dependencies=[Depends(require_admin)])
 def delete_job(job_id: int, db: Session = Depends(get_db)):
     job = _require_job(job_id, db)
     sched.remove_rclone_job(job.id)
@@ -260,7 +260,7 @@ def delete_job(job_id: int, db: Session = Depends(get_db)):
 # Jobs — execução
 # ---------------------------------------------------------------------------
 
-@router.post("/jobs/{job_id}/run", status_code=202, dependencies=[Depends(require_api_key)])
+@router.post("/jobs/{job_id}/run", status_code=202, dependencies=[Depends(require_admin)])
 async def run_job_now(job_id: int, db: Session = Depends(get_db)):
     _require_job(job_id, db)
     lock = _job_locks.setdefault(job_id, asyncio.Lock())
@@ -277,7 +277,7 @@ async def run_job_now(job_id: int, db: Session = Depends(get_db)):
     return {"status": "started", "job_id": job_id}
 
 
-@router.get("/jobs/{job_id}/status", dependencies=[Depends(require_api_key)])
+@router.get("/jobs/{job_id}/status", dependencies=[Depends(require_admin)])
 def job_status(job_id: int, db: Session = Depends(get_db)):
     job = _require_job(job_id, db)
     return {
@@ -288,7 +288,7 @@ def job_status(job_id: int, db: Session = Depends(get_db)):
     }
 
 
-@router.post("/jobs/{job_id}/cancel", dependencies=[Depends(require_api_key)])
+@router.post("/jobs/{job_id}/cancel", dependencies=[Depends(require_admin)])
 def cancel_job(job_id: int, db: Session = Depends(get_db)):
     """Reseta um job travado como 'running' (ex: após reinício do servidor).
 
