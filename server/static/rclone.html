@@ -84,6 +84,7 @@
     <a class="hbtn" href="/activity">◎ Atividade</a>
     <a class="hbtn active" href="/rclone-jobs">⟳ rclone</a>
     <a class="hbtn" href="/stats">∑ Stats</a>
+    <a class="hbtn" href="/manage-users">☺ Usuários</a>
     <button class="hbtn always-visible" id="logoutBtn">⌀ API Key</button>
     <button class="nav-hamburger"></button>
   </div>
@@ -95,6 +96,7 @@
   <a href="/activity">◎ Atividade</a>
   <a class="active" href="/rclone-jobs">⟳ rclone</a>
   <a href="/stats">∑ Stats</a>
+  <a href="/manage-users">☺ Usuários</a>
 </nav>
 <div class="mobile-nav-backdrop"></div>
 
@@ -211,6 +213,7 @@
     try {
       const r = await fetch('/rclone/remotes', {headers: H()});
       if (r.status === 401) { showLogin('API Key inválida.'); return; }
+      if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); return; }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const {remotes} = await r.json();
       _remotes = remotes;
@@ -234,6 +237,7 @@
     try {
       const r = await fetch('/rclone/jobs', {headers: H()});
       if (r.status === 401) { showLogin('API Key inválida.'); return; }
+      if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); return; }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const jobs = await r.json();
       jobs.forEach(j => { if (j.last_run_message) _jobsLogCache[j.id] = j.last_run_message; });

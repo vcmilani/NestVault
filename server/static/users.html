@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#e8a940">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="NestVault">
+<link rel="icon" type="image/png" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<link rel="manifest" href="/static/manifest.json">
+<title>Usuários — NestVault</title>
+<link rel="stylesheet" href="/static/theme.css">
+<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/nav.css">
+<script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
+<style>
+  main{max-width:900px}
+
+  .page-title{display:flex;align-items:center;gap:10px;margin-bottom:24px;animation:fadeUp .3s ease}
+  .page-title-icon{font-size:18px;color:var(--amber)}
+  .page-title-text{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--text)}
+  .page-title-sub{font-size:10px;color:var(--text-mute);letter-spacing:.08em;margin-top:2px}
+
+  .new-user-card{border:1px solid var(--border);background:var(--bg2);padding:20px 24px;margin-bottom:24px;animation:fadeUp .4s ease both}
+  .new-user-title{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim);margin-bottom:14px}
+  .form-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .form-label{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim)}
+  .op-input{background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:12px;padding:7px 10px;outline:none}
+  .op-input:focus{border-color:var(--amber)}
+  .op-select{background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:12px;padding:7px 10px;outline:none;cursor:pointer}
+  .op-select:focus{border-color:var(--amber)}
+  .run-btn{display:inline-flex;align-items:center;gap:7px;background:none;border:1px solid var(--border2);color:var(--text-dim);padding:7px 16px;font-family:var(--mono);font-size:11px;cursor:pointer;letter-spacing:.06em;transition:all .15s;white-space:nowrap}
+  .run-btn:hover{border-color:var(--amber);color:var(--amber)}
+  .run-btn:disabled{opacity:.5;cursor:not-allowed}
+  .form-error{font-size:11px;color:var(--red);min-height:14px;width:100%}
+
+  .key-reveal{border:1px solid var(--amber);border-top:2px solid var(--amber);background:var(--amber-dim);padding:16px 20px;margin-bottom:24px;display:none;animation:fadeUp .3s ease}
+  .key-reveal.visible{display:block}
+  .key-reveal-title{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--amber);margin-bottom:8px}
+  .key-reveal-warn{font-size:11px;color:var(--text-dim);margin-bottom:12px;line-height:1.6}
+  .key-reveal-row{display:flex;align-items:center;gap:10px}
+  .key-reveal-value{flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:12px;padding:8px 12px;word-break:break-all;user-select:all}
+
+  table{width:100%;border-collapse:collapse}
+  thead th{background:var(--bg3);padding:8px 14px;text-align:left;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);border-bottom:1px solid var(--border);white-space:nowrap}
+  tbody tr{border-bottom:1px solid var(--border)}
+  tbody tr:last-child{border-bottom:none}
+  tbody tr:hover{background:var(--bg2)}
+  td{padding:9px 14px;font-size:12px;vertical-align:middle}
+  .td-r{text-align:right}
+  .td-dim{color:var(--text-dim)}
+  .td-nb{white-space:nowrap}
+  .td-actions{display:flex;gap:8px;justify-content:flex-end}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">◈</div>
+    <div><div class="logo-text">NestVault</div><div class="logo-sub">Usuários</div></div>
+  </div>
+  <div class="header-right">
+    <span class="last-updated" id="lastUpdated"></span>
+    <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
+    <button class="hbtn" onclick="load()">↻ Refresh</button>
+    <a class="hbtn" href="/">← Voltar</a>
+    <a class="hbtn" href="/disks">⊞ Discos</a>
+    <a class="hbtn" href="/maintenance">⚙ Manutenção</a>
+    <button class="hbtn always-visible" id="logoutBtn">⌀ API Key</button>
+    <button class="nav-hamburger"></button>
+  </div>
+</header>
+
+<nav class="mobile-nav">
+  <button onclick="load();closeNav()">↻ Refresh</button>
+  <a href="/">← Voltar</a>
+  <a href="/disks">⊞ Discos</a>
+  <a href="/maintenance">⚙ Manutenção</a>
+</nav>
+<div class="mobile-nav-backdrop"></div>
+
+<main>
+  <div class="error-bar" id="errorBar"></div>
+
+  <div class="page-title">
+    <span class="page-title-icon">☺</span>
+    <div>
+      <div class="page-title-text">Gerenciamento de Usuários</div>
+      <div class="page-title-sub">Cada usuário só enxerga e restaura seus próprios backups — tela restrita a administradores</div>
+    </div>
+  </div>
+
+  <div class="key-reveal" id="keyReveal">
+    <div class="key-reveal-title">Chave gerada — <span id="keyRevealUser"></span></div>
+    <div class="key-reveal-warn">Esta chave só é exibida agora. Copie e entregue ao usuário — o servidor não guarda o valor em texto puro e não é possível recuperá-la depois.</div>
+    <div class="key-reveal-row">
+      <input class="key-reveal-value" id="keyRevealValue" readonly onclick="this.select()">
+      <button class="run-btn" onclick="copyKey()">⧉ Copiar</button>
+      <button class="run-btn" onclick="document.getElementById('keyReveal').classList.remove('visible')">✕ Fechar</button>
+    </div>
+  </div>
+
+  <div class="new-user-card">
+    <div class="new-user-title">Novo usuário</div>
+    <div class="form-row">
+      <span class="form-label">Username</span>
+      <input class="op-input" id="newUsername" placeholder="ex: victor" autocomplete="off">
+      <span class="form-label">Papel</span>
+      <select class="op-select" id="newRole">
+        <option value="user">user</option>
+        <option value="admin">admin</option>
+      </select>
+      <button class="run-btn" id="createBtn" onclick="createUser()">＋ Criar</button>
+    </div>
+    <div class="form-error" id="createError"></div>
+  </div>
+
+  <div class="table-wrap">
+    <div id="usersContainer"><div class="loading">Carregando</div></div>
+  </div>
+</main>
+
+<!-- Login overlay -->
+<div class="login-overlay" id="loginOverlay" style="display:none">
+  <div class="login-box">
+    <div class="login-title">◈ NestVault</div>
+    <div class="login-sub">Informe a API Key para continuar</div>
+    <form id="loginForm">
+      <label class="login-label" for="apiKeyInput">API Key</label>
+      <input class="login-input" id="apiKeyInput" type="password" placeholder="sua-api-key-aqui" autocomplete="off">
+      <button class="login-btn" type="submit">Entrar →</button>
+      <div class="login-error" id="loginError"></div>
+    </form>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+  let _users = [];
+
+  function copyKey() {
+    const el = document.getElementById('keyRevealValue');
+    el.select();
+    navigator.clipboard?.writeText(el.value).catch(() => {});
+  }
+
+  function revealKey(username, apiKey) {
+    document.getElementById('keyRevealUser').textContent = username;
+    document.getElementById('keyRevealValue').value = apiKey;
+    document.getElementById('keyReveal').classList.add('visible');
+  }
+
+  async function load() {
+    clearError();
+    const container = document.getElementById('usersContainer');
+    if (!container.querySelector('table')) container.innerHTML = '<div class="loading">Carregando</div>';
+    try {
+      const r = await fetch('/users', {headers: H()});
+      if (r.status === 401) { showLogin('API Key inválida.'); container.innerHTML = ''; return; }
+      if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); container.innerHTML = ''; return; }
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      _users = await r.json();
+      renderUsers();
+      nvMarkUpdated();
+    } catch(e) {
+      showError('Não foi possível conectar: '+e.message);
+      container.innerHTML = '<div class="empty">Nenhum dado disponível</div>';
+    }
+  }
+
+  function renderUsers() {
+    const container = document.getElementById('usersContainer');
+    if (!_users.length) {
+      container.innerHTML = '<div class="empty">Nenhum usuário cadastrado</div>';
+      return;
+    }
+    const rows = _users.map(u => `
+      <tr>
+        <td>${esc(u.username)}</td>
+        <td><span class="badge ${u.role === 'admin' ? 'badge-running' : 'badge-active'}">${esc(u.role)}</span></td>
+        <td><span class="badge ${u.is_active ? 'badge-active' : 'badge-off'}">${u.is_active ? 'ativo' : 'inativo'}</span></td>
+        <td class="td-dim td-nb">${fmtDate(u.created_at)}</td>
+        <td class="td-actions">
+          <button class="small-btn" onclick="rotateKey(${u.id}, '${esc(u.username)}')">⟳ Girar chave</button>
+          <button class="small-btn ${u.is_active ? 'btn-danger' : ''}" onclick="toggleActive(${u.id}, '${esc(u.username)}', ${!u.is_active})">
+            ${u.is_active ? '⏻ Desativar' : '⏻ Reativar'}
+          </button>
+        </td>
+      </tr>`).join('');
+    container.innerHTML = `<table>
+      <thead><tr><th>Username</th><th>Papel</th><th>Status</th><th>Criado em</th><th class="td-r">Ações</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  }
+
+  async function createUser() {
+    const username = document.getElementById('newUsername').value.trim();
+    const role = document.getElementById('newRole').value;
+    const errEl = document.getElementById('createError');
+    errEl.textContent = '';
+    if (!username) { errEl.textContent = 'Informe um username.'; return; }
+
+    const btn = document.getElementById('createBtn');
+    btn.disabled = true;
+    try {
+      const r = await fetch('/users', {
+        method: 'POST', headers: {...H(), 'Content-Type': 'application/json'},
+        body: JSON.stringify({username, role}),
+      });
+      if (r.status === 401) { showLogin('API Key inválida.'); return; }
+      if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); return; }
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) { errEl.textContent = data.detail || `Erro ${r.status}`; return; }
+      document.getElementById('newUsername').value = '';
+      revealKey(data.user.username, data.api_key);
+      load();
+    } catch(e) {
+      errEl.textContent = 'Erro de conexão: ' + e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function rotateKey(id, username) {
+    const ok = await nvConfirm(
+      'Girar chave de acesso',
+      `Isso invalida a chave atual de "${username}" imediatamente. Qualquer cliente usando a chave antiga (CLI, dashboard) perderá acesso até receber a nova.`
+    );
+    if (!ok) return;
+    try {
+      const r = await fetch(`/users/${id}/rotate-key`, {method: 'POST', headers: H()});
+      if (r.status === 401) { showLogin('API Key inválida.'); return; }
+      if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); return; }
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) { showError(data.detail || `Erro ${r.status}`); return; }
+      revealKey(data.user.username, data.api_key);
+      load();
+    } catch(e) {
+      showError('Erro de conexão: ' + e.message);
+    }
+  }
+
+  async function toggleActive(id, username, nextActive) {
+    if (!nextActive) {
+      const ok = await nvConfirm(
+        'Desativar usuário',
+        `"${username}" perde acesso imediatamente — não poderá mais fazer backup nem restore até ser reativado. O histórico de backups é mantido.`
+      );
+      if (!ok) return;
+    }
+    try {
+      const r = await fetch(`/users/${id}`, {
+        method: 'PATCH', headers: {...H(), 'Content-Type': 'application/json'},
+        body: JSON.stringify({is_active: nextActive}),
+      });
+      if (r.status === 401) { showLogin('API Key inválida.'); return; }
+      if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); return; }
+      if (!r.ok) { const data = await r.json().catch(() => ({})); showError(data.detail || `Erro ${r.status}`); return; }
+      load();
+    } catch(e) {
+      showError('Erro de conexão: ' + e.message);
+    }
+  }
+
+  // Init — a própria carga inicial faz o auth-check (401/403 → login)
+  load();
+</script>
+<script src="/static/nav.js"></script>
+</body>
+</html>

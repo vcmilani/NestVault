@@ -58,18 +58,40 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
+def hash_api_key(raw: str) -> str:
+    """SHA-256 hex — a chave em si nunca é persistida em texto puro."""
+    import hashlib
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id           = Column(Integer, primary_key=True)
+    username     = Column(String, nullable=False, unique=True, index=True)
+    api_key_hash = Column(String(64), nullable=False, unique=True, index=True)
+    role         = Column(String, nullable=False, default="user")  # "admin" | "user"
+    is_active    = Column(Boolean, nullable=False, default=True)
+    created_at   = Column(DateTime, default=_utcnow)
+
+
 class BackupID(Base):
     __tablename__ = "backup_ids"
 
-    id          = Column(Integer, primary_key=True)
-    label       = Column(String, nullable=False, unique=True, index=True)
-    client_name = Column(String, nullable=True, index=True)
-    prefix      = Column(String, nullable=True)
-    created_at  = Column(DateTime, default=_utcnow)
-    status      = Column(String, default="active")
+    id            = Column(Integer, primary_key=True)
+    label         = Column(String, nullable=False, unique=True, index=True)
+    client_name   = Column(String, nullable=True, index=True)
+    prefix        = Column(String, nullable=True)
+    created_at    = Column(DateTime, default=_utcnow)
+    status        = Column(String, default="active")
+    # Dono do backup — nullable durante a migração (ver bootstrap_admin_user /
+    # backfill_backup_owners); usuário comum só enxerga/restaura labels onde
+    # owner_user_id == User.id atual (ou é admin).
+    owner_user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
 
     versions = relationship("BackupVersion", back_populates="backup",
                             order_by="BackupVersion.version_key.desc()", lazy="dynamic")
+    owner    = relationship("User")
 
 
 class BackupVersion(Base):
@@ -235,6 +257,23 @@ def init_db():
             if "duplicate column" not in str(e).lower():
                 raise
 
+    # Idem para backup_ids.owner_user_id (backup por usuário).
+    with engine.connect() as conn:
+        try:
+            if engine.dialect.name == "sqlite":
+                conn.execute(text(
+                    "ALTER TABLE backup_ids ADD COLUMN owner_user_id INTEGER"
+                ))
+            else:
+                conn.execute(text(
+                    "ALTER TABLE backup_ids ADD COLUMN IF NOT EXISTS owner_user_id INTEGER"
+                ))
+            conn.commit()
+            _log_init.info("[db-migrate] Coluna backup_ids.owner_user_id garantida")
+        except Exception as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+
     # Demais migrações manuais apenas para SQLite — no PostgreSQL o schema é
     # criado via create_all (bancos novos) ou migração externa.
     if engine.dialect.name != "sqlite":
@@ -294,6 +333,43 @@ def init_db():
             _log_init.info(f"[db-migrate] {msg}")
         conn.commit()
         _log_init.info("[db-migrate] Migração de índices concluída")
+
+
+def bootstrap_admin_user(api_key: str) -> None:
+    """Primeira inicialização após a migração para backup por usuário: se
+    nenhum User existir ainda, cria um admin cuja chave é o BACKUP_API_KEY
+    atual — preserva o acesso de quem já usa essa chave, sem exigir troca
+    imediata em nenhum cliente. Idempotente (não faz nada se já há usuários)."""
+    if not api_key:
+        return
+    import logging
+    log = logging.getLogger("backup-server")
+    db = SessionLocal()
+    try:
+        if db.query(User).count() > 0:
+            return
+        admin = User(username="admin", api_key_hash=hash_api_key(api_key),
+                     role="admin", is_active=True)
+        db.add(admin)
+        db.commit()
+        db.refresh(admin)
+        log.info(f"[db-migrate] Usuário admin '{admin.username}' criado a partir de BACKUP_API_KEY")
+        _backfill_backup_owners(db, admin.id)
+    finally:
+        db.close()
+
+
+def _backfill_backup_owners(db, owner_user_id: int) -> None:
+    """Atribui owner_user_id a todo BackupID ainda sem dono (backups criados
+    antes da migração por usuário) — garante que nenhum backup fique órfão."""
+    import logging
+    log = logging.getLogger("backup-server")
+    n = (db.query(BackupID)
+         .filter(BackupID.owner_user_id.is_(None))
+         .update({"owner_user_id": owner_user_id}, synchronize_session=False))
+    db.commit()
+    if n:
+        log.info(f"[db-migrate] {n} backup(s) existente(s) atribuído(s) ao usuário {owner_user_id}")
 
 
 def get_db():

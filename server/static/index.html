@@ -165,6 +165,7 @@
     <a class="hbtn" href="/activity">◎ Atividade</a>
     <a class="hbtn" href="/rclone-jobs">⟳ rclone</a>
     <a class="hbtn" href="/stats">∑ Stats</a>
+    <a class="hbtn" href="/manage-users">☺ Usuários</a>
     <button class="hbtn always-visible" id="logoutBtn">⌀ API Key</button>
     <button class="nav-hamburger"></button>
   </div>
@@ -177,6 +178,7 @@
   <a href="/activity">◎ Atividade</a>
   <a href="/rclone-jobs">⟳ rclone</a>
   <a href="/stats">∑ Stats</a>
+  <a href="/manage-users">☺ Usuários</a>
 </nav>
 <div class="mobile-nav-backdrop"></div>
 
@@ -256,6 +258,7 @@
         fetch('/storage/info', {headers: H()}),
       ]);
       if (respBackups.status === 401) { showLogin('API Key inválida.'); return; }
+      if (respBackups.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); return; }
       if (!respBackups.ok) throw new Error(`HTTP ${respBackups.status}`);
       const backups = await respBackups.json();
       const disk = respDisk.ok ? await respDisk.json() : null;
@@ -305,7 +308,8 @@
     rows.forEach(function(tr) {
       const label = (tr.cells[0] ? tr.cells[0].textContent : '').toLowerCase();
       const client = (tr.cells[1] ? tr.cells[1].textContent : '').toLowerCase();
-      tr.style.display = (!q || label.includes(q) || client.includes(q)) ? '' : 'none';
+      const owner = (tr.cells[2] ? tr.cells[2].textContent : '').toLowerCase();
+      tr.style.display = (!q || label.includes(q) || client.includes(q) || owner.includes(q)) ? '' : 'none';
       const vrow = document.getElementById('vrow-' + tr.dataset.label);
       if (vrow) vrow.style.display = 'none';
     });
@@ -346,6 +350,7 @@
         <tr class="${isExp?'expanded':''}${runCls}" data-label="${esc(b.label)}" onclick="toggleVersions(this.dataset.label,this)">
           <td><span class="chevron">▶</span>${esc(b.label)}</td>
           <td class="dim-cell">${esc(b.client_name||'—')}</td>
+          <td class="dim-cell">${esc(b.owner_username||'—')}</td>
           <td>${badge(b.status)}</td>
           <td class="num-cell">${b.version_count}</td>
           <td class="num-cell">${b.file_count.toLocaleString('pt-BR')}</td>
@@ -354,7 +359,7 @@
           <td id="disks-${esc(b.label)}" onclick="event.stopPropagation()" style="white-space:nowrap"><span class="disk-tag-loading">·</span></td>
         </tr>
         <tr class="versions-row" id="vrow-${esc(b.label)}" style="display:${isExp?'':'none'}">
-          <td colspan="8">
+          <td colspan="9">
             <div class="versions-container">
               <div class="versions-head">
                 <span>Versões — ${esc(b.label)}</span>
@@ -370,7 +375,7 @@
     el.innerHTML = `
       <table>
         <thead><tr>
-          <th>Label</th><th>Cliente</th><th>Status</th>
+          <th>Label</th><th>Cliente</th><th>Usuário</th><th>Status</th>
           <th style="text-align:right">Versões</th>
           <th style="text-align:right">Arquivos</th>
           <th style="text-align:right">Tamanho</th>
