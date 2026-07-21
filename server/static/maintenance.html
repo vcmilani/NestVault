@@ -360,6 +360,39 @@
       </div>
     </div>
 
+    <!-- Reatribuir Dono do Backup -->
+    <div class="op-card risk-medium" style="animation-delay:.29s">
+      <div class="op-header">
+        <div class="op-title-wrap">
+          <span class="op-icon">⇄</span>
+          <div>
+            <div class="op-name">Reatribuir Dono</div>
+            <div class="op-endpoint">PATCH /backups/{label}/owner</div>
+          </div>
+        </div>
+        <span class="risk-badge medium">Médio risco</span>
+      </div>
+      <div class="op-desc">Transfere a posse de um backup para outro usuário. Necessário para labels criados antes da migração para backup por usuário (ficam com o admin) ou ao reorganizar contas. O dono anterior perde acesso a esse label imediatamente.</div>
+      <div class="op-form">
+        <div class="form-row">
+          <span class="form-label">Label</span>
+          <select class="op-select" id="reassign-owner-label">
+            <option value="">— selecione —</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Novo dono</span>
+          <select class="op-select" id="reassign-owner-user">
+            <option value="">— selecione —</option>
+          </select>
+        </div>
+      </div>
+      <div class="op-footer">
+        <button class="run-btn" id="btn-reassign-owner" onclick="runReassignOwner()">⇄ Reatribuir</button>
+        <div class="op-result" id="result-reassign-owner"></div>
+      </div>
+    </div>
+
     <!-- Excluir Label Completo -->
     <div class="op-card risk-high" style="animation-delay:.3s">
       <div class="op-header">
@@ -779,11 +812,14 @@ async function runRenameLabel() {
 // -- Carregar lista de labels -------------------------------------------------
 async function loadLabels() {
   const ids = ['cleanup-label', 'delete-label-select', 'rename-label-select'];
+  const ownerSel = document.getElementById('reassign-owner-label');
   ids.forEach(id => {
     const s = document.getElementById(id);
     s.innerHTML = '<option value="">Carregando…</option>';
     s.disabled = true;
   });
+  ownerSel.innerHTML = '<option value="">Carregando…</option>';
+  ownerSel.disabled = true;
   const cdl = document.getElementById('cleanupdate-label');
   cdl.innerHTML = '<option value="">Carregando…</option>';
   cdl.disabled = true;
@@ -792,6 +828,8 @@ async function loadLabels() {
     const r = await fetch('/backups', {headers: H()});
     if (r.status === 401 || r.status === 403) {
       ids.forEach(id => { const s = document.getElementById(id); s.disabled = false; s.innerHTML = '<option value="">— selecione —</option>'; });
+      ownerSel.disabled = false;
+      ownerSel.innerHTML = '<option value="">— selecione —</option>';
       cdl.disabled = false;
       cdl.innerHTML = '<option value="">Todos os labels</option>';
       showLogin(r.status === 403 ? 'Esta chave não tem permissão de administrador.' : 'API Key inválida.');
@@ -805,14 +843,72 @@ async function loadLabels() {
         return `<option value="${b.label}">${b.label} (${ver})</option>`;
       }).join('');
     ids.forEach(id => { const s = document.getElementById(id); s.disabled = false; s.innerHTML = opts; });
+    ownerSel.disabled = false;
+    ownerSel.innerHTML = '<option value="">— selecione —</option>' +
+      backups.map(b => `<option value="${b.label}">${b.label} (dono atual: ${b.owner_username || '—'})</option>`).join('');
     cdl.disabled = false;
     cdl.innerHTML = '<option value="">Todos os labels</option>' +
       backups.map(b => `<option value="${b.label}">${b.label}</option>`).join('');
   } catch(e) {
     ids.forEach(id => { const s = document.getElementById(id); s.disabled = false; s.innerHTML = '<option value="">Erro ao carregar</option>'; });
+    ownerSel.disabled = false;
+    ownerSel.innerHTML = '<option value="">Erro ao carregar</option>';
     cdl.disabled = false;
     cdl.innerHTML = '<option value="">Todos os labels</option>';
   }
+}
+
+// -- Reatribuir Dono do Backup -------------------------------------------------
+async function loadReassignUsers() {
+  const sel = document.getElementById('reassign-owner-user');
+  sel.innerHTML = '<option value="">Carregando…</option>';
+  sel.disabled = true;
+  try {
+    const r = await fetch('/users', {headers: H()});
+    if (r.status === 401 || r.status === 403) {
+      sel.disabled = false;
+      sel.innerHTML = '<option value="">— selecione —</option>';
+      return;
+    }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const users = await r.json();
+    sel.disabled = false;
+    sel.innerHTML = '<option value="">— selecione —</option>' +
+      users.map(u => `<option value="${u.id}">${esc(u.username)} (${u.role}${u.is_active ? '' : ', inativo'})</option>`).join('');
+  } catch(e) {
+    sel.disabled = false;
+    sel.innerHTML = '<option value="">Erro ao carregar</option>';
+  }
+}
+
+async function runReassignOwner() {
+  const label = document.getElementById('reassign-owner-label').value;
+  const userId = document.getElementById('reassign-owner-user').value;
+  if (!label)  { showError('reassign-owner', 'Selecione um label.'); return; }
+  if (!userId) { showError('reassign-owner', 'Selecione o novo dono.'); return; }
+
+  const ok = await nvConfirm(
+    'Reatribuir dono do backup',
+    `O label "${label}" passará a pertencer a outro usuário. O dono anterior perde acesso a ele imediatamente (não pode mais listar, restaurar ou escrever nesse label).`
+  );
+  if (!ok) return;
+
+  setRunning('reassign-owner', true, '⇄ Reatribuir');
+  try {
+    const r = await apiCall('PATCH', `/backups/${encodeURIComponent(label)}/owner`, {owner_user_id: Number(userId)});
+    if (r.status === 401) { showLogin('API Key inválida.'); setRunning('reassign-owner', false, '⇄ Reatribuir'); return; }
+    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); setRunning('reassign-owner', false, '⇄ Reatribuir'); return; }
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      showError('reassign-owner', data.detail || `Erro ${r.status}`);
+    } else {
+      showSuccess('reassign-owner', `Label "${label}" reatribuído — novo dono: "${data.owner_username || userId}"`);
+      loadLabels();
+    }
+  } catch(e) {
+    showError('reassign-owner', 'Erro de conexão: ' + e.message);
+  }
+  setRunning('reassign-owner', false, '⇄ Reatribuir');
 }
 
 // -- Excluir Versões por Data -------------------------------------------------
@@ -1107,6 +1203,7 @@ function submitLogin() {
   document.getElementById('loginOverlay').classList.remove('visible');
   document.getElementById('loginInput').value = '';
   loadLabels();
+  loadReassignUsers();
 }
 
 document.getElementById('loginInput').addEventListener('keydown', e => { if (e.key === 'Enter') submitLogin(); });
@@ -1115,7 +1212,7 @@ document.getElementById('logoutBtn').addEventListener('click', () => showLogin('
 // init
 document.getElementById('cleanupdate-before').max = new Date().toISOString().split('T')[0];
 if (!API_KEY) { showLogin(''); }
-else          { loadLabels(); }
+else          { loadLabels(); loadReassignUsers(); }
 </script>
 <script src="/static/nav.js"></script>
 </body>
