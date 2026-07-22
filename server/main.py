@@ -1,5 +1,5 @@
 """
-NestVault  v7.7.0
+NestVault  v7.9.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -7,6 +7,20 @@ Otimizacoes de performance:
 - Indices no banco + WAL mode
 - Cleanup de orfaos em uma unica query
 - Limpeza de arquivos ao deletar label/versao feita em background (nao bloqueia o cliente)
+
+v7.9.0:
+- Backup por usuario: tabela `users` (chave hasheada, role admin/user) +
+  `backup_ids.owner_user_id` — cada usuario so cria/lista/sincroniza/restaura
+  seus proprios backups; endpoints de infraestrutura (discos, manutencao,
+  stats, rclone) passam a exigir role=admin
+- Migracao automatica no boot: a BACKUP_API_KEY existente vira o primeiro
+  admin e todo backup pre-existente e atribuido a ele — sem downtime
+- Novos endpoints POST/GET/PATCH /users, /users/{id}/rotate-key,
+  PATCH /backups/{label}/owner (reatribuicao de dono, admin-only)
+- Nova tela /manage-users; dashboard trata 403 (chave valida sem permissao
+  de admin) em todas as paginas; novo card "Reatribuir Dono" em Manutencao
+- Cliente Python (nestvault.py) mostra mensagem dedicada em vez do erro
+  HTTP generico quando a chave nao tem permissao sobre um label
 
 v7.7.0:
 - cleanup-orphans convertido para background com progresso em tempo real
@@ -393,7 +407,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="7.8.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="7.9.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
