@@ -60,6 +60,7 @@
   .size-cell{text-align:right;color:var(--blue);font-variant-numeric:tabular-nums}
   .date-cell{color:var(--text-dim);white-space:nowrap}
   .dim-cell{color:var(--text-dim)}
+  .owner-sub{font-size:10px;color:var(--text-mute);margin-top:2px;letter-spacing:.04em}
   tr.row-running>td:first-child{border-left:2px solid var(--amber)}
   tr.row-running{background:color-mix(in srgb,var(--amber) 5%,var(--bg2))}
   .running-pill{display:none;align-items:center;gap:5px;font-size:10px;color:var(--amber);letter-spacing:.06em}
@@ -153,20 +154,20 @@
 <header>
   <div class="logo">
     <div class="logo-icon">◈</div>
-    <div><div class="logo-text">NestVault</div><div class="logo-sub">v7.7</div></div>
+    <div><div class="logo-text">NestVault</div><div class="logo-sub">v7.9</div></div>
   </div>
   <div class="header-right">
     <div class="status-dot" id="statusDot"></div>
     <span class="last-updated" id="lastUpdated">—</span>
     <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
-    <button class="hbtn" onclick="loadAll()">↻ Refresh</button>
-    <a class="hbtn" href="/disks">⊞ Discos</a>
-    <a class="hbtn" href="/maintenance">⚙ Manutenção</a>
-    <a class="hbtn" href="/activity">◎ Atividade</a>
-    <a class="hbtn" href="/rclone-jobs">⟳ rclone</a>
-    <a class="hbtn" href="/stats">∑ Stats</a>
-    <a class="hbtn" href="/manage-users">☺ Usuários</a>
-    <button class="hbtn always-visible" id="logoutBtn">⌀ API Key</button>
+    <button class="hbtn" onclick="loadAll()" title="Refresh">↻<span class="hbtn-label"> Refresh</span></button>
+    <a class="hbtn" href="/disks" title="Discos">⊞<span class="hbtn-label"> Discos</span></a>
+    <a class="hbtn" href="/maintenance" title="Manutenção">⚙<span class="hbtn-label"> Manutenção</span></a>
+    <a class="hbtn" href="/activity" title="Atividade">◎<span class="hbtn-label"> Atividade</span></a>
+    <a class="hbtn" href="/rclone-jobs" title="rclone">⟳<span class="hbtn-label"> rclone</span></a>
+    <a class="hbtn" href="/stats" title="Stats">∑<span class="hbtn-label"> Stats</span></a>
+    <a class="hbtn" href="/manage-users" title="Usuários">☺<span class="hbtn-label"> Usuários</span></a>
+    <button class="hbtn always-visible" id="logoutBtn" title="API Key">⌀<span class="hbtn-label"> API Key</span></button>
     <button class="nav-hamburger"></button>
   </div>
 </header>
@@ -212,7 +213,7 @@
       <span class="count-badge" id="backupCount">0</span>
     </div>
   </div>
-  <input class="backup-search" id="backupSearch" type="text" placeholder="Filtrar backups por label ou cliente…" oninput="filterBackups(this.value)">
+  <input class="backup-search" id="backupSearch" type="text" placeholder="Filtrar backups por label, cliente ou usuário…" oninput="filterBackups(this.value)">
   <div class="table-wrap">
     <div id="backupsTable"><div class="loading">Carregando</div></div>
   </div>
@@ -307,9 +308,9 @@
     const rows = document.querySelectorAll('#backupsTable tbody tr:not(.versions-row)');
     rows.forEach(function(tr) {
       const label = (tr.cells[0] ? tr.cells[0].textContent : '').toLowerCase();
+      // cells[1] contém cliente E dono (célula fundida) — a busca cobre os dois
       const client = (tr.cells[1] ? tr.cells[1].textContent : '').toLowerCase();
-      const owner = (tr.cells[2] ? tr.cells[2].textContent : '').toLowerCase();
-      tr.style.display = (!q || label.includes(q) || client.includes(q) || owner.includes(q)) ? '' : 'none';
+      tr.style.display = (!q || label.includes(q) || client.includes(q)) ? '' : 'none';
       const vrow = document.getElementById('vrow-' + tr.dataset.label);
       if (vrow) vrow.style.display = 'none';
     });
@@ -349,8 +350,7 @@
       return `
         <tr class="${isExp?'expanded':''}${runCls}" data-label="${esc(b.label)}" onclick="toggleVersions(this.dataset.label,this)">
           <td><span class="chevron">▶</span>${esc(b.label)}</td>
-          <td class="dim-cell">${esc(b.client_name||'—')}</td>
-          <td class="dim-cell">${esc(b.owner_username||'—')}</td>
+          <td class="dim-cell">${esc(b.client_name||'—')}<div class="owner-sub">☺ ${esc(b.owner_username||'—')}</div></td>
           <td>${badge(b.status)}</td>
           <td class="num-cell">${b.version_count}</td>
           <td class="num-cell">${b.file_count.toLocaleString('pt-BR')}</td>
@@ -359,7 +359,7 @@
           <td id="disks-${esc(b.label)}" onclick="event.stopPropagation()" style="white-space:nowrap"><span class="disk-tag-loading">·</span></td>
         </tr>
         <tr class="versions-row" id="vrow-${esc(b.label)}" style="display:${isExp?'':'none'}">
-          <td colspan="9">
+          <td colspan="8">
             <div class="versions-container">
               <div class="versions-head">
                 <span>Versões — ${esc(b.label)}</span>
@@ -375,7 +375,7 @@
     el.innerHTML = `
       <table>
         <thead><tr>
-          <th>Label</th><th>Cliente</th><th>Usuário</th><th>Status</th>
+          <th>Label</th><th>Cliente / Usuário</th><th>Status</th>
           <th style="text-align:right">Versões</th>
           <th style="text-align:right">Arquivos</th>
           <th style="text-align:right">Tamanho</th>
