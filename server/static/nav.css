@@ -103,6 +103,14 @@
   z-index: 2;
 }
 
+/* ── Telas médias: só ícones no header (texto volta em telas largas) ── */
+@media(max-width:1280px) and (min-width:769px) {
+  .header-right .hbtn .hbtn-label { display: none; }
+  .header-right .hbtn { font-size: 16px; padding: 6px 10px; }
+  .header-right { gap: 10px; }
+  .last-updated { display: none; }
+}
+
 /* ── Breakpoint: show hamburger, hide nav buttons ── */
 @media(max-width:768px) {
   .nav-hamburger { display: flex; }

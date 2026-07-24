@@ -1,5 +1,5 @@
 """
-NestVault  v7.8.0
+NestVault  v7.9.0
 Cada execucao de backup cria uma nova versao dentro do label.
 Conteudo identico e armazenado uma unica vez no servidor (deduplicacao por sha256).
 
@@ -12,6 +12,10 @@ Uso:
     nestvault backups --server http://192.168.1.100:8000
 
 Changelog (cliente — histórico completo do sistema no README):
+  v7.9  Backup por usuário (servidor v7.9+): a BACKUP_API_KEY passa a
+        identificar uma conta (admin ou usuário comum) em vez de uma chave
+        global — 403 ao tentar acessar um backup de outro usuário agora
+        mostra "Acesso negado: <motivo>" em vez do erro HTTP genérico.
   v7.8  Registro em lote (/register/batch, servidor v7.8+): cache hits e
         conteúdo já existente registrados em lotes com um commit por request
         no servidor; conteúdo ausente escala para upload e falha do lote cai
@@ -37,7 +41,7 @@ Changelog (cliente — histórico completo do sistema no README):
         reconciliação de replicação (reconcile-replication).
 """
 
-VERSION = "v7.8.0"
+VERSION = "v7.9.0"
 
 import os, sys, hashlib, argparse, base64, socket, threading, time
 from pathlib import Path
@@ -205,6 +209,15 @@ class _AuthSession(requests.Session):
             if 'headers' in kwargs and API_KEY:
                 kwargs['headers']['X-API-Key'] = API_KEY
             r = super().request(method, url, **kwargs)
+        if r.status_code == 403:
+            # Chave valida mas sem posse deste backup — retentar nao ajuda
+            # (diferente de 401/5xx/429), entao falha com mensagem clara em
+            # vez do "403 Client Error: Forbidden" generico do raise_for_status.
+            try:
+                detail = r.json().get("detail", "Sem permissao sobre este backup")
+            except Exception:
+                detail = "Sem permissao sobre este backup"
+            raise requests.HTTPError(f"Acesso negado: {detail}", response=r)
         return r
 
 

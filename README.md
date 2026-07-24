@@ -1,11 +1,13 @@
-# 🗄️ NestVault  `v7.8.0`
+# 🗄️ NestVault  `v7.9.0`
 
-Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **isolamento por label**.
+Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **backup por usuário** — cada conta só cria, lista e restaura seus próprios backups.
 
 Cada execução de backup cria uma nova versão dentro do label. O servidor armazena o conteúdo físico apenas uma vez por sha256 — versões diferentes que compartilham arquivos idênticos não duplicam o storage.
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v7.9.0** — backup por usuário: a `BACKUP_API_KEY` global deixa de dar acesso irrestrito a tudo — agora existe uma tabela `users` (chave própria hasheada, role `admin`/`user`) e cada `BackupID` tem um dono (`owner_user_id`). Um usuário comum só cria, lista, sincroniza e restaura seus próprios labels; tentar acessar (ou até escrever em) um backup de outro usuário retorna `403`, inclusive no ponto que antes não tinha nenhuma checagem: `GET /files/{id}/download`. Endpoints de infraestrutura (`/storage/*`, `/maintenance/*`, `/api/stats`, `/rclone/*`) passam a exigir `role=admin`. **Migração automática e sem downtime**: no primeiro boot após a atualização, a `BACKUP_API_KEY` em uso vira a chave do primeiro admin, e todo backup pré-existente é atribuído a ele — nenhum cliente precisa trocar de chave imediatamente. Novos endpoints `POST/GET/PATCH /users`, `POST /users/{id}/rotate-key` e `PATCH /backups/{label}/owner` (reatribui o dono de um label — útil pra mover labels antigos do admin bootstrap para o usuário real), com telas correspondentes em `/manage-users` e um novo card "Reatribuir Dono" em Manutenção. Cliente Python mostra `Acesso negado: <motivo>` em vez do erro HTTP genérico ao receber 403.
+>
 > **v7.8.0** — novo endpoint `POST /register/batch`: registra em lote (até 500 arquivos por request) conteúdo cujo sha256 já existe no storage — o caminho que antes custava um request + ~4 queries + 1 commit *por arquivo* (via `/upload` em modo "só registrar") passa a custar duas queries `IN` + bulk insert + **um único commit por lote**. Itens cujo conteúdo não é encontrado voltam `registered: false` sem abortar o lote, e o cliente escala esses casos para upload completo; réplicas são garantidas em background após a resposta, no mesmo padrão do `/upload`. Cliente Python (`nestvault.py`) e cliente macOS adotados nesta versão — detecção automática pela versão do `/health`, com fallback ao registro individual em servidores mais antigos.
 >
 > **v7.7.0** — `cleanup-orphans` (`POST /maintenance/cleanup-orphans`) convertido para background com progresso em tempo real, no mesmo padrão já usado por `encrypt-existing`/`migrate-disk`: o request retorna imediatamente (`{"scheduled": true}`) em vez de bloquear até toda a limpeza terminar, e o job aparece como "em execução" na tela de Atividades desde o início, com progresso `X / Y arquivo(s) (Z%)`, não só o resultado final. As chamadas automáticas de limpeza de órfãos disparadas após a exclusão de um label também passam a registrar esse progresso.
@@ -87,7 +89,7 @@ NestVault/
 │   ├── database.py              ← Modelos SQLite/SQLAlchemy
 │   ├── storage.py               ← Helpers de storage (dedup, replicação, volumes)
 │   ├── crypto.py                ← Criptografia AES-256-GCM (v3.1)
-│   ├── auth.py                  ← Autenticação via API key
+│   ├── auth.py                  ← Autenticação por usuário (v7.9)
 │   ├── scheduler.py             ← APScheduler para jobs rclone (v4.0)
 │   ├── daily_digest.py          ← Resumo diário via Telegram (v4.5)
 │   ├── nightly_cleanup.py       ← Limpeza noturna automática (v5.2)
@@ -120,6 +122,20 @@ NestVault/
 | **NestVault para macOS** | macOS (app nativo SwiftUI) | [github.com/vcmilani/NestVault_Xcode](https://github.com/vcmilani/NestVault_Xcode) |
 
 O servidor expõe uma API REST padrão — qualquer cliente que implemente o [contrato da API](#-endpoints-da-api) funciona sem modificações no servidor.
+
+---
+
+## ⚠️ Atualizando da v7.8 para v7.9
+
+A v7.9 introduz **backup por usuário**. Nenhuma ação manual é necessária para o servidor continuar no ar — a migração roda sozinha no primeiro boot — mas o comportamento da autenticação muda de forma relevante:
+
+- **`BACKUP_API_KEY` deixa de ter o modo "sem autenticação".** Antes, omitir a variável desabilitava a checagem de chave; agora autenticação é **sempre obrigatória**. Se você rodava o servidor sem `BACKUP_API_KEY` definida, defina uma antes de atualizar — sem isso nenhum client conseguirá se autenticar.
+- **No primeiro boot com a v7.9**, se ainda não existir nenhum usuário no banco, o servidor cria automaticamente uma conta `admin` cuja chave é a própria `BACKUP_API_KEY` do ambiente. Todo backup já existente é atribuído a esse admin (`owner_user_id`). Nada quebra: os clients que já usavam essa chave continuam funcionando exatamente como antes, agora como admin.
+- **Endpoints antes abertos para qualquer chave válida** (`/storage/*`, `/maintenance/*`, `/api/stats`, `/api/activity`, `/rclone/*`) passam a exigir uma conta com `role=admin`. Uma chave de usuário comum recebe `403` nesses endpoints.
+- **Para criar contas por pessoa/máquina**: acesse `/manage-users` com a chave de admin, crie um usuário e distribua a chave gerada (exibida **uma única vez**). Configure essa chave como `BACKUP_API_KEY` no client dessa pessoa.
+- **Labels criados antes da migração pertencem ao admin bootstrap.** Se quiser que um usuário novo assuma um label antigo que já era "dele" na prática, reatribua o dono em **Manutenção → Reatribuir Dono** (ou `PATCH /backups/{label}/owner`) — só depois disso a chave dessa pessoa consegue acessar aquele label. Tentar criar/acessar um label que já pertence a outra conta retorna `403 Voce nao tem permissao sobre este backup`.
+
+Nenhuma coluna precisa ser migrada manualmente — `init_db()` cria a tabela `users` e adiciona `backup_ids.owner_user_id` automaticamente, com o mesmo padrão idempotente já usado nas migrações anteriores.
 
 ---
 
@@ -339,7 +355,7 @@ pip install -r requirements.txt
 ### 2. Configurar variáveis de ambiente
 
 ```bash
-export BACKUP_API_KEY="uma-chave-secreta-forte-aqui"   # omitir = sem autenticação
+export BACKUP_API_KEY="uma-chave-secreta-forte-aqui"   # obrigatória (v7.9+) — vira a chave do admin no primeiro boot
 export DB_PATH="/mnt/hd-externo/backup.db"
 
 # Um disco (compatibilidade legada)
@@ -507,7 +523,7 @@ pip install -r requirements.txt
 export BACKUP_API_KEY="uma-chave-secreta-forte-aqui"
 ```
 
-> Se o servidor estiver sem autenticação, basta omitir a variável.
+> **v7.9 — autenticação por usuário:** a chave configurada aqui identifica uma conta específica no servidor (admin ou usuário comum), não mais uma senha global. Peça ao administrador do servidor para criar uma conta em `/manage-users` e usar a chave gerada — cada conta só enxerga e restaura seus próprios backups (admins continuam com acesso a tudo).
 >
 > **v5.0 — prompt interativo:** se `BACKUP_API_KEY` não estiver definida ou a chave estiver errada, o cliente detecta o erro 401 e solicita a chave via terminal antes de retentar automaticamente. A operação original é executada sem precisar reiniciar o comando.
 
@@ -1064,7 +1080,8 @@ pytest tests/ --cov=server --cov-report=term-missing
 | `test_compare.py` | `GET /compare` — added, deleted, modified, unchanged, size_delta |
 | `test_cleanup.py` | `/cleanup`, `/maintenance/cleanup-orphans` — remoção de versões e arquivos órfãos |
 | `test_storage.py` | `GET /storage/info` — volume único e agregação de dois volumes; `reclaimable_bytes` |
-| `test_auth.py` | Rejeição sem chave, rejeição com chave errada, acesso liberado com chave válida |
+| `test_auth.py` | Rejeição sem chave, rejeição com chave errada, acesso liberado com chave válida, `403` de usuário comum em endpoint admin, usuário desativado perde acesso *(v7.9)* |
+| `test_user_isolation.py` *(v7.9)* | Backup por usuário: listagem escopada por dono, bloqueio de leitura/escrita/download cruzado entre usuários, admin com acesso irrestrito |
 | `test_replication.py` | `/maintenance/rereplicate` e `/maintenance/reconcile-replication` — sub-replicação e sobre-replicação |
 | `test_disks.py` | `GET /storage/disks` — status de volumes, contagem de cópias físicas por volume |
 | `test_rclone_walk.py` | Walk incremental do rclone — conclusão + limpeza de checkpoint, resume de diretório falho, falha de listagem isolada, skip por mtime, dispatch por backend, override de `strategy`, `_MAX_RESUMES`, batching cross-directory, pastas protegidas |
@@ -1290,14 +1307,16 @@ Acessível pelo browser, servido diretamente pelo FastAPI:
 http://<ip-da-pi>:8000/
 ```
 
-Na primeira visita com autenticação ativada, o browser pedirá a API Key — salva no `localStorage`. Para trocar, clique em **⌀ API Key** no header.
+Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Para trocar, clique em **⌀ API Key** no header.
+
+> **v7.9 — dashboard é admin-only.** O painel web (stats, discos, manutenção, atividade, rclone, usuários) exige uma chave com `role=admin`; uma chave de usuário comum recebe a tela de login novamente com "Esta chave não tem permissão de administrador." O caminho de backup/restore do usuário comum é o CLI (`nestvault.py`), cuja API (`/backups`, `/files`, etc.) já é escopada por dono.
 
 **O que o dashboard exibe:**
 
 - **Stats globais** — total de backups, versões, arquivos, storage total
 - **Disco livre** — espaço disponível no disco montado com barra visual de uso e percentual *(v2.7)*
 - **Espaço liberável** — quanto seria recuperado apagando versões antigas (mantendo 1 por label) *(v2.7)*
-- **Tabela de backups** — clique em um label para expandir as versões
+- **Tabela de backups** — clique em um label para expandir as versões; coluna **Usuário** mostra o dono de cada backup *(v7.9)*
 - **Versões** — clique em uma versão para ver os arquivos
 - **Comparação de versões** — selecione duas versões com as checkboxes e clique em ⇄ Comparar: veja arquivos adicionados, removidos, modificados e o delta de tamanho de cada um
 - **Cloud Backup (rclone)** — gerencie jobs de backup rclone agendados e execute manualmente via `/rclone-jobs`
@@ -1309,6 +1328,8 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
   - **Limpar Versões Antigas** — mantém apenas N versões mais recentes de um label escolhido
   - **Excluir Versões por Data** *(v5.0)* — exibe preview por label de quantas versões serão removidas antes de uma data; a versão `done` mais recente de cada label é sempre preservada
   - **Excluir Label Completo** — exclui um label e todas as suas versões (requer digitar o nome do label)
+  - **Reatribuir Dono** *(v7.9)* — transfere a posse de um backup para outro usuário; necessário para labels criados antes da migração para backup por usuário (ficam com o admin) ou ao reorganizar contas
+- **Usuários** *(v7.9)* — página `/manage-users`: cria contas (admin ou usuário comum), gira chaves e ativa/desativa acesso. A chave gerada é exibida uma única vez
 - **Discos** — página `/disks` com painel de volumes: espaço total/livre/usado, arquivos físicos por volume e status (ok/degraded)
 - **Explorer de arquivos** — navegação e download de arquivos de uma versão específica via `/explorer`
 - **Backups em tempo real** — indicador no cabeçalho com contagem de backups em andamento; polling automático a cada 3 s com botão ⏸ para pausar
@@ -1316,6 +1337,25 @@ Na primeira visita com autenticação ativada, o browser pedirá a API Key — s
 ---
 
 ## ⚡ Otimizações
+
+### v7.9.0
+
+| Componente | Mudança |
+|---|---|
+| **`server/database.py` — `User`** | Nova tabela `users`: `username` (unique), `api_key_hash` (SHA-256, nunca a chave em texto puro), `role` (`admin`/`user`), `is_active`. `hash_api_key()` centraliza o hashing |
+| **`server/database.py` — `BackupID.owner_user_id`** | Nova coluna (FK nullable para `users.id`) — migração idempotente via `ALTER TABLE` no `init_db()`, mesmo padrão de `progress_json`/`strategy`/`encrypted` |
+| **`server/database.py` — `bootstrap_admin_user` / `_backfill_backup_owners`** | Rodam no boot: se não existe nenhum `User`, cria o admin a partir de `BACKUP_API_KEY` e atribui todo `BackupID` sem dono a ele — migração sem downtime |
+| **`server/auth.py`** | Reescrito: `get_current_user` (resolve `User` a partir do hash da `X-API-Key`), `require_admin` (403 se `role != "admin"`), `require_owner_or_admin` (403 se não é dono nem admin) |
+| **`server/main.py` — `_get_backup_or_404` / `_get_version_or_404`** | Ganham parâmetro opcional `user` — quando presente, aplicam `require_owner_or_admin`; propaga a checagem de posse para quase todos os endpoints que já usavam essas funções |
+| **`server/main.py` — `GET /files/{id}/download`** | Passa a fazer JOIN `VersionFile → BackupVersion → BackupID` para checar o dono antes de servir o arquivo — antes não havia checagem nenhuma nesse endpoint |
+| **`server/main.py` — `/users`, `/users/{id}/rotate-key`, `/users/{id}`, `/backups/{label}/owner`** | Novos endpoints admin-only para criar/listar/desativar usuários, rotacionar chave e reatribuir dono de um backup |
+| **`server/cloud/rclone_router.py`** | Todos os endpoints `/rclone/*` passam a exigir `require_admin` |
+| **`server/static/users.html`** | Nova tela `/manage-users`: criar usuário (chave exibida uma única vez), girar chave, ativar/desativar |
+| **`server/static/maintenance.html`** | Novo card "Reatribuir Dono" (`PATCH /backups/{label}/owner`) |
+| **`server/static/*.html`** | Todas as páginas passam a tratar `403` (chave válida sem permissão de admin) além do `401` já existente |
+| **`client/nestvault.py` — `_AuthSession`** | Intercepta `403` e levanta `HTTPError` com mensagem "Acesso negado: `<detail>`" em vez do erro genérico do `raise_for_status()` |
+| **`tests/conftest.py`** | `client` passa a autenticar como admin por padrão (chave fixa); novo fixture `two_users` (admin + dois usuários comuns no mesmo banco) para testar isolamento |
+| **`tests/test_user_isolation.py`** | 8 casos novos cobrindo listagem escopada, escrita/leitura/download cruzados entre usuários e bypass do admin |
 
 ### v7.8.0
 
@@ -1624,21 +1664,36 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 
 ## 🔌 Endpoints da API
 
+> **v7.9 — dois níveis de acesso.** Toda rota exige `X-API-Key` de uma conta válida. Rotas em **Backups/Versões/Arquivos** funcionam para qualquer usuário autenticado, mas são **escopadas por dono**: um usuário comum só enxerga/cria/altera labels em que é `owner_user_id`; tentar acessar um label de outro usuário retorna `403`. Admin não tem essa restrição. Rotas em **Storage/Manutenção/Cloud Backup/Usuários** exigem `role=admin` — uma chave de usuário comum recebe `403` nelas.
+
 ### Dashboard e Health
 
 | Método | Endpoint | Descrição |
 |--------|----------|-----------|
-| `GET` | `/` | Dashboard web |
+| `GET` | `/` | Dashboard web *(admin)* |
 | `GET` | `/health` | Status do servidor e versão |
-| `GET` | `/maintenance` | Página de manutenção (HTML) |
-| `GET` | `/explorer` | Explorer de arquivos (HTML) |
+| `GET` | `/maintenance` | Página de manutenção (HTML, admin) |
+| `GET` | `/explorer` | Explorer de arquivos (HTML, admin) |
+| `GET` | `/manage-users` | Gerenciamento de usuários (HTML, admin) *(v7.9)* |
+
+### Usuários (admin) *(v7.9)*
+
+| Método | Endpoint | Descrição |
+|--------|----------|-----------|
+| `POST` | `/users` | Cria usuário — retorna a API key gerada **uma única vez** |
+| `GET` | `/users` | Lista usuários (sem expor as chaves) |
+| `PATCH` | `/users/{id}` | Ativa/desativa o acesso (`is_active`) — histórico de backups é preservado |
+| `POST` | `/users/{id}/rotate-key` | Gera nova chave para o usuário e invalida a anterior — retorna a nova chave **uma única vez** |
+| `PATCH` | `/backups/{label}/owner` | Reatribui o dono de um backup (`owner_user_id`) |
+
+> As chaves nunca são armazenadas em texto puro — o banco guarda apenas o SHA-256 da chave (`users.api_key_hash`).
 
 ### Backups
 
 | Método | Endpoint | Descrição |
 |--------|----------|-----------|
-| `POST` | `/backups` | Cria backup — idempotente |
-| `GET` | `/backups` | Lista todos os backups — `?client_name=` filtra por cliente |
+| `POST` | `/backups` | Cria backup — idempotente; o criador vira o dono (`owner_user_id`) |
+| `GET` | `/backups` | Lista backups do usuário autenticado (admin vê todos) — `?client_name=` filtra por cliente |
 | `GET` | `/backups/{label}` | Detalhes de um backup |
 | `DELETE` | `/backups/{label}` | Remove backup e todas as versões |
 
@@ -1669,7 +1724,7 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 
 > Paths com caracteres especiais são transmitidos em **base64** no header `X-Original-Path`.
 
-### Storage
+### Storage (admin)
 
 | Método | Endpoint | Descrição |
 |--------|----------|-----------|
@@ -1677,7 +1732,7 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 | `GET` | `/storage/disks` | Status e contagem de arquivos físicos por volume |
 | `GET` | `/disks` | Dashboard de discos (HTML) |
 
-### Manutenção
+### Manutenção (admin)
 
 | Método | Endpoint | Descrição |
 |--------|----------|-----------|
@@ -1688,7 +1743,7 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 | `GET` | `/maintenance/cleanup-by-date/preview` | Preview de versões elegíveis para remoção antes de uma data (`?before=YYYY-MM-DD[&label=X]`) |
 | `POST` | `/maintenance/cleanup-by-date` | Remove versões anteriores a uma data; preserva última versão `done` por label e versões `running` (`?before=YYYY-MM-DD[&label=X]`) |
 
-### Cloud Backup (rclone)
+### Cloud Backup / rclone (admin)
 
 | Método | Endpoint | Descrição |
 |--------|----------|-----------|

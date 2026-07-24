@@ -58,7 +58,10 @@ function toggleTheme() {
 }
 function updateThemeBtn() {
   const btn = document.getElementById('themeBtn');
-  if (btn) btn.textContent = document.documentElement.getAttribute('data-theme') === 'light' ? '☾ Escuro' : '☀ Claro';
+  if (!btn) return;
+  const light = document.documentElement.getAttribute('data-theme') === 'light';
+  btn.innerHTML = light ? '☾<span class="hbtn-label"> Escuro</span>' : '☀<span class="hbtn-label"> Claro</span>';
+  btn.title = light ? 'Tema escuro' : 'Tema claro';
 }
 
 // ── "atualizado há Xs" — pausa quando a aba fica oculta ────────────────────

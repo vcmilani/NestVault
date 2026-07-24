@@ -128,13 +128,14 @@
   <div class="header-right">
     <span class="last-updated" id="lastUpdated"></span>
     <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
-    <a class="hbtn" href="/">← Dashboard</a>
-    <a class="hbtn" href="/disks">⊞ Discos</a>
-    <a class="hbtn" href="/maintenance">⚙ Manutenção</a>
-    <a class="hbtn" href="/activity">◎ Atividade</a>
-    <a class="hbtn" href="/rclone-jobs">⟳ rclone</a>
-    <a class="hbtn active" href="/stats">∑ Stats</a>
-    <button class="hbtn always-visible" id="logoutBtn">⌀ API Key</button>
+    <a class="hbtn" href="/" title="Dashboard">←<span class="hbtn-label"> Dashboard</span></a>
+    <a class="hbtn" href="/disks" title="Discos">⊞<span class="hbtn-label"> Discos</span></a>
+    <a class="hbtn" href="/maintenance" title="Manutenção">⚙<span class="hbtn-label"> Manutenção</span></a>
+    <a class="hbtn" href="/activity" title="Atividade">◎<span class="hbtn-label"> Atividade</span></a>
+    <a class="hbtn" href="/rclone-jobs" title="rclone">⟳<span class="hbtn-label"> rclone</span></a>
+    <a class="hbtn active" href="/stats" title="Stats">∑<span class="hbtn-label"> Stats</span></a>
+    <a class="hbtn" href="/manage-users" title="Usuários">☺<span class="hbtn-label"> Usuários</span></a>
+    <button class="hbtn always-visible" id="logoutBtn" title="API Key">⌀<span class="hbtn-label"> API Key</span></button>
     <button class="nav-hamburger"></button>
   </div>
 </header>
@@ -146,6 +147,7 @@
   <a href="/activity">◎ Atividade</a>
   <a href="/rclone-jobs">⟳ rclone</a>
   <a class="active" href="/stats">∑ Stats</a>
+  <a href="/manage-users">☺ Usuários</a>
 </nav>
 <div class="mobile-nav-backdrop"></div>
 
@@ -345,6 +347,7 @@
     try {
       const r = await fetch('/api/stats', {headers: H()});
       if (r.status === 401) { showLogin('API Key inválida.'); return; }
+      if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); return; }
       if (!r.ok) throw new Error('HTTP '+r.status);
       const data = await r.json();
       clearError();

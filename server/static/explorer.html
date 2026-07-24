@@ -143,12 +143,13 @@
   </div>
   <div class="header-right">
     <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
-    <a class="hbtn" href="/">← Dashboard</a>
-    <a class="hbtn" href="/disks">⊞ Discos</a>
-    <a class="hbtn" href="/activity">◎ Atividade</a>
-    <a class="hbtn" href="/rclone-jobs">⟳ rclone</a>
-    <a class="hbtn" href="/stats">∑ Stats</a>
-    <button class="hbtn always-visible" id="logoutBtn">⌀ API Key</button>
+    <a class="hbtn" href="/" title="Dashboard">←<span class="hbtn-label"> Dashboard</span></a>
+    <a class="hbtn" href="/disks" title="Discos">⊞<span class="hbtn-label"> Discos</span></a>
+    <a class="hbtn" href="/activity" title="Atividade">◎<span class="hbtn-label"> Atividade</span></a>
+    <a class="hbtn" href="/rclone-jobs" title="rclone">⟳<span class="hbtn-label"> rclone</span></a>
+    <a class="hbtn" href="/stats" title="Stats">∑<span class="hbtn-label"> Stats</span></a>
+    <a class="hbtn" href="/manage-users" title="Usuários">☺<span class="hbtn-label"> Usuários</span></a>
+    <button class="hbtn always-visible" id="logoutBtn" title="API Key">⌀<span class="hbtn-label"> API Key</span></button>
     <button class="nav-hamburger"></button>
   </div>
 </header>
@@ -159,6 +160,7 @@
   <a href="/activity">◎ Atividade</a>
   <a href="/rclone-jobs">⟳ rclone</a>
   <a href="/stats">∑ Stats</a>
+  <a href="/manage-users">☺ Usuários</a>
 </nav>
 <div class="mobile-nav-backdrop"></div>
 
@@ -503,6 +505,7 @@
     try {
       const r = await fetch(`/files/${fileId}/download`, { headers: H() });
       if (r.status === 401) { showLogin(); return; }
+      if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); return; }
       if (!r.ok) { showError(`Erro ${r.status} ao baixar o arquivo`); return; }
       const blob = await r.blob();
       const url  = URL.createObjectURL(blob);
@@ -652,6 +655,7 @@
       const url = `/files?backup_label=${encodeURIComponent(LABEL)}&version_key=${encodeURIComponent(versionKey)}`;
       const r   = await fetch(url, { headers: H() });
       if (r.status === 401) { showLogin(); return false; }
+      if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); return false; }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       allFiles = await r.json();
 
