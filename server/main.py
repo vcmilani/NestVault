@@ -974,8 +974,13 @@ def _backup_info(b: BackupID, db: Session) -> BackupInfo:
     )
 
 
-def _auto_cleanup_if_needed(db: Session) -> str | None:
-    """Retorna resumo do que foi limpo, ou None se nenhuma limpeza foi necessária."""
+def _auto_cleanup_if_needed(db: Session, exclude_version_id: Optional[int] = None) -> str | None:
+    """Retorna resumo do que foi limpo, ou None se nenhuma limpeza foi necessária.
+
+    exclude_version_id: versão que o chamador está ativamente escrevendo agora —
+    nunca pode ser removida, mesmo que esteja incomplete/failed, senão o upload em
+    andamento acaba inserindo VersionFile órfão apontando para uma versão já deletada.
+    """
     factor = _target_replicas()
     ok = _volumes_with_free_space()
     if ok >= factor:
@@ -989,11 +994,10 @@ def _auto_cleanup_if_needed(db: Session) -> str | None:
     total_removed = 0
 
     # 1ª prioridade: versões incomplete e failed — sempre deletáveis
-    stale = (
-        db.query(BackupVersion)
-        .filter(BackupVersion.status.in_(["incomplete", "failed"]))
-        .all()
-    )
+    stale_query = db.query(BackupVersion).filter(BackupVersion.status.in_(["incomplete", "failed"]))
+    if exclude_version_id is not None:
+        stale_query = stale_query.filter(BackupVersion.id != exclude_version_id)
+    stale = stale_query.all()
     if stale:
         stale_ids = [v.id for v in stale]
         db.query(VersionFile).filter(VersionFile.version_id.in_(stale_ids)).delete(synchronize_session=False)
@@ -1031,6 +1035,8 @@ def _auto_cleanup_if_needed(db: Session) -> str | None:
     deletable.sort(key=lambda v: v.created_at)  # mais antigas primeiro
 
     for v in deletable:
+        if exclude_version_id is not None and v.id == exclude_version_id:
+            continue
         label, key = v.backup_label, v.version_key
         db.query(VersionFile).filter(VersionFile.version_id == v.id).delete(synchronize_session=False)
         db.delete(v)
@@ -2995,7 +3001,7 @@ async def upload_file(
                 f"{_exc}\n\n"
                 f"Iniciando limpeza automática de versões antigas..."
             )
-            await asyncio.to_thread(_auto_cleanup_if_needed, db)
+            await asyncio.to_thread(_auto_cleanup_if_needed, db, version_id)
             try:
                 volume = _pick_volume()
             except storage.StorageThresholdExceeded:

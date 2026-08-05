@@ -1,3 +1,6 @@
+import shutil
+from collections import namedtuple
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -9,6 +12,20 @@ import main as m
 import storage as storage_mod
 
 ADMIN_KEY = "testkey"
+
+_DiskUsage = namedtuple("DiskUsage", ["total", "used", "free"])
+_FAKE_FREE_BYTES = 100 * 1024 ** 3  # bem acima de STORAGE_FALLBACK_THRESHOLD_GB
+
+
+def _fake_ample_disk_usage(path):
+    """shutil.disk_usage sempre reporta espaço livre de sobra.
+
+    Sem isso, os testes ficam reféns do espaço livre real do host/tmpfs rodando
+    a suíte: se cair abaixo de STORAGE_FALLBACK_THRESHOLD_GB (10 GB), o auto-cleanup
+    e o fallback de "último recurso" disparam durante uploads normais, quebrando
+    testes que não têm nada a ver com a lógica de threshold de storage.
+    """
+    return _DiskUsage(total=200 * 1024 ** 3, used=100 * 1024 ** 3, free=_FAKE_FREE_BYTES)
 
 
 def _make_engine():
@@ -57,6 +74,8 @@ def _setup_app(tmp_vol, monkeypatch):
     monkeypatch.setattr(m, "STORAGE_DIR", tmp_vol)
     monkeypatch.setattr(storage_mod, "STORAGE_VOLUMES", [tmp_vol])
     monkeypatch.setattr(storage_mod, "STORAGE_DIR", tmp_vol)
+    monkeypatch.setattr(storage_mod.shutil, "disk_usage", _fake_ample_disk_usage)
+    monkeypatch.setattr(m.shutil, "disk_usage", _fake_ample_disk_usage)
     # Background tasks (_bg_*) abrem sua propria sessao via SessionLocal() em vez de
     # Depends(get_db) — aponta para o mesmo engine in-memory do teste, senao elas
     # operariam sobre o banco real (./backup.db) e pareceriam no-op nos testes.
