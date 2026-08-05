@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from cache_state import invalidate_activity
 from database import DATABASE_URL, DB_PATH, SessionLocal, MaintenanceJob, engine
 from sqlalchemy import text
-from storage import healthy_volumes, fmt_bytes as _fmt_bytes
+from storage import healthy_volumes, fmt_bytes as _fmt_bytes, STORAGE_FALLBACK_THRESHOLD_GB
 
 log = logging.getLogger("backup-server")
 
@@ -120,6 +120,16 @@ def run_db_backup() -> dict:
     total_removed = 0
     errors: list[str] = []
 
+    threshold_bytes = STORAGE_FALLBACK_THRESHOLD_GB * 1024 ** 3
+    any_volume_above_threshold = False
+    for vol in volumes:
+        try:
+            if shutil.disk_usage(vol).free >= threshold_bytes:
+                any_volume_above_threshold = True
+                break
+        except OSError:
+            continue
+
     for vol in volumes:
         backup_dir = vol / _BACKUP_SUBDIR
         try:
@@ -129,18 +139,34 @@ def run_db_backup() -> dict:
             errors.append(f"{vol.name}: {e}")
             continue
 
-        if db_size > 0:
-            try:
-                free = shutil.disk_usage(backup_dir).free
-            except OSError as e:
-                log.warning(f"[db-backup] Não foi possível verificar espaço em {vol}: {e}")
-                errors.append(f"{vol.name}: não foi possível verificar espaço — {e}")
-                continue
-            if free < db_size:
-                msg = f"espaço insuficiente em {vol.name}: {_fmt_bytes(free)} livres, estimativa {_fmt_bytes(db_size)}"
+        try:
+            free = shutil.disk_usage(backup_dir).free
+        except OSError as e:
+            log.warning(f"[db-backup] Não foi possível verificar espaço em {vol}: {e}")
+            errors.append(f"{vol.name}: não foi possível verificar espaço — {e}")
+            continue
+
+        if db_size > 0 and free < db_size:
+            msg = f"espaço insuficiente em {vol.name}: {_fmt_bytes(free)} livres, estimativa {_fmt_bytes(db_size)}"
+            log.warning(f"[db-backup] {msg}")
+            errors.append(msg)
+            continue
+
+        if free < threshold_bytes:
+            if any_volume_above_threshold:
+                msg = (
+                    f"{vol.name} abaixo do limiar configurado de {STORAGE_FALLBACK_THRESHOLD_GB:.0f} GB "
+                    f"({_fmt_bytes(free)} livres) — pulando, outro volume saudável tem espaço"
+                )
                 log.warning(f"[db-backup] {msg}")
                 errors.append(msg)
                 continue
+            log.critical(
+                f"[db-backup] ÚLTIMO RECURSO: gravando em {vol.name} ({_fmt_bytes(free)} livres) "
+                f"abaixo do limiar de {STORAGE_FALLBACK_THRESHOLD_GB:.0f} GB — nenhum volume saudável "
+                f"está acima do limiar configurado"
+            )
+        else:
             log.debug(f"[db-backup] {vol.name}: {_fmt_bytes(free)} livres, estimativa {_fmt_bytes(db_size)} — OK")
 
         dest = backup_dir / filename
