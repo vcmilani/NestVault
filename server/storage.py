@@ -369,8 +369,10 @@ def ssd_cache_write_dir(db) -> "Path | None":
         return None
     try:
         usage = shutil.disk_usage(SSD_CACHE_DIR)
-        if usage.free < 2 * 1024 ** 3:
-            log.debug("[ssd-cache] SSD com menos de 2 GB livre — fallback para HDD")
+        if usage.free < STORAGE_FALLBACK_THRESHOLD_GB * 1024 ** 3:
+            log.debug(
+                f"[ssd-cache] SSD com menos de {STORAGE_FALLBACK_THRESHOLD_GB:.0f} GB livre — fallback para HDD"
+            )
             return None
     except OSError:
         return None
@@ -619,7 +621,7 @@ def process_ssd_pending_moves(db) -> tuple[int, list[str]]:
                 if e.errno == errno.ENOSPC and not _redirected:
                     try:
                         new_vol = pick_volume()
-                    except RuntimeError:
+                    except (RuntimeError, StorageThresholdExceeded):
                         new_vol = None
                     if new_vol and str(new_vol) != move.dest_volume:
                         new_dest = content_path(sha256, new_vol)

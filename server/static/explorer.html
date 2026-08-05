@@ -19,7 +19,7 @@
   main{max-width:1500px}
 
   .breadcrumb{display:flex;align-items:center;gap:8px;margin-bottom:20px;font-size:11px;color:var(--text-dim);flex-wrap:wrap}
-  .bc-link{color:var(--amber);text-decoration:none}
+  .bc-link{background:none;border:none;padding:0;font-family:var(--mono);color:var(--amber);text-decoration:none;font-size:11px;cursor:pointer}
   .bc-link:hover{text-decoration:underline}
   .bc-sep{color:var(--text-mute)}
   .bc-label{color:var(--text-dim)}
@@ -43,8 +43,14 @@
   /* Version navigator */
   .ver-nav{display:flex;align-items:center;gap:8px;padding:8px 14px;border:1px solid var(--border);border-top:none;border-bottom:none;background:var(--bg3)}
   .ver-nav.hidden{display:none}
-  .ver-label{flex:1;text-align:center;font-size:11px;color:var(--text-dim);letter-spacing:.04em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .ver-label strong{color:var(--text)}
+  .ver-select{background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:10px;padding:6px 8px;outline:none;cursor:pointer;flex:1;min-width:0}
+  .ver-select:focus{border-color:var(--amber)}
+  .ver-select:disabled{opacity:.5;cursor:not-allowed}
+  .ver-label{flex-shrink:0;font-size:10px;color:var(--text-mute);letter-spacing:.04em;white-space:nowrap}
+
+  /* Restore hint (non-error, informational notice) */
+  .explorer-hint{display:flex;align-items:center;gap:8px;padding:7px 14px;border:1px solid var(--border);border-top:none;border-bottom:none;background:rgba(232,169,64,.08);color:var(--amber);font-size:10.5px;letter-spacing:.02em}
+  .explorer-hint.hidden{display:none}
 
   /* Diff badges */
   .diff-badge{font-size:9px;letter-spacing:.06em;padding:1px 5px;margin-left:5px;flex-shrink:0;vertical-align:middle}
@@ -52,51 +58,47 @@
   .diff-mod{background:rgba(232,169,64,.12);color:var(--amber);border:1px solid rgba(232,169,64,.25)}
   .diff-del{background:color-mix(in srgb,var(--red) 12%,transparent);color:var(--red);border:1px solid color-mix(in srgb,var(--red) 25%,transparent)}
 
-  /* Folder change dot in tree */
+  /* Folder change dot in column rows */
   .t-change-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;margin-left:4px;display:inline-block}
 
   /* Diff summary bar */
-  .diff-summary{font-size:10px;color:var(--text-mute);display:flex;gap:12px;align-items:center;padding:5px 14px;border-bottom:1px solid var(--border);background:var(--bg3);flex-shrink:0}
+  .diff-summary{font-size:10px;color:var(--text-mute);display:flex;gap:12px;align-items:center;padding:5px 14px;border:1px solid var(--border);border-top:none;border-bottom:none;background:var(--bg3);flex-shrink:0}
   .diff-summary.hidden{display:none}
   .diff-summary span{display:flex;align-items:center;gap:4px}
 
-  /* Two-panel layout */
-  .explorer-layout{display:flex;border:1px solid var(--border);animation:fadeUp .35s .05s ease both;height:calc(100vh - 330px);min-height:400px}
-  .tree-panel{width:320px;min-width:160px;flex-shrink:0;border-right:1px solid var(--border);overflow-y:auto;overflow-x:auto;background:var(--bg2)}
-  .tree-panel .t-count{display:none}
-  .files-panel{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
-  .files-header{padding:8px 16px;border-bottom:1px solid var(--border);background:var(--bg2);display:flex;align-items:baseline;gap:12px;flex-shrink:0;min-height:37px}
-  .fh-path{font-size:11px;color:var(--amber);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
-  .fh-meta{font-size:10px;color:var(--text-mute);flex-shrink:0;white-space:nowrap}
-  .files-list{flex:1;overflow-y:auto;overflow-x:auto}
+  /* Column (Finder-style) browser */
+  .explorer-layout{border:1px solid var(--border);animation:fadeUp .35s .05s ease both;height:calc(100vh - 330px);min-height:400px;overflow:hidden}
+  .columns-container{height:100%;display:flex;overflow-x:auto;overflow-y:hidden;background:var(--bg)}
+  .columns-container.filtering{display:block;overflow-y:auto;overflow-x:hidden}
 
-  /* Tree rows */
-  .tree-row{display:flex;align-items:center;border-bottom:1px solid var(--border);min-height:33px;transition:background .1s}
-  .tree-row:last-child{border-bottom:none}
-  .dir-row{cursor:pointer}
-  .dir-row:hover,.dir-row:active{background:var(--bg3)}
-  .dir-row.selected{background:rgba(232,169,64,.06);box-shadow:inset 2px 0 0 var(--amber)}
-  .dir-row.selected .t-name{color:var(--amber)}
-  .file-row{background:var(--bg)}
-  .file-row:hover,.file-row:active{background:rgba(91,164,207,.025)}
-  .t-chevron{width:16px;flex-shrink:0;text-align:center;font-size:9px;color:var(--text-mute);transition:transform .15s;margin-right:2px}
-  .dir-row.open .t-chevron{transform:rotate(90deg);color:var(--amber)}
-  .t-icon{font-size:11px;margin-right:6px;flex-shrink:0}
+  .col-panel{width:260px;min-width:260px;flex-shrink:0;display:flex;flex-direction:column;border-right:1px solid var(--border);overflow:hidden;background:var(--bg)}
+  .col-panel:last-child{border-right:none}
+  .col-back{display:none}
+  .col-header{flex-shrink:0;padding:7px 12px;font-size:10px;letter-spacing:.03em;color:var(--text-dim);background:var(--bg2);border-bottom:1px solid var(--border);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .col-header strong{color:var(--text);font-weight:400}
+  .col-body{flex:1;overflow-y:auto;overflow-x:hidden}
+
+  /* Column rows (subpastas + arquivos juntos, como no Finder) */
+  .col-row{display:flex;align-items:center;border-bottom:1px solid var(--border);min-height:33px;transition:background .1s;cursor:pointer}
+  .col-row:last-child{border-bottom:none}
+  .col-row:hover,.col-row:active{background:var(--bg3)}
+  .col-row.selected{background:rgba(232,169,64,.06);box-shadow:inset 2px 0 0 var(--amber)}
+  .col-row.selected .t-name{color:var(--amber)}
+  .t-icon{font-size:11px;margin:0 6px 0 12px;flex-shrink:0}
   .dir-row .t-icon{color:var(--amber)}
   .file-row .t-icon{color:var(--text-mute)}
-  .t-name{flex:1;min-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:8px;font-size:12px}
+  .t-name{flex:1;min-width:30px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:6px;font-size:12px}
   .dir-row .t-name{color:var(--text)}
   .file-row .t-name{color:var(--text-dim)}
-  .t-meta{display:flex;align-items:center;gap:14px;padding-right:14px;flex-shrink:0}
-  .t-count{font-size:10px;color:var(--text-mute);min-width:56px;text-align:right}
-  .t-size{font-size:11px;color:var(--blue);font-variant-numeric:tabular-nums;min-width:72px;text-align:right}
-  .t-hash{font-size:10px;color:var(--text-mute)}
-  .t-dl{background:none;border:1px solid transparent;color:var(--text-mute);font-family:var(--mono);font-size:10px;cursor:pointer;padding:2px 7px;transition:all .15s;letter-spacing:.04em;min-height:36px;display:inline-flex;align-items:center;justify-content:center;user-select:none}
+  .t-meta{display:flex;align-items:center;gap:6px;padding-right:10px;flex-shrink:0}
+  .t-count{font-size:10px;color:var(--text-mute)}
+  .t-size{font-size:11px;color:var(--blue);font-variant-numeric:tabular-nums;white-space:nowrap}
+  .t-dl{background:none;border:1px solid transparent;color:var(--text-mute);font-family:var(--mono);font-size:11px;cursor:pointer;padding:2px 8px;transition:all .15s;min-height:36px;display:inline-flex;align-items:center;justify-content:center;user-select:none}
   .t-dl:hover,.t-dl:active{border-color:var(--amber);color:var(--amber)}
-  .dir-children{display:block}
-  .dir-children.collapsed{display:none}
+  .col-chevron{color:var(--text-mute);font-size:10px;flex-shrink:0}
+  .dir-row.selected .col-chevron{color:var(--amber)}
 
-  /* Flat filter list */
+  /* Busca (substitui as colunas por uma lista plana enquanto houver texto no filtro) */
   .flat-head{padding:8px 14px;background:var(--bg3);border-bottom:1px solid var(--border);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim)}
   .flat-row{display:flex;align-items:center;border-bottom:1px solid var(--border);min-height:33px;padding:5px 14px;gap:8px;background:var(--bg);transition:background .1s}
   .flat-row:hover,.flat-row:active{background:rgba(91,164,207,.025)}
@@ -107,25 +109,16 @@
   .empty{padding:40px;line-height:1.8}
   .empty a{color:var(--amber)}
 
-  .files-placeholder{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--text-mute);font-size:11px;letter-spacing:.06em;gap:10px}
-  .files-placeholder-icon{font-size:24px;opacity:.25}
-
-  /* Explorer tabs (mobile only) */
-  .explorer-tabs{display:none;border-bottom:1px solid var(--border);background:var(--bg2)}
-  .explorer-tab{flex:1;background:none;border:none;border-bottom:2px solid transparent;color:var(--text-dim);font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;padding:10px 16px;cursor:pointer;transition:color .15s,border-color .15s;min-height:42px;user-select:none;-webkit-tap-highlight-color:transparent}
-  .explorer-tab.active{color:var(--amber);border-bottom-color:var(--amber)}
-
   @media(max-width:768px){
     .stats-bar{grid-template-columns:repeat(2,1fr)}
-    .t-hash{display:none}
     .cbtn{min-height:40px}
-    .explorer-tabs{display:flex}
-    .explorer-layout{flex-direction:column;height:calc(100vh - 305px);min-height:300px}
-    .tree-panel{width:100%;height:100%;max-height:none;border-right:none;border-bottom:none;flex:1}
-    .tree-panel.tab-hidden{display:none}
-    .files-panel{height:100%;max-height:none;flex:1}
-    .files-panel.tab-hidden{display:none}
+    .explorer-layout{height:calc(100vh - 305px);min-height:300px}
+    .col-panel{display:none;width:100%;min-width:0;border-right:none}
+    .col-panel.col-active{display:flex}
+    .col-back{display:flex;align-items:center;gap:6px;padding:9px 12px;border-bottom:1px solid var(--border);background:var(--bg3);color:var(--amber);font-family:var(--mono);font-size:11px;letter-spacing:.04em;cursor:pointer;flex-shrink:0;border-left:none;border-right:none;border-top:none;width:100%;text-align:left}
     .filter-input{font-size:16px}
+    .ver-btn-label{display:none}
+    .ver-label{display:none}
   }
   @media(max-width:480px){
     .t-count{display:none}
@@ -173,6 +166,7 @@
     <span class="bc-label" id="bcLabel">—</span>
     <span class="bc-sep">/</span>
     <span class="bc-version" id="bcVersion">—</span>
+    <span id="bcPath"></span>
   </div>
 
   <div class="stats-bar">
@@ -184,34 +178,21 @@
 
   <div class="controls">
     <input class="filter-input" id="filterInput" type="text" placeholder="Filtrar arquivos por nome ou caminho…" oninput="onFilterDebounced(this.value)">
-    <button class="cbtn" onclick="expandAll()">⊞ Expandir</button>
-    <button class="cbtn" onclick="collapseAll()">⊟ Colapsar</button>
   </div>
 
   <div class="ver-nav hidden" id="verNav">
-    <button class="cbtn" id="verPrev" onclick="navigateVersion(-1)">← Anterior</button>
+    <button class="cbtn" id="verPrev" onclick="navigateVersion(-1)">←<span class="ver-btn-label"> Anterior</span></button>
+    <select class="ver-select" id="verSelect" onchange="goToVersion(+this.value)"></select>
     <span class="ver-label" id="verLabel"></span>
-    <button class="cbtn" id="verNext" onclick="navigateVersion(+1)">Próxima →</button>
+    <button class="cbtn" id="verNext" onclick="navigateVersion(+1)"><span class="ver-btn-label">Próxima </span>→</button>
   </div>
 
-  <div class="explorer-tabs" id="explorerTabs">
-    <button class="explorer-tab active" id="tabTree" onclick="switchTab('tree')">📁 Pastas</button>
-    <button class="explorer-tab" id="tabFiles" onclick="switchTab('files')">📄 Arquivos</button>
-  </div>
+  <div class="diff-summary hidden" id="diffSummary"></div>
+  <div class="explorer-hint hidden" id="explorerHint"></div>
 
   <div class="explorer-layout">
-    <div class="tree-panel" id="dirTree">
+    <div class="columns-container" id="columnsContainer">
       <div class="loading">Carregando</div>
-    </div>
-    <div class="files-panel tab-hidden" id="filesPanel">
-      <div class="diff-summary hidden" id="diffSummary"></div>
-      <div class="files-header" id="filesHeader"></div>
-      <div class="files-list" id="filesList">
-        <div class="files-placeholder">
-          <span class="files-placeholder-icon">▸</span>
-          Selecione uma pasta
-        </div>
-      </div>
     </div>
   </div>
 </main>
@@ -235,21 +216,23 @@
   const LABEL = qp.get('label') || '';
   let currentVersion = qp.get('version') || '';
 
-  let allFiles      = [];
-  let treeRoot      = null;
-  let nodeMap       = new Map();
-  let selectedPath  = null;
-  let _nodeId       = 0;
+  let allFiles = [];
+  let treeRoot = null;
+  let nodeMap  = new Map();
+
+  let openPath         = [];   // segmentos da pasta aberta, ex: ['Documents','Projects']
+  let selectedFilePath = null; // original_path normalizado do arquivo selecionado (na coluna mais profunda), ou null
 
   let allVersions   = [];
   let currentVerIdx = -1;
   let compareData   = null;  // { added: Map<normPath,entry>, deleted: Map, modified: Map }
   let folderChanges = null;  // Map<folderPath, {add,mod,del}>
+  let _hintTimer    = null;
 
   const normPath = p => p.replace(/\\/g, '/').replace(/^\//, '');
   const basename = p => p.replace(/\\/g,'/').split('/').filter(Boolean).pop() || p;
 
-  // -- Tree building ----------------------------------------------------------
+  // -- Tree building (índice caminho→nó, independente de como é exibido) -----
   function buildTree(files) {
     const root = { type:'dir', name:'', path:'', children: new Map(), files:[] };
     nodeMap.clear();
@@ -291,7 +274,22 @@
     return { count, size, dirs, depth };
   }
 
-  // -- Left panel: dir tree ---------------------------------------------------
+  // -- Restauração de caminho ao trocar de versão ------------------------------
+  // Mantém o maior prefixo de `desiredSegments` que ainda existe na versão
+  // carregada no momento (nodeMap já reconstruído para ela). Usado nos 3
+  // lugares que trocam de versão/caminho para não perder a navegação.
+  function restoreOpenPathForVersion(desiredSegments) {
+    const kept = [];
+    let cum = '';
+    for (const seg of desiredSegments) {
+      cum = cum ? cum + '/' + seg : seg;
+      if (!nodeMap.has(cum)) break;
+      kept.push(seg);
+    }
+    return kept;
+  }
+
+  // -- Colunas estilo Finder ----------------------------------------------------
   function _changeDot(path) {
     const fc = folderChanges?.get(path);
     if (!fc) return '';
@@ -301,160 +299,175 @@
     return '';
   }
 
-  function renderDirTree(node, depth) {
-    let html = '';
-    const pad = depth * 18;
+  function renderColumnRows(node, selectedChildName, selFilePath) {
     const sortedDirs = [...node.children.entries()]
       .sort(([a], [b]) => a.localeCompare(b, 'pt', { sensitivity:'base' }));
-    for (const [name, child] of sortedDirs) {
-      const id  = `dn${_nodeId++}`;
-      const st  = child._stats || { count:0, size:0 };
-      const sel = selectedPath === child.path ? ' selected' : '';
-      html += `
-<div class="tree-row dir-row open${sel}" data-path="${esc(child.path)}" data-child-id="${id}">
-  <span style="display:inline-block;width:${pad}px;flex-shrink:0"></span>
-  <span class="t-chevron">▶</span>
-  <span class="t-icon">▸</span>
-  <span class="t-name">${esc(name)}/</span>
-  <div class="t-meta">
-    ${_changeDot(child.path)}
-    <span class="t-count">${st.count} arq.</span>
-    <span class="t-size">${fmtSize(st.size)}</span>
-  </div>
-</div>
-<div id="${id}" class="dir-children">${renderDirTree(child, depth + 1)}</div>`;
-    }
-    return html;
-  }
-
-  function _renderDirTree() {
-    _nodeId = 0;
-    const st  = treeRoot._stats || { count:0, size:0 };
-    const sel = selectedPath === '' ? ' selected' : '';
-    document.getElementById('dirTree').innerHTML = `
-<div class="tree-row dir-row open${sel}" data-path="" data-child-id="rootChildren">
-  <span class="t-chevron">▶</span>
-  <span class="t-icon">◈</span>
-  <span class="t-name" style="letter-spacing:.04em">raiz/</span>
-  <div class="t-meta">
-    ${_changeDot('')}
-    <span class="t-count">${st.count} arq.</span>
-    <span class="t-size">${fmtSize(st.size)}</span>
-  </div>
-</div>
-<div id="rootChildren" class="dir-children">${renderDirTree(treeRoot, 0)}</div>`;
-  }
-
-  // -- Dir click (event delegation) ------------------------------------------
-  document.addEventListener('click', e => {
-    const row = e.target.closest('.dir-row');
-    if (!row) return;
-    const childId = row.dataset.childId;
-    if (childId) {
-      const children = document.getElementById(childId);
-      if (children) {
-        if (row.classList.toggle('open')) {
-          children.classList.remove('collapsed');
-        } else {
-          children.classList.add('collapsed');
-        }
-      }
-    }
-    const path = row.dataset.path;
-    if (path !== undefined) selectDir(path);
-  });
-
-  function selectDir(path) {
-    selectedPath = path;
-    document.querySelectorAll('#dirTree .dir-row.selected')
-      .forEach(el => el.classList.remove('selected'));
-    for (const row of document.querySelectorAll('#dirTree .dir-row')) {
-      if (row.dataset.path === path) { row.classList.add('selected'); break; }
-    }
-    const q = document.getElementById('filterInput').value.trim();
-    if (!q) {
-      const node = nodeMap.get(path);
-      if (node) renderFileList(node);
-    }
-    if (window.innerWidth <= 768) switchTab('files');
-  }
-
-  function expandAll() {
-    document.querySelectorAll('#dirTree .dir-row').forEach(el => el.classList.add('open'));
-    document.querySelectorAll('#dirTree .dir-children').forEach(el => el.classList.remove('collapsed'));
-  }
-  function collapseAll() {
-    document.querySelectorAll('#dirTree .dir-row:not([data-path=""])').forEach(el => el.classList.remove('open'));
-    document.querySelectorAll('#dirTree .dir-children:not(#rootChildren)').forEach(el => el.classList.add('collapsed'));
-  }
-
-  // -- Right panel: file list -------------------------------------------------
-  function renderFileList(node) {
-    const header = document.getElementById('filesHeader');
-    const list   = document.getElementById('filesList');
-    const pathDisplay = node.path ? node.path + '/' : 'raiz/';
-    const directFiles = [...node.files].sort((a,b) =>
+    const sortedFiles = [...node.files].sort((a,b) =>
       a._basename.localeCompare(b._basename, 'pt', { sensitivity:'base' }));
 
-    // Files deleted in this folder relative to previous version
     const deletedInFolder = compareData
       ? [...compareData.deleted.values()].filter(f => {
           const fp  = normPath(f.original_path);
           const sep = fp.lastIndexOf('/');
-          const dir = sep >= 0 ? fp.slice(0, sep) : '';
-          return dir === node.path;
+          return (sep >= 0 ? fp.slice(0, sep) : '') === node.path;
         })
       : [];
 
-    let metaStr = `${directFiles.length} arq.`;
-    if (deletedInFolder.length) metaStr += ` · ${deletedInFolder.length} removido(s)`;
-    metaStr += ` · ${node.children.size} subpasta(s)`;
-    header.innerHTML =
-      `<span class="fh-path">${esc(pathDisplay)}</span>` +
-      `<span class="fh-meta">${metaStr}</span>`;
-
-    if (!directFiles.length && !deletedInFolder.length) {
-      list.innerHTML = '<div class="empty">Nenhum arquivo direto nesta pasta</div>';
-      return;
+    if (!sortedDirs.length && !sortedFiles.length && !deletedInFolder.length) {
+      return '<div class="empty" style="padding:24px 16px;font-size:11px">Pasta vazia</div>';
     }
 
-    const fileRows = directFiles.map(f => {
-      const key   = normPath(f.original_path);
-      const badge = !compareData ? '' :
-        compareData.added.has(key)    ? '<span class="diff-badge diff-add">+ novo</span>' :
-        compareData.modified.has(key) ? '<span class="diff-badge diff-mod">~ mod</span>' : '';
+    const dirHtml = sortedDirs.map(([name, child]) => {
+      const st  = child._stats || { count:0, size:0 };
+      const sel = name === selectedChildName;
       return `
-<div class="tree-row file-row">
-  <span class="t-chevron" style="visibility:hidden">▶</span>
-  <span class="t-icon">·</span>
-  <span class="t-name" title="${esc(f.original_path)}">${esc(f._basename)}</span>
+<div class="col-row dir-row${sel ? ' selected' : ''}" data-kind="dir" data-path="${esc(child.path)}">
+  <span class="t-icon">▸</span>
+  <span class="t-name">${esc(name)}</span>
   <div class="t-meta">
-    ${badge}
-    <span class="t-hash">${f.sha256 ? f.sha256.slice(0,10)+'…' : '—'}</span>
-    <span class="t-size">${fmtSize(f.size || 0)}</span>
-    <button class="t-dl" data-id="${f.id}" data-name="${esc(f._basename)}" onclick="dlFile(+this.dataset.id,this.dataset.name)" title="Baixar arquivo">↓ baixar</button>
+    ${_changeDot(child.path)}
+    <span class="t-count">${st.count}</span>
+    <span class="t-size">${fmtSize(st.size)}</span>
+    <span class="col-chevron">›</span>
   </div>
 </div>`;
-    });
+    }).join('');
 
-    const deletedRows = deletedInFolder.map(f => {
+    const fileHtml = sortedFiles.map(f => {
+      const key   = normPath(f.original_path);
+      const sel   = key === selFilePath;
+      const title = f.sha256 ? `${f.original_path}\n${f.sha256}` : f.original_path;
+      const badge = !compareData ? '' :
+        compareData.added.has(key)    ? '<span class="diff-badge diff-add" title="Adicionado nesta versão">+</span>' :
+        compareData.modified.has(key) ? '<span class="diff-badge diff-mod" title="Modificado nesta versão">~</span>' : '';
+      return `
+<div class="col-row file-row${sel ? ' selected' : ''}" data-kind="file" data-path="${esc(key)}">
+  <span class="t-icon">·</span>
+  <span class="t-name" title="${esc(title)}">${esc(f._basename)}</span>
+  <div class="t-meta">
+    ${badge}
+    <span class="t-size">${fmtSize(f.size || 0)}</span>
+    <button class="t-dl" data-id="${f.id}" data-name="${esc(f._basename)}" onclick="event.stopPropagation();dlFile(+this.dataset.id,this.dataset.name)" title="Baixar arquivo">↓</button>
+  </div>
+</div>`;
+    }).join('');
+
+    const deletedHtml = deletedInFolder.map(f => {
       const bn = basename(f.original_path);
       return `
-<div class="tree-row file-row" style="opacity:.55">
-  <span class="t-chevron" style="visibility:hidden">▶</span>
+<div class="col-row file-row" style="opacity:.55;cursor:default" data-kind="deleted">
   <span class="t-icon" style="color:var(--red)">·</span>
   <span class="t-name" style="text-decoration:line-through;color:var(--text-mute)" title="${esc(f.original_path)}">${esc(bn)}</span>
   <div class="t-meta">
-    <span class="diff-badge diff-del">− removido</span>
+    <span class="diff-badge diff-del" title="Removido nesta versão">−</span>
     <span class="t-size">${fmtSize(f.size || 0)}</span>
   </div>
 </div>`;
-    });
+    }).join('');
 
-    list.innerHTML = [...fileRows, ...deletedRows].join('');
+    return dirHtml + fileHtml + deletedHtml;
   }
 
-  // -- Filter -----------------------------------------------------------------
+  function renderColumnPanel(node, depth, selectedChildName, selFilePath, isLast) {
+    const label  = node.path ? basename(node.path) : 'raiz';
+    const backBtn = (isLast && depth > 0)
+      ? `<button class="col-back" data-back="1">‹ Voltar</button>` : '';
+    return `
+<div class="col-panel" data-depth="${depth}">
+  ${backBtn}
+  <div class="col-header"><strong>${esc(label)}</strong> · ${node.children.size} pasta(s), ${node.files.length} arq.</div>
+  <div class="col-body">${renderColumnRows(node, selectedChildName, selFilePath)}</div>
+</div>`;
+  }
+
+  function renderColumns() {
+    const container = document.getElementById('columnsContainer');
+    container.classList.remove('filtering');
+    let html = '';
+    let cum  = '';
+    for (let d = 0; d <= openPath.length; d++) {
+      const node = nodeMap.get(cum);
+      if (!node) break;
+      const childSel = d < openPath.length ? openPath[d] : null;
+      const isLast   = d === openPath.length;
+      html += renderColumnPanel(node, d, childSel, isLast ? selectedFilePath : null, isLast);
+      if (childSel) cum = cum ? cum + '/' + childSel : childSel;
+    }
+    container.innerHTML = html;
+    const panels = container.querySelectorAll('.col-panel');
+    panels.forEach((p, i) => p.classList.toggle('col-active', i === panels.length - 1));
+    container.scrollLeft = container.scrollWidth;
+  }
+
+  function renderBreadcrumbPath() {
+    const el = document.getElementById('bcPath');
+    if (!openPath.length) { el.innerHTML = ''; return; }
+    let html = '<span class="bc-sep">/</span><button class="bc-link" data-jump="">raiz</button>';
+    let cum = '';
+    openPath.forEach((seg, i) => {
+      cum = cum ? cum + '/' + seg : seg;
+      const isLast = i === openPath.length - 1;
+      html += '<span class="bc-sep">/</span>' + (isLast
+        ? `<span class="bc-version">${esc(seg)}</span>`
+        : `<button class="bc-link" data-jump="${esc(cum)}">${esc(seg)}</button>`);
+    });
+    el.innerHTML = html;
+  }
+
+  function syncUrlPath() {
+    const url = new URL(location.href);
+    if (openPath.length) url.searchParams.set('path', openPath.join('/'));
+    else url.searchParams.delete('path');
+    history.replaceState({}, '', url);
+  }
+
+  function openFolder(path) {
+    openPath         = path ? path.split('/').filter(Boolean) : [];
+    selectedFilePath = null;
+    renderColumns();
+    renderBreadcrumbPath();
+    syncUrlPath();
+  }
+
+  // -- Clique nas colunas / breadcrumb (delegado) ------------------------------
+  document.addEventListener('click', e => {
+    const backBtn = e.target.closest('.col-back');
+    if (backBtn) { openFolder(openPath.slice(0, -1).join('/')); return; }
+
+    const jumpBtn = e.target.closest('.bc-link[data-jump]');
+    if (jumpBtn) { openFolder(jumpBtn.dataset.jump); return; }
+
+    const row = e.target.closest('.col-row');
+    if (!row) return;
+    const panel = row.closest('.col-panel');
+    const depth = +panel.dataset.depth;
+    if (row.dataset.kind === 'dir') {
+      const name = basename(row.dataset.path);
+      openPath         = [...openPath.slice(0, depth), name];
+      selectedFilePath = null;
+      renderColumns();
+      renderBreadcrumbPath();
+      syncUrlPath();
+    } else if (row.dataset.kind === 'file') {
+      openPath         = openPath.slice(0, depth);
+      selectedFilePath = row.dataset.path;
+      renderColumns();
+      renderBreadcrumbPath();
+      syncUrlPath();
+    }
+  });
+
+  // -- Aviso de restauração parcial (não é erro — usa a paleta âmbar) ----------
+  function showFolderHint(msg) {
+    const el = document.getElementById('explorerHint');
+    clearTimeout(_hintTimer);
+    if (!msg) { el.classList.add('hidden'); return; }
+    el.textContent = msg;
+    el.classList.remove('hidden');
+    _hintTimer = setTimeout(() => el.classList.add('hidden'), 6000);
+  }
+
+  // -- Filtro (busca plana, substitui as colunas enquanto houver texto) -------
   let _filterTimer = null;
   function onFilterDebounced(value) {
     clearTimeout(_filterTimer);
@@ -463,44 +476,37 @@
 
   function onFilter(q) {
     q = q.trim();
-    const header = document.getElementById('filesHeader');
-    const list   = document.getElementById('filesList');
+    const container = document.getElementById('columnsContainer');
     if (!q) {
-      if (selectedPath !== null) {
-        const node = nodeMap.get(selectedPath);
-        if (node) { renderFileList(node); return; }
-      }
-      header.innerHTML = '';
-      list.innerHTML = '<div class="files-placeholder"><span class="files-placeholder-icon">▸</span>Selecione uma pasta</div>';
+      renderColumns();
       return;
     }
+    container.classList.add('filtering');
     const ql      = q.toLowerCase();
     const matched = allFiles.filter(f => f.original_path.toLowerCase().includes(ql));
-    header.innerHTML =
-      `<span class="fh-path">busca: &quot;${esc(q)}&quot;</span>` +
-      `<span class="fh-meta">${matched.length} resultado(s)</span>`;
     if (!matched.length) {
-      list.innerHTML = `<div class="empty">Nenhum arquivo encontrado para "<strong>${esc(q)}</strong>"</div>`;
+      container.innerHTML = `<div class="empty">Nenhum arquivo encontrado para "<strong>${esc(q)}</strong>"</div>`;
       return;
     }
-    const re   = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-    list.innerHTML = matched.map(f => {
-      const escaped     = esc(f.original_path);
-      const highlighted = escaped.replace(re, m => `<em>${m}</em>`);
-      return `
+    const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+    container.innerHTML =
+      `<div class="flat-head">${matched.length} resultado(s)</div>` +
+      matched.map(f => {
+        const escaped     = esc(f.original_path);
+        const highlighted = escaped.replace(re, m => `<em>${m}</em>`);
+        return `
 <div class="flat-row">
-  <span class="t-icon" style="color:var(--text-mute);flex-shrink:0">·</span>
+  <span class="t-icon" style="color:var(--text-mute);flex-shrink:0;margin-left:0">·</span>
   <span class="flat-path" title="${esc(f.original_path)}">${highlighted}</span>
   <div class="t-meta">
-    <span class="t-hash">${f.sha256 ? f.sha256.slice(0,10)+'…' : '—'}</span>
     <span class="t-size">${fmtSize(f.size || 0)}</span>
-    <button class="t-dl" data-id="${f.id}" data-name="${esc(basename(f.original_path))}" onclick="dlFile(+this.dataset.id,this.dataset.name)" title="Baixar arquivo">↓ baixar</button>
+    <button class="t-dl" data-id="${f.id}" data-name="${esc(basename(f.original_path))}" onclick="dlFile(+this.dataset.id,this.dataset.name)" title="Baixar arquivo">↓</button>
   </div>
 </div>`;
-    }).join('');
+      }).join('');
   }
 
-  // -- Download ---------------------------------------------------------------
+  // -- Download -----------------------------------------------------------------
   async function dlFile(fileId, filename) {
     try {
       const r = await fetch(`/files/${fileId}/download`, { headers: H() });
@@ -519,7 +525,7 @@
     }
   }
 
-  // -- Version navigation -----------------------------------------------------
+  // -- Navegação entre versões --------------------------------------------------
   async function loadVersionList() {
     if (!LABEL) return;
     try {
@@ -536,50 +542,61 @@
     const nav = document.getElementById('verNav');
     if (allVersions.length <= 1) { nav.classList.add('hidden'); return; }
     nav.classList.remove('hidden');
-    const v     = allVersions[currentVerIdx];
-    const label = v
-      ? `<strong>${esc(v.version_key.slice(0,19).replace('T',' '))}</strong> · ${currentVerIdx + 1}/${allVersions.length}`
-      : '—';
-    document.getElementById('verLabel').innerHTML = label;
+    document.getElementById('verLabel').textContent =
+      currentVerIdx >= 0 ? `${currentVerIdx + 1}/${allVersions.length}` : '—';
     document.getElementById('verPrev').disabled = currentVerIdx <= 0;
     document.getElementById('verNext').disabled = currentVerIdx >= allVersions.length - 1;
+    const sel = document.getElementById('verSelect');
+    sel.disabled  = false;
+    sel.innerHTML = allVersions.map((v, i) =>
+      `<option value="${i}"${i === currentVerIdx ? ' selected' : ''}>${esc(v.version_key.slice(0, 19).replace('T', ' '))}</option>`
+    ).join('');
   }
 
-  async function navigateVersion(delta) {
-    const newIdx = currentVerIdx + delta;
-    if (newIdx < 0 || newIdx >= allVersions.length) return;
-    // Disable buttons during load to prevent double-clicks
-    document.getElementById('verPrev').disabled = true;
-    document.getElementById('verNext').disabled = true;
-    const newVer    = allVersions[newIdx].version_key;
-    const prevVer   = newIdx > 0 ? allVersions[newIdx - 1].version_key : null;
-    const savedPath = selectedPath;
-    currentVerIdx   = newIdx;
-    currentVersion  = newVer;
-    // Update URL without reload
-    const url = new URL(location.href);
-    url.searchParams.set('version', newVer);
-    history.pushState({}, '', url);
-    // Clear filter input
+  function navigateVersion(delta) {
+    return goToVersion(currentVerIdx + delta);
+  }
+
+  async function goToVersion(newIdx) {
+    if (newIdx < 0 || newIdx >= allVersions.length || newIdx === currentVerIdx) return;
+    document.getElementById('verPrev').disabled   = true;
+    document.getElementById('verNext').disabled   = true;
+    document.getElementById('verSelect').disabled = true;
+
+    const newVer      = allVersions[newIdx].version_key;
+    const prevVer      = newIdx > 0 ? allVersions[newIdx - 1].version_key : null;
+    const desiredPath  = [...openPath];
+    currentVerIdx  = newIdx;
+    currentVersion = newVer;
     document.getElementById('filterInput').value = '';
+
     const ok = await loadFilesData(newVer);
     if (!ok) { renderVerNav(); return; }
+
     if (prevVer) {
       await fetchCompare(prevVer, newVer);
     } else {
       compareData = null; folderChanges = null;
       document.getElementById('diffSummary').classList.add('hidden');
     }
-    _renderDirTree();
-    // Restore folder selection if it still exists in the new version
-    const restoredNode = savedPath !== null ? nodeMap.get(savedPath) : null;
-    if (restoredNode) {
-      selectDir(savedPath);
-    } else {
-      selectedPath = '';
-      renderFileList(treeRoot);
-    }
+
+    openPath         = restoreOpenPathForVersion(desiredPath);
+    selectedFilePath = null;
+    renderColumns();
+    renderBreadcrumbPath();
     renderVerNav();
+
+    const url = new URL(location.href);
+    url.searchParams.set('version', newVer);
+    if (openPath.length) url.searchParams.set('path', openPath.join('/'));
+    else url.searchParams.delete('path');
+    history.pushState({}, '', url);
+
+    if (openPath.length < desiredPath.length) {
+      showFolderHint(`Pasta "${desiredPath.join('/')}" não existe nesta versão — mostrando "${openPath.join('/') || 'raiz'}".`);
+    } else {
+      showFolderHint('');
+    }
   }
 
   async function fetchCompare(v1, v2) {
@@ -631,25 +648,19 @@
       `<span style="margin-left:auto">${data.summary_unchanged} inalterados</span>`;
   }
 
-  // -- Load -------------------------------------------------------------------
+  // -- Carga ----------------------------------------------------------------------
   async function loadFilesData(versionKey) {
-    const dirTree     = document.getElementById('dirTree');
-    const filesHeader = document.getElementById('filesHeader');
-    const filesList   = document.getElementById('filesList');
+    const container = document.getElementById('columnsContainer');
 
     if (!LABEL || !versionKey) {
-      dirTree.innerHTML   = '';
-      filesHeader.innerHTML = '';
-      filesList.innerHTML = `<div class="empty">Nenhuma versão selecionada.<br><a href="/">← Voltar ao dashboard</a></div>`;
+      container.innerHTML = `<div class="empty">Nenhuma versão selecionada.<br><a href="/">← Voltar ao dashboard</a></div>`;
       return false;
     }
 
     document.getElementById('bcLabel').textContent   = LABEL;
     document.getElementById('bcVersion').textContent = versionKey;
     document.title = `NestVault — ${LABEL} / ${versionKey}`;
-    dirTree.innerHTML   = '<div class="loading">Carregando</div>';
-    filesHeader.innerHTML = '';
-    filesList.innerHTML = '';
+    container.innerHTML = '<div class="loading">Carregando</div>';
 
     try {
       const url = `/files?backup_label=${encodeURIComponent(LABEL)}&version_key=${encodeURIComponent(versionKey)}`;
@@ -660,9 +671,7 @@
       allFiles = await r.json();
 
       if (!allFiles.length) {
-        dirTree.innerHTML   = '';
-        filesHeader.innerHTML = '';
-        filesList.innerHTML = '<div class="empty">Nenhum arquivo nesta versão</div>';
+        container.innerHTML = '<div class="empty">Nenhum arquivo nesta versão</div>';
         ['sFiles','sDirs','sSize','sDepth'].forEach(id =>
           document.getElementById(id).textContent = '0');
         return false;
@@ -678,9 +687,7 @@
 
       return true;
     } catch(e) {
-      dirTree.innerHTML   = `<div class="empty">Erro ao carregar: ${esc(e.message)}</div>`;
-      filesHeader.innerHTML = '';
-      filesList.innerHTML = '';
+      container.innerHTML = `<div class="empty">Erro ao carregar: ${esc(e.message)}</div>`;
       showError('Não foi possível carregar: ' + e.message);
       return false;
     }
@@ -691,55 +698,54 @@
     document.getElementById('diffSummary').classList.add('hidden');
     const ok = await loadFilesData(currentVersion);
     if (ok) {
-      selectedPath = '';
-      _renderDirTree();
-      renderFileList(treeRoot);
+      const desired = (qp.get('path') || '').split('/').filter(Boolean);
+      openPath         = restoreOpenPathForVersion(desired);
+      selectedFilePath = null;
+      renderColumns();
+      renderBreadcrumbPath();
+      if (openPath.length < desired.length) {
+        showFolderHint(`Pasta "${desired.join('/')}" não existe nesta versão — mostrando "${openPath.join('/') || 'raiz'}".`);
+      }
+      if (openPath.join('/') !== desired.join('/')) syncUrlPath();
+      // Carregada aqui (não em init()) porque, sem API key salva ainda, o
+      // primeiro carregamento cai em 401 e app.js só reexecuta loadFiles()
+      // após o login (_nvRefresh) — se a versão ficasse só em init(), a
+      // barra de versões nunca apareceria até um refresh manual da página.
+      await loadVersionList();
     }
   }
 
   // -- Init — a própria carga inicial faz o auth-check (401 → login) ---------
   (async function init() {
     await loadFiles();
-    await loadVersionList();
   })();
 
-  // -- Browser back/forward ---------------------------------------------------
+  // -- Voltar/avançar do navegador ---------------------------------------------
   window.addEventListener('popstate', () => {
     const qp2 = new URLSearchParams(location.search);
     const v   = qp2.get('version') || '';
+    const p   = qp2.get('path') || '';
+    const desired = p ? p.split('/').filter(Boolean) : [];
     if (v && v !== currentVersion) {
-      currentVersion  = v;
-      currentVerIdx   = allVersions.findIndex(v2 => v2.version_key === v);
-      compareData     = null;
-      folderChanges   = null;
+      currentVersion = v;
+      currentVerIdx  = allVersions.findIndex(v2 => v2.version_key === v);
+      compareData    = null; folderChanges = null;
       document.getElementById('diffSummary').classList.add('hidden');
       loadFilesData(v).then(ok => {
         if (!ok) return;
-        selectedPath = '';
-        _renderDirTree();
-        renderFileList(treeRoot);
+        openPath         = restoreOpenPathForVersion(desired);
+        selectedFilePath = null;
+        renderColumns();
+        renderBreadcrumbPath();
         renderVerNav();
       });
+    } else {
+      openPath         = restoreOpenPathForVersion(desired);
+      selectedFilePath = null;
+      renderColumns();
+      renderBreadcrumbPath();
     }
   });
-
-  function switchTab(tab) {
-    const tree = document.getElementById('dirTree');
-    const files = document.getElementById('filesPanel');
-    const tabTree = document.getElementById('tabTree');
-    const tabFiles = document.getElementById('tabFiles');
-    if (tab === 'tree') {
-      tree.classList.remove('tab-hidden');
-      files.classList.add('tab-hidden');
-      tabTree.classList.add('active');
-      tabFiles.classList.remove('active');
-    } else {
-      files.classList.remove('tab-hidden');
-      tree.classList.add('tab-hidden');
-      tabFiles.classList.add('active');
-      tabTree.classList.remove('active');
-    }
-  }
 </script>
 <script src="/static/nav.js"></script>
 </body>
