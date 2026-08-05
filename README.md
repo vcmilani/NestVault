@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v8.0.0`
+# 🗄️ NestVault  `v7.10.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **backup por usuário** — cada conta só cria, lista e restaura seus próprios backups.
 
@@ -6,7 +6,7 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
-> **v8.0.0** — Explorer reescrito como navegador em colunas, no estilo Finder do macOS: cada pasta clicada abre uma nova coluna à direita, com breadcrumb clicável mostrando o caminho inteiro (`raiz / Documents / Projects / …`). Corrige o problema de perder a pasta selecionada ao trocar de versão — o caminho aberto agora é refletido na URL (`?path=...`) e restaurado de forma consistente nos botões Anterior/Próxima, no voltar/avançar do navegador e ao recarregar a página; quando a pasta não existe mais numa versão, cai no ancestral mais próximo em vez da raiz, com um aviso explicando o motivo. Novo seletor de versão (dropdown) permite pular direto para qualquer versão sem precisar clicar várias vezes. No mobile, as antigas abas Pastas/Arquivos dão lugar a uma coluna por vez com botão "‹ Voltar".
+> **v7.10.0** — Explorer reescrito como navegador em colunas, no estilo Finder do macOS: cada pasta clicada abre uma nova coluna à direita, com breadcrumb clicável mostrando o caminho inteiro (`raiz / Documents / Projects / …`). Corrige o problema de perder a pasta selecionada ao trocar de versão — o caminho aberto agora é refletido na URL (`?path=...`) e restaurado de forma consistente nos botões Anterior/Próxima, no voltar/avançar do navegador e ao recarregar a página; quando a pasta não existe mais numa versão, cai no ancestral mais próximo em vez da raiz, com um aviso explicando o motivo. Novo seletor de versão (dropdown) permite pular direto para qualquer versão sem precisar clicar várias vezes. No mobile, as antigas abas Pastas/Arquivos dão lugar a uma coluna por vez com botão "‹ Voltar".
 >
 > **v7.9.0** — backup por usuário: a `BACKUP_API_KEY` global deixa de dar acesso irrestrito a tudo — agora existe uma tabela `users` (chave própria hasheada, role `admin`/`user`) e cada `BackupID` tem um dono (`owner_user_id`). Um usuário comum só cria, lista, sincroniza e restaura seus próprios labels; tentar acessar (ou até escrever em) um backup de outro usuário retorna `403`, inclusive no ponto que antes não tinha nenhuma checagem: `GET /files/{id}/download`. Endpoints de infraestrutura (`/storage/*`, `/maintenance/*`, `/api/stats`, `/rclone/*`) passam a exigir `role=admin`. **Migração automática e sem downtime**: no primeiro boot após a atualização, a `BACKUP_API_KEY` em uso vira a chave do primeiro admin, e todo backup pré-existente é atribuído a ele — nenhum cliente precisa trocar de chave imediatamente. Novos endpoints `POST/GET/PATCH /users`, `POST /users/{id}/rotate-key` e `PATCH /backups/{label}/owner` (reatribui o dono de um label — útil pra mover labels antigos do admin bootstrap para o usuário real), com telas correspondentes em `/manage-users` e um novo card "Reatribuir Dono" em Manutenção. Cliente Python mostra `Acesso negado: <motivo>` em vez do erro HTTP genérico ao receber 403.
 >
@@ -1340,7 +1340,7 @@ Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Par
 
 ## ⚡ Otimizações
 
-### v8.0.0
+### v7.10.0
 
 | Componente | Mudança |
 |---|---|
