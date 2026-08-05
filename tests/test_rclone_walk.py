@@ -9,6 +9,7 @@ o banco de teste (sqlite in-memory).
 import asyncio
 import datetime as _dt
 import json
+from collections import namedtuple
 
 import pytest
 from sqlalchemy import create_engine
@@ -20,6 +21,8 @@ import storage as storage_mod
 import cloud.rclone_runner as rr
 from cloud.rclone_runner import RcloneFileEntry
 from database import BackupVersion, VersionFile, RcloneBackupJob
+
+_DiskUsage = namedtuple("DiskUsage", ["total", "used", "free"])
 
 
 @pytest.fixture
@@ -38,6 +41,13 @@ def session_factory(tmp_path, monkeypatch):
     vol.mkdir()
     monkeypatch.setattr(storage_mod, "STORAGE_VOLUMES", [vol])
     monkeypatch.setattr(storage_mod, "STORAGE_DIR", vol)
+    # Independe do espaço livre real do host/tmpfs rodando a suíte — sem isso,
+    # pick_volume() dispara StorageThresholdExceeded caso o disco real tenha
+    # menos de STORAGE_FALLBACK_THRESHOLD_GB (10 GB) livres.
+    monkeypatch.setattr(
+        storage_mod.shutil, "disk_usage",
+        lambda path: _DiskUsage(total=200 * 1024 ** 3, used=100 * 1024 ** 3, free=100 * 1024 ** 3),
+    )
     return Session
 
 
