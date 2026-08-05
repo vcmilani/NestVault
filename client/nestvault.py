@@ -1,5 +1,5 @@
 """
-NestVault  v7.9.0
+NestVault  v7.10.0
 Cada execucao de backup cria uma nova versao dentro do label.
 Conteudo identico e armazenado uma unica vez no servidor (deduplicacao por sha256).
 
@@ -41,7 +41,7 @@ Changelog (cliente — histórico completo do sistema no README):
         reconciliação de replicação (reconcile-replication).
 """
 
-VERSION = "v7.9.0"
+VERSION = "v7.10.0"
 
 import os, sys, hashlib, argparse, base64, socket, threading, time
 from pathlib import Path
@@ -271,8 +271,8 @@ def _upload_with_backoff(
     except requests.RequestException as first_err:
         retry_gate.clear()
         _warn(f"{what}: erro no envio — bloqueando outros uploads e retentando...")
+        last_err = first_err
 
-    last_err = first_err
     try:
         for i, delay in enumerate(UPLOAD_RETRY_DELAYS, 1):
             if abort_event.is_set():
