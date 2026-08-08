@@ -288,6 +288,13 @@ def _backup_labels_for_sha256s(db, sha256s: list[str]) -> list[str]:
     return sorted(r[0] for r in rows)
 
 
+def _total_size_for_sha256s(db, sha256s: list[str]) -> int:
+    if not sha256s:
+        return 0
+    return (db.query(func.coalesce(func.sum(FileContent.size), 0))
+              .filter(FileContent.sha256.in_(sha256s)).scalar() or 0)
+
+
 def _process_ssd_moves_worker(*, recovery: bool) -> None:
     """Núcleo comum dos workers de move SSD → HDD.
 
@@ -338,12 +345,14 @@ def _process_ssd_moves_worker(*, recovery: bool) -> None:
                 invalidate_activity()
         storage.reconcile_orphaned_ssd_copies(db)
         labels = _backup_labels_for_sha256s(db, all_moved)
+        total_bytes = _total_size_for_sha256s(db, all_moved)
         label_str = ", ".join(labels) if labels else "—"
         job = db.get(MaintenanceJob, job_id)
         if job:
             job.status = "done"
             job.finished_at = datetime.now()
-            job.summary = f"{prefix}{processed} arquivo(s) movidos SSD → HDD — backups: {label_str}"
+            job.summary = (f"{prefix}{processed} arquivo(s) movidos SSD → HDD "
+                            f"({storage.fmt_bytes(total_bytes)}) — backups: {label_str}")
         if recovery:
             log.info(f"[ssd-cache] recovery concluída — {processed} arquivo(s) movidos para HDD")
     except Exception as e:
