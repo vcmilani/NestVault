@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v7.10.0`
+# 🗄️ NestVault  `v7.11.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **backup por usuário** — cada conta só cria, lista e restaura seus próprios backups.
 
@@ -6,6 +6,8 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v7.11.0** — pipeline de backup do cliente Python (`nestvault.py`) reescrito para sobrepor hashing, `/check/batch` e upload/registro em vez de rodar em fases estanques (hasheia tudo → checa tudo → envia tudo): hashing consome resultados incrementalmente (`ProcessPoolExecutor` + `as_completed`), chunks de `/check/batch` vão para um pool de rede dedicado em paralelo (antes era um loop sequencial), e cache hits disparam imediatamente sem esperar o hashing dos demais arquivos terminar. Novo **Smart Skip**: se um backup roda e nada mudou desde a última versão `done` (sem arquivos novos, modificados ou deletados) e ela não passou de `--full-rescan-days` dias (padrão 7), o backup inteiro vira uma única chamada `/absorb` em vez de recomputar hash/check/register de cada arquivo. Novo **cache local de hash** (`~/.cache/nestvault` no Linux, `~/Library/Caches/nestvault` no macOS, `%LOCALAPPDATA%\nestvault` no Windows) evita refazer o `GET /files` completo da versão anterior quando o `version_key` local já bate com o último "done" do servidor. Estratégias portadas do cliente macOS (`NestVaultClient`), que já usava um pipeline sobreposto equivalente. Sem mudanças na API do servidor — apenas o cliente Python muda de comportamento.
+>
 > **v7.10.0** — Explorer reescrito como navegador em colunas, no estilo Finder do macOS: cada pasta clicada abre uma nova coluna à direita, com breadcrumb clicável mostrando o caminho inteiro (`raiz / Documents / Projects / …`). Corrige o problema de perder a pasta selecionada ao trocar de versão — o caminho aberto agora é refletido na URL (`?path=...`) e restaurado de forma consistente nos botões Anterior/Próxima, no voltar/avançar do navegador e ao recarregar a página; quando a pasta não existe mais numa versão, cai no ancestral mais próximo em vez da raiz, com um aviso explicando o motivo. Novo seletor de versão (dropdown) permite pular direto para qualquer versão sem precisar clicar várias vezes. No mobile, as antigas abas Pastas/Arquivos dão lugar a uma coluna por vez com botão "‹ Voltar".
 >
 > **v7.9.0** — backup por usuário: a `BACKUP_API_KEY` global deixa de dar acesso irrestrito a tudo — agora existe uma tabela `users` (chave própria hasheada, role `admin`/`user`) e cada `BackupID` tem um dono (`owner_user_id`). Um usuário comum só cria, lista, sincroniza e restaura seus próprios labels; tentar acessar (ou até escrever em) um backup de outro usuário retorna `403`, inclusive no ponto que antes não tinha nenhuma checagem: `GET /files/{id}/download`. Endpoints de infraestrutura (`/storage/*`, `/maintenance/*`, `/api/stats`, `/rclone/*`) passam a exigir `role=admin`. **Migração automática e sem downtime**: no primeiro boot após a atualização, a `BACKUP_API_KEY` em uso vira a chave do primeiro admin, e todo backup pré-existente é atribuído a ele — nenhum cliente precisa trocar de chave imediatamente. Novos endpoints `POST/GET/PATCH /users`, `POST /users/{id}/rotate-key` e `PATCH /backups/{label}/owner` (reatribui o dono de um label — útil pra mover labels antigos do admin bootstrap para o usuário real), com telas correspondentes em `/manage-users` e um novo card "Reatribuir Dono" em Manutenção. Cliente Python mostra `Acesso negado: <motivo>` em vez do erro HTTP genérico ao receber 403.
@@ -590,6 +592,12 @@ nestvault backup /Volumes/HD/Fotos \
   --label "fotos" \
   --server http://192.168.1.100:8000 \
   --accumulate
+
+# Ajustar a válvula de segurança do smart skip (padrão: 7 dias)
+nestvault backup ~/documentos \
+  --label "notebook-joao" \
+  --server http://192.168.1.100:8000 \
+  --full-rescan-days 3
 ```
 
 **Opções:**
@@ -605,6 +613,7 @@ nestvault backup /Volumes/HD/Fotos \
 | `--hash-workers` | | Processos paralelos para cálculo de SHA-256 (padrão: `os.cpu_count()`) |
 | `--batch-size` | | Arquivos por request no `/check/batch` (padrão: `100`) |
 | `--accumulate` | | Modo acumulativo: herda arquivos ausentes da versão anterior — veja [Modo Acumulativo](#modo-acumulativo) |
+| `--full-rescan-days` | | Idade máxima (dias) da última versão `done` para usar o Smart Skip — veja [Smart Skip](#smart-skip) (padrão: `7`) |
 | `--dry-run` | | Apenas verifica, não envia |
 | `--verbose` | | Logs detalhados (arquivos cacheados e ignorados) |
 
@@ -636,6 +645,22 @@ Com `--accumulate`, aparece também a linha `Herdados`:
   Ignorados   : 0
   Erros       : 0
   Herdados    : 100  ← arquivos ausentes herdados da versão anterior
+=======================================================
+```
+
+Quando o Smart Skip é acionado (nada mudou desde a última versão), a linha `Herdados` aparece com `(smart skip)` em vez de `(modo acumulativo)`, e todos os arquivos aparecem em `Cacheados`:
+
+```
+=======================================================
+  Backup      : [notebook-joao]
+  Versao      : 2026-04-25T11:00:00
+  Verificados : 142
+  Enviados    : 0
+  Registrados : 0
+  Cacheados   : 142
+  Ignorados   : 0
+  Erros       : 0
+  Herdados    : 142  ← smart skip: nada mudou, um único /absorb
 =======================================================
 ```
 
@@ -694,6 +719,41 @@ Backup 3 — HD com fotos de março (80 fotos):
 > **Atenção:** com `--accumulate`, arquivos deletados do cliente são **intencionalmente preservados** no servidor. Se precisar remover um arquivo do acervo acumulado, a forma correta é deletar a versão manualmente pelo dashboard ou pela API.
 
 **Otimização client-side (v7.8+):** clientes com `--accumulate`/`accumulate` identificam arquivos inalterados cujo path + sha256 já estão na versão anterior e os retiram do pipeline de registro — eles são herdados pelo mesmo `/absorb` final em vez de gerar um request de registro cada. Isso reduz ainda mais o número de requests num backup incremental típico, sem mudar a semântica do absorb no servidor.
+
+---
+
+### Smart Skip
+
+*(v7.11+)* Muitos backups agendados via cron rodam repetidamente sobre diretórios que **não mudam** entre execuções (ex.: um backup noturno de uma pasta que só recebe arquivos novos ocasionalmente). Nesses casos, gastar hash + `/check/batch` + registro para centenas ou milhares de arquivos que já estão idênticos no servidor é desperdício puro de CPU e round-trips de rede.
+
+**Como funciona:**
+
+O cliente sempre precisa varrer o diretório local (`os.walk` + `stat`) para detectar deleções — isso não tem como pular. Mas se essa varredura mostrar que **nada mudou** desde a última versão `done` (nenhum arquivo novo, modificado ou deletado — o conjunto de paths é idêntico), o backup inteiro vira uma única chamada a `/absorb` que clona a versão anterior por completo, em vez de hashear/checar/registrar arquivo por arquivo.
+
+```
+Backup 1 — diretório com 142 arquivos:
+  hash + check + upload de tudo (primeira vez)
+  versão 2026-04-25T10:42:31 → 142 arquivos
+
+Backup 2 — mesmo diretório, nada mudou:
+  varre o diretório, confirma que os 142 paths batem com a versão anterior
+  smart skip: um único /absorb, sem hash/check/register individual
+  versão 2026-04-25T11:00:00 → 142 arquivos (herdados)
+```
+
+**Válvula de segurança:** o smart skip só é usado se a última versão `done` tiver no máximo `--full-rescan-days` dias (padrão `7`). Depois desse prazo, o backup volta a fazer a verificação completa normalmente, mesmo que nada pareça ter mudado — evita uma cadeia indefinida de `/absorb` sobre `/absorb` sem nunca reconferir o conteúdo real dos arquivos no disco.
+
+**Quando o smart skip *não* é usado:**
+
+| Situação | Comportamento |
+|---|---|
+| Algum arquivo novo, modificado ou deletado | Backup normal (pipeline de hash/check/upload) |
+| `--accumulate` ativo | Segue a semântica própria do modo acumulativo (veja acima) |
+| Nenhuma versão `done` anterior (primeiro backup) | Backup normal |
+| Última versão `done` mais velha que `--full-rescan-days` | Backup normal, mesmo sem mudanças aparentes |
+| Um arquivo sumiu entre a varredura do diretório e a leitura do `stat` (race condition) | Backup normal — o smart skip é desabilitado nesse run para não arriscar clonar um estado com uma deleção não capturada |
+
+**Cache local de hash:** para tornar a varredura em si mais barata, o cliente também mantém um cache local por label (`~/.cache/nestvault` no Linux, `~/Library/Caches/nestvault` no macOS, `%LOCALAPPDATA%\nestvault` no Windows) com o índice `path → {sha256, size, mtime}` da última versão enviada por essa máquina. Se o `version_key` desse cache local ainda bater com o último "done" do servidor, o cliente evita o `GET /files` completo (que baixa e faz parse do índice inteiro da versão anterior) e usa o cache local direto. Cache ausente ou desatualizado simplesmente volta ao fetch completo de sempre — nunca é tratado como fonte de verdade não verificada.
 
 ---
 
@@ -1339,6 +1399,19 @@ Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Par
 ---
 
 ## ⚡ Otimizações
+
+### v7.11.0
+
+| Componente | Mudança |
+|---|---|
+| **`client/nestvault.py` — `backup_directory` (modo batch)** | Reescrito de fases estanques (hash tudo → check tudo → upload tudo) para pipeline sobreposto: hashing consumido incrementalmente via `ProcessPoolExecutor` + `as_completed` em vez de `pool.map()` bloqueante; buffer de resultados dispara `/check/batch` a cada `--batch-size` hashes prontos, sem esperar o restante |
+| **`client/nestvault.py` — pool de check dedicado** | Chunks de `/check/batch` passam a rodar em `ThreadPoolExecutor(min(4, workers))` próprio, em paralelo — antes era um `for` sequencial bloqueante antes de qualquer upload começar |
+| **`client/nestvault.py` — cache hits imediatos** | Arquivos inalterados (mtime+size) não dependem do hashing dos demais: disparam para `/register/batch` assim que identificados, em paralelo com o hashing dos arquivos novos/modificados |
+| **`client/nestvault.py` — `_smart_skip_eligible` / Smart Skip** | Quando a varredura confirma que nada mudou desde a última versão `done` (sem novos/modificados/deletados) e ela tem no máximo `--full-rescan-days` dias (padrão 7), o backup vira uma única chamada `/absorb` em vez de hash/check/register por arquivo — veja [Smart Skip](#smart-skip) |
+| **`client/nestvault.py` — cache local de hash** | `_load_local_hash_cache`/`_save_local_hash_cache` espelham localmente o índice `path → {sha256, size, mtime}` da última versão enviada por label; usado no lugar do `GET /files` completo quando o `version_key` local bate com o último "done" do servidor |
+| **`client/nestvault.py` — `_local_cache_dir`** | Diretório de cache detectado por SO: `~/Library/Caches` no macOS, `%LOCALAPPDATA%` no Windows, `$XDG_CACHE_HOME`/`~/.cache` no Linux |
+| **`tests/test_client_pipeline.py`** | Novo — 18 casos cobrindo `_smart_skip_eligible`, `_version_age_days`, `_chunked` e o round-trip do cache local de hash (incluindo os três ramos de SO) |
+| **Origem** | Estratégias portadas do cliente macOS (`NestVaultClient`), que já usava um pipeline `AsyncStream` producer/consumer equivalente — sem mudanças na API do servidor |
 
 ### v7.10.0
 

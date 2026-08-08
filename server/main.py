@@ -1,5 +1,5 @@
 """
-NestVault  v7.10.0
+NestVault  v7.11.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -7,6 +7,13 @@ Otimizacoes de performance:
 - Indices no banco + WAL mode
 - Cleanup de orfaos em uma unica query
 - Limpeza de arquivos ao deletar label/versao feita em background (nao bloqueia o cliente)
+
+v7.11.0:
+- Sem mudancas de API — versao bump para acompanhar o cliente Python
+  (nestvault.py), que ganhou pipeline de backup sobreposto (hash/check/upload
+  concorrentes), Smart Skip (absorb automatico quando nada mudou) e cache
+  local de hash. Endpoints existentes (/absorb, /check/batch, /files)
+  reutilizados sem alteracao — detalhes no README, secao Otimizacoes.
 
 v7.10.0:
 - Explorer reescrito como navegador em colunas (estilo Finder/macOS): cada
@@ -426,7 +433,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="7.10.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="7.11.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():

@@ -1,5 +1,5 @@
 """
-NestVault  v7.10.0
+NestVault  v7.11.0
 Cada execucao de backup cria uma nova versao dentro do label.
 Conteudo identico e armazenado uma unica vez no servidor (deduplicacao por sha256).
 
@@ -12,6 +12,15 @@ Uso:
     nestvault backups --server http://192.168.1.100:8000
 
 Changelog (cliente — histórico completo do sistema no README):
+  v7.11 Pipeline de backup sobreposto (hash ∥ check ∥ upload) em vez de fases
+        estanques; chunks de /check/batch em paralelo; Smart Skip — quando
+        nada mudou desde a última versão "done" (e ela tem no máximo
+        --full-rescan-days dias), o backup vira um único /absorb em vez de
+        recomputar hash/check/register de cada arquivo; cache local de hash
+        por label (~/.cache, ~/Library/Caches ou %LOCALAPPDATA% conforme o
+        SO) evita refazer o GET /files completo quando nada mudou no
+        servidor desde a última execução. Estratégias portadas do client
+        macOS (NestVaultClient), que já usava um pipeline equivalente.
   v7.9  Backup por usuário (servidor v7.9+): a BACKUP_API_KEY passa a
         identificar uma conta (admin ou usuário comum) em vez de uma chave
         global — 403 ao tentar acessar um backup de outro usuário agora
@@ -41,9 +50,9 @@ Changelog (cliente — histórico completo do sistema no README):
         reconciliação de replicação (reconcile-replication).
 """
 
-VERSION = "v7.10.0"
+VERSION = "v7.11.0"
 
-import os, sys, hashlib, argparse, base64, socket, threading, time
+import os, sys, hashlib, argparse, base64, json, socket, threading, time
 from pathlib import Path
 from typing import Optional, Callable
 from datetime import datetime
@@ -489,6 +498,55 @@ def sync_version(server, label, version_key, existing_paths):
     return r.json()
 
 
+# -- Cache local de hash -------------------------------------------------------
+# Espelha localmente o indice da ultima versao 'done' de um label para evitar
+# o GET /files completo (+ parse do JSON inteiro) em toda execucao. So e usado
+# como substituto quando o version_key bate exatamente com o ultimo 'done' do
+# servidor — nunca como fonte de verdade nao verificada, entao um cache miss
+# (ou corrompido) so custa cair de volta no fetch completo de sempre.
+def _local_cache_dir() -> Path:
+    """Diretorio base de cache seguindo a convencao de cada SO:
+    macOS -> ~/Library/Caches ; Windows -> %LOCALAPPDATA% ; Linux -> XDG
+    ($XDG_CACHE_HOME ou ~/.cache)."""
+    if sys.platform == "darwin":
+        base = Path.home() / "Library" / "Caches"
+    elif sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+    else:
+        base = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
+    return base / "nestvault"
+
+
+def _local_cache_path(label: str) -> Path:
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in label)
+    return _local_cache_dir() / f"{safe}.json"
+
+
+def _load_local_hash_cache(label: str) -> dict:
+    try:
+        with open(_local_cache_path(label), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get("files"), dict) and data.get("version_key"):
+            return data
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def _save_local_hash_cache(label: str, version_key: str, files: dict):
+    if not files:
+        return
+    path = _local_cache_path(label)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"version_key": version_key, "files": files}, f)
+        tmp.replace(path)
+    except OSError:
+        pass  # cache local eh so uma otimizacao; falha aqui nao pode quebrar o backup
+
+
 def _fetch_prev_cache(server, label) -> tuple[Optional[str], dict]:
     try:
         r = _session.get(f"{server}/backups/{label}/versions",
@@ -498,17 +556,51 @@ def _fetch_prev_cache(server, label) -> tuple[Optional[str], dict]:
         last_done = next((v for v in r.json() if v["status"] == "done"), None)
         if not last_done:
             return None, {}
+        version_key = last_done["version_key"]
+
+        local = _load_local_hash_cache(label)
+        if local.get("version_key") == version_key:
+            return version_key, local["files"]
+
         r2 = _session.get(
             f"{server}/files",
             headers=build_headers(),
-            params={"backup_label": label, "version_key": last_done["version_key"]},
+            params={"backup_label": label, "version_key": version_key},
             timeout=30,
         )
         if not r2.ok:
             return None, {}
-        return last_done["version_key"], {f["original_path"]: f for f in r2.json()}
+        return version_key, {f["original_path"]: f for f in r2.json()}
     except requests.RequestException:
         return None, {}
+
+
+# -- Smart Skip ------------------------------------------------------------
+def _version_age_days(version_key: str) -> float:
+    """Idade aproximada (em dias) de uma versao a partir do seu version_key
+    (gerado por now_key(), formato %Y-%m-%dT%H:%M:%S). Retorna infinito se
+    nao for possivel parsear, forcando o caminho seguro (sem smart skip)."""
+    try:
+        dt = datetime.strptime(version_key, "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return float("inf")
+    return (datetime.now() - dt).total_seconds() / 86400
+
+
+def _smart_skip_eligible(
+    pending_hash: list, current_paths: set, prev_paths: set,
+    prev_done_key: Optional[str], accumulate: bool, full_rescan_days: float,
+) -> bool:
+    """Verdadeiro quando nada mudou desde a ultima versao 'done' (sem
+    arquivos novos/modificados, sem delecoes) e ela nao esta velha demais —
+    nesse caso o backup vira um /absorb unico em vez de recomputar
+    hash/check/register de cada arquivo (mesma ideia do Smart Skip do client
+    macOS)."""
+    if accumulate or prev_done_key is None or pending_hash:
+        return False
+    if current_paths != prev_paths:
+        return False
+    return _version_age_days(prev_done_key) <= full_rescan_days
 
 
 # -- Backup -------------------------------------------------------------------
@@ -520,7 +612,7 @@ def _chunked(lst: list, n: int):
 def backup_directory(
     directory, label, server=DEFAULT_SERVER, dry_run=False,
     path_prefix=None, exclude=None, client_name=None, workers=4, verbose=False,
-    batch_size=100, hash_workers=None, accumulate=False,
+    batch_size=100, hash_workers=None, accumulate=False, full_rescan_days=7.0,
 ):
     global _verbose
     _verbose = verbose
@@ -575,6 +667,8 @@ def backup_directory(
     use_batch_register = server_ver >= (7, 8)
     effective = 1 if dry_run else workers
     effective_hash = 1 if dry_run else (hash_workers or os.cpu_count() or 4)
+    smart_skip_used = False
+    files_snapshot: dict[str, dict] = {}
 
     if use_batch:
         _dim(f"Modo batch {batch_size} arq/req  ·  {effective} threads upload  ·  {effective_hash} proc hash")
@@ -596,9 +690,11 @@ def backup_directory(
             progress.update(overall, advance=1, description=desc)
 
         if use_batch:
-            # ----- Fase 1: cache hits + hashing paralelo + batch check -----
+            # ----- split cache-hit vs. precisa-hash (necessario de qualquer
+            # forma para detectar arquivos deletados) -----
             fast_files   = []
             pending_hash = []
+            vanished     = False  # arquivo sumiu entre o walk e o stat — desabilita smart skip
 
             for fp, op in pending:
                 try:
@@ -606,154 +702,46 @@ def backup_directory(
                 except OSError:
                     _warn(f"Arquivo desapareceu antes do backup — ignorado: {op}")
                     stats["skipped"] += 1
+                    vanished = True
                     _update_bar()
                     continue
                 size   = stat.st_size
                 mtime  = stat.st_mtime
                 cached = prev_cache.get(op)
                 if cached and cached["mtime"] == mtime and cached["size"] == size:
-                    fast_files.append((fp, op, mtime, cached["sha256"]))
+                    fast_files.append((fp, op, mtime, cached["sha256"], cached["size"]))
                 else:
                     pending_hash.append((fp, op, mtime, size))
 
-            hashed: dict[str, tuple[str, int, float]] = {}
-            if pending_hash:
-                _dim(f"Hashing {len(pending_hash)} arquivo(s)  ({len(fast_files)} cache hits)")
-                with ProcessPoolExecutor(max_workers=effective_hash) as pool:
-                    for op, sha256, size, mtime in pool.map(
-                        _hash_item, pending_hash,
-                        chunksize=max(1, len(pending_hash) // (effective_hash * 4)),
-                    ):
-                        if sha256 is None:
-                            _warn(f"Arquivo desapareceu durante hashing — ignorado: {op}")
-                            stats["skipped"] += 1
-                            _update_bar()
-                        else:
-                            hashed[op] = (sha256, size, mtime)
-                _dim("Hashing concluido")
+            smart_skip_used = not vanished and _smart_skip_eligible(
+                pending_hash, set(all_paths), set(prev_cache.keys()),
+                prev_done_key, accumulate, full_rescan_days,
+            )
 
-            action_map: dict[str, tuple] = {}
-            fp_map = {o: f for f, o, *_ in pending_hash}
-            items_to_check = [
-                {"original_path": op, "sha256": sha256, "size": size, "mtime": mtime}
-                for op, (sha256, size, mtime) in hashed.items()
-            ]
-            for batch in _chunked(items_to_check, batch_size):
-                try:
-                    results = check_batch(server, label, version_key, batch)
-                    for item, result in zip(batch, results):
-                        op = item["original_path"]
-                        sha256, size, mtime = hashed[op]
-                        fp = fp_map[op]
-                        if not result["needs_upload"]:
-                            action_map[op] = ("skip", sha256, size, mtime, fp)
-                        elif result.get("content_exists"):
-                            action_map[op] = ("register", sha256, size, mtime, fp)
-                        else:
-                            action_map[op] = ("upload", sha256, size, mtime, fp)
-                except requests.RequestException as e:
-                    # Falha do lote não é falha dos arquivos: cai para upload
-                    # direto (o /upload deduplica no servidor) sem inflar a
-                    # contagem de erros — um aviso único por lote basta.
-                    _warn(f"Batch check falhou ({len(batch)} arquivo(s) → upload direto): {e}")
-                    for item in batch:
-                        op = item["original_path"]
-                        sha256, size, mtime = hashed[op]
-                        action_map[op] = ("upload", sha256, size, mtime, fp_map[op])
+            if smart_skip_used:
+                _info(f"Nada mudou desde {prev_done_key} — herdando via absorb (smart skip)")
+                files_snapshot.update(prev_cache)
+                stats["fast"] = total
+                progress.update(overall, completed=total,
+                                description=f"[{GREEN}]smart skip — nada mudou[/{GREEN}]")
+            else:
+                # ----- pipeline: hashing (produtor) sobreposto a check/upload
+                # (consumidores), em vez de fases estanques -----
+                fp_map = {op: fp for fp, op, *_ in pending_hash}
 
-            # ----- Fase 2: uploads e registers paralelos -----
-            def _do_fast(fp, op, mtime, sha256):
-                if _abort_event.is_set():
-                    return
-                try:
-                    _dim(f"FAST  {op}")
-                    _with_retries(lambda: register_file(server, label, version_key, op, mtime, sha256), op)
+                def _record_success(op, sha256, size, mtime, kind):
                     with lock:
-                        stats["fast"] += 1
-                except requests.RequestException as e:
-                    _err(f"{op}: {e}")
-                    with lock:
-                        stats["errors"] += 1
-                finally:
-                    _update_bar()
+                        stats[kind] += 1
+                        files_snapshot[op] = {"original_path": op, "sha256": sha256,
+                                               "size": size, "mtime": mtime}
 
-            def _do_action(op, action, sha256, size, mtime, fp):
-                if _abort_event.is_set():
-                    return
-                try:
-                    if action == "skip":
-                        _dim(f"SKIP  {op}")
-                        with lock:
-                            stats["skipped"] += 1
-                    elif action == "register":
-                        _dim(f"REG   {op}  ({fmt_size(size)})")
-                        _with_retries(lambda: register_file(server, label, version_key, op, mtime, sha256), op)
-                        with lock:
-                            stats["registered"] += 1
-                    else:
-                        _dim(f"UP    {op}  ({fmt_size(size)})")
-                        _upload_with_backoff(
-                            lambda: upload_file(server, fp, label, version_key, op, mtime, progress),
-                            op, _retry_gate, _abort_event,
-                        )
-                        if not _abort_event.is_set():
-                            with lock:
-                                stats["uploaded"] += 1
-                except requests.RequestException as e:
-                    _err(f"{op}: {e}")
-                    with lock:
-                        stats["errors"] += 1
-                finally:
-                    _update_bar()
-
-            def _do_register_batch(chunk):
-                """Registra um lote (conteúdo já no storage) em uma request.
-                Conteúdo ausente no servidor escala para upload; falha do lote
-                inteiro cai para o registro individual por arquivo."""
-                if _abort_event.is_set():
-                    return
-                items = [{"original_path": op, "sha256": sha256, "mtime": mtime}
-                         for _fp, op, mtime, sha256, _kind in chunk]
-                try:
-                    resp = _with_retries(
-                        lambda: register_batch(server, label, version_key, items),
-                        f"register/batch ({len(items)} arq)")
-                except requests.RequestException as e:
-                    _warn(f"Register em lote falhou ({len(chunk)} arquivo(s) → registro individual): {e}")
-                    for _fp, op, mtime, sha256, kind in chunk:
-                        if _abort_event.is_set():
-                            return
-                        try:
-                            _with_retries(lambda: register_file(server, label, version_key, op, mtime, sha256), op)
-                            with lock:
-                                stats[kind] += 1
-                        except requests.RequestException as e2:
-                            _err(f"{op}: {e2}")
-                            with lock:
-                                stats["errors"] += 1
-                        finally:
-                            _update_bar()
-                    return
-
-                # Resultados são posicionais (o servidor responde na ordem do request)
-                for (fp, op, mtime, sha256, kind), result in zip(chunk, resp["results"]):
+                def _do_fast(fp, op, mtime, sha256, size):
                     if _abort_event.is_set():
                         return
                     try:
-                        if result.get("registered"):
-                            _dim(f"BREG  {op}")
-                            with lock:
-                                stats[kind] += 1
-                        else:
-                            # Conteúdo sumiu do storage — escala para upload completo
-                            _dim(f"UP    {op}  (conteudo ausente no servidor)")
-                            _upload_with_backoff(
-                                lambda: upload_file(server, fp, label, version_key, op, mtime, progress),
-                                op, _retry_gate, _abort_event,
-                            )
-                            if not _abort_event.is_set():
-                                with lock:
-                                    stats["uploaded"] += 1
+                        _dim(f"FAST  {op}")
+                        _with_retries(lambda: register_file(server, label, version_key, op, mtime, sha256), op)
+                        _record_success(op, sha256, size, mtime, "fast")
                     except requests.RequestException as e:
                         _err(f"{op}: {e}")
                         with lock:
@@ -761,31 +749,182 @@ def backup_directory(
                     finally:
                         _update_bar()
 
-            with ThreadPoolExecutor(max_workers=effective) as pool:
-                futures = []
-                if use_batch_register:
-                    # Registers (cache hits + conteúdo existente) vão em lotes;
-                    # uploads e skips seguem individuais no mesmo pool.
-                    register_work = [(fp, op, mtime, sha256, "fast")
-                                     for fp, op, mtime, sha256 in fast_files]
-                    register_work += [(fp, op, mtime, sha256, "registered")
-                                      for op, (action, sha256, size, mtime, fp) in action_map.items()
-                                      if action == "register"]
-                    for chunk in _chunked(register_work, batch_size):
-                        futures.append(pool.submit(_do_register_batch, chunk))
-                    for op, (action, sha256, size, mtime, fp) in action_map.items():
-                        if action != "register":
-                            futures.append(pool.submit(_do_action, op, action, sha256, size, mtime, fp))
-                else:
-                    for fp, op, mtime, sha256 in fast_files:
-                        futures.append(pool.submit(_do_fast, fp, op, mtime, sha256))
-                    for op, (action, sha256, size, mtime, fp) in action_map.items():
-                        futures.append(pool.submit(_do_action, op, action, sha256, size, mtime, fp))
-                for future in as_completed(futures):
-                    if exc := future.exception():
-                        _err(f"Erro inesperado: {exc}")
+                def _do_action(op, action, sha256, size, mtime, fp):
+                    if _abort_event.is_set():
+                        return
+                    try:
+                        if action == "skip":
+                            _dim(f"SKIP  {op}")
+                            _record_success(op, sha256, size, mtime, "skipped")
+                        elif action == "register":
+                            _dim(f"REG   {op}  ({fmt_size(size)})")
+                            _with_retries(lambda: register_file(server, label, version_key, op, mtime, sha256), op)
+                            _record_success(op, sha256, size, mtime, "registered")
+                        else:
+                            _dim(f"UP    {op}  ({fmt_size(size)})")
+                            _upload_with_backoff(
+                                lambda: upload_file(server, fp, label, version_key, op, mtime, progress),
+                                op, _retry_gate, _abort_event,
+                            )
+                            if not _abort_event.is_set():
+                                _record_success(op, sha256, size, mtime, "uploaded")
+                    except requests.RequestException as e:
+                        _err(f"{op}: {e}")
                         with lock:
                             stats["errors"] += 1
+                    finally:
+                        _update_bar()
+
+                def _do_register_batch(chunk):
+                    """Registra um lote (conteúdo já no storage) em uma request.
+                    Conteúdo ausente no servidor escala para upload; falha do lote
+                    inteiro cai para o registro individual por arquivo."""
+                    if _abort_event.is_set():
+                        return
+                    items = [{"original_path": op, "sha256": sha256, "mtime": mtime}
+                             for _fp, op, mtime, sha256, _size, _kind in chunk]
+                    try:
+                        resp = _with_retries(
+                            lambda: register_batch(server, label, version_key, items),
+                            f"register/batch ({len(items)} arq)")
+                    except requests.RequestException as e:
+                        _warn(f"Register em lote falhou ({len(chunk)} arquivo(s) → registro individual): {e}")
+                        for _fp, op, mtime, sha256, size, kind in chunk:
+                            if _abort_event.is_set():
+                                return
+                            try:
+                                _with_retries(lambda: register_file(server, label, version_key, op, mtime, sha256), op)
+                                _record_success(op, sha256, size, mtime, kind)
+                            except requests.RequestException as e2:
+                                _err(f"{op}: {e2}")
+                                with lock:
+                                    stats["errors"] += 1
+                            finally:
+                                _update_bar()
+                        return
+
+                    # Resultados são posicionais (o servidor responde na ordem do request)
+                    for (fp, op, mtime, sha256, size, kind), result in zip(chunk, resp["results"]):
+                        if _abort_event.is_set():
+                            return
+                        try:
+                            if result.get("registered"):
+                                _dim(f"BREG  {op}")
+                                _record_success(op, sha256, size, mtime, kind)
+                            else:
+                                # Conteúdo sumiu do storage — escala para upload completo
+                                _dim(f"UP    {op}  (conteudo ausente no servidor)")
+                                _upload_with_backoff(
+                                    lambda: upload_file(server, fp, label, version_key, op, mtime, progress),
+                                    op, _retry_gate, _abort_event,
+                                )
+                                if not _abort_event.is_set():
+                                    _record_success(op, sha256, size, mtime, "uploaded")
+                        except requests.RequestException as e:
+                            _err(f"{op}: {e}")
+                            with lock:
+                                stats["errors"] += 1
+                        finally:
+                            _update_bar()
+
+                def _check_and_dispatch(items, net_pool):
+                    """Roda no pool de check: faz o /check/batch de um chunk e
+                    despacha (sem bloquear) o register/upload resultante no
+                    net_pool — retorna os futures para o chamador aguardar
+                    depois, permitindo que o proximo chunk ja seja hasheado
+                    e checado enquanto este ainda esta sendo enviado."""
+                    if _abort_event.is_set():
+                        return []
+                    try:
+                        results = check_batch(server, label, version_key, items)
+                    except requests.RequestException as e:
+                        # Falha do lote não é falha dos arquivos: cai para upload
+                        # direto (o /upload deduplica no servidor) sem inflar a
+                        # contagem de erros — um aviso único por lote basta.
+                        _warn(f"Batch check falhou ({len(items)} arquivo(s) → upload direto): {e}")
+                        return [
+                            net_pool.submit(_do_action, item["original_path"], "upload",
+                                            item["sha256"], item["size"], item["mtime"],
+                                            fp_map[item["original_path"]])
+                            for item in items
+                        ]
+
+                    futs = []
+                    register_chunk = []
+                    for item, result in zip(items, results):
+                        op, sha256 = item["original_path"], item["sha256"]
+                        size, mtime = item["size"], item["mtime"]
+                        fp = fp_map[op]
+                        if not result["needs_upload"]:
+                            action = "skip"
+                        elif result.get("content_exists"):
+                            action = "register"
+                        else:
+                            action = "upload"
+                        if use_batch_register and action == "register":
+                            register_chunk.append((fp, op, mtime, sha256, size, "registered"))
+                        else:
+                            futs.append(net_pool.submit(_do_action, op, action, sha256, size, mtime, fp))
+                    for sub in _chunked(register_chunk, batch_size):
+                        futs.append(net_pool.submit(_do_register_batch, sub))
+                    return futs
+
+                with ThreadPoolExecutor(max_workers=effective) as net_pool, \
+                     ThreadPoolExecutor(max_workers=min(4, effective)) as check_pool, \
+                     ProcessPoolExecutor(max_workers=effective_hash) as hash_pool:
+
+                    dispatch_futures = []
+
+                    # Cache hits não dependem de hashing: disparam na hora,
+                    # em paralelo com o hashing dos arquivos novos/modificados.
+                    if use_batch_register:
+                        register_work = [(fp, op, mtime, sha256, size, "fast")
+                                         for fp, op, mtime, sha256, size in fast_files]
+                        for chunk in _chunked(register_work, batch_size):
+                            dispatch_futures.append(net_pool.submit(_do_register_batch, chunk))
+                    else:
+                        for fp, op, mtime, sha256, size in fast_files:
+                            dispatch_futures.append(net_pool.submit(_do_fast, fp, op, mtime, sha256, size))
+
+                    # Hashing é o produtor: consome os resultados conforme
+                    # terminam (não espera a lista inteira) e vai enchendo um
+                    # buffer que dispara o check assim que atinge batch_size,
+                    # sem esperar o restante do hashing.
+                    hash_futures = {hash_pool.submit(_hash_item, item): item for item in pending_hash}
+                    check_futures = []
+                    buffer = []
+                    for hf in as_completed(hash_futures):
+                        op, sha256, size, mtime = hf.result()
+                        if sha256 is None:
+                            _warn(f"Arquivo desapareceu durante hashing — ignorado: {op}")
+                            with lock:
+                                stats["skipped"] += 1
+                            _update_bar()
+                            continue
+                        buffer.append({"original_path": op, "sha256": sha256, "size": size, "mtime": mtime})
+                        if len(buffer) >= batch_size:
+                            check_futures.append(check_pool.submit(_check_and_dispatch, buffer, net_pool))
+                            buffer = []
+                    if buffer:
+                        check_futures.append(check_pool.submit(_check_and_dispatch, buffer, net_pool))
+
+                    # Cada check_future retorna (sem bloquear) a lista de
+                    # register/upload que ele já disparou no net_pool — esse
+                    # trabalho já começou a rodar em paralelo enquanto os
+                    # próximos chunks ainda estavam sendo hasheados/checados.
+                    for cf in as_completed(check_futures):
+                        if exc := cf.exception():
+                            _err(f"Erro inesperado no check: {exc}")
+                            with lock:
+                                stats["errors"] += 1
+                        else:
+                            dispatch_futures.extend(cf.result())
+
+                    for fut in as_completed(dispatch_futures):
+                        if exc := fut.exception():
+                            _err(f"Erro inesperado: {exc}")
+                            with lock:
+                                stats["errors"] += 1
 
         else:
             # ----- Fallback: check individual por worker -----
@@ -859,12 +998,19 @@ def backup_directory(
             _err(f"Sync: {e}")
 
         status = "failed" if stats["errors"] else "done"
-        if accumulate and status == "done" and prev_done_key:
+        if (accumulate or smart_skip_used) and status == "done" and prev_done_key:
             try:
                 absorb_result = absorb_version(server, label, version_key, prev_done_key)
             except Exception as e:
                 _err(f"Absorb: {e}")
         finish_version(server, label, version_key, status)
+
+        # Cache local: so grava o snapshot completo quando a versao nao usou
+        # --accumulate (que herda arquivos ausentes localmente do servidor,
+        # entao pending/files_snapshot nao refletiriam o conjunto real da
+        # versao) — cache miss no proximo run so custa voltar ao fetch completo.
+        if use_batch and not accumulate and status == "done":
+            _save_local_hash_cache(label, version_key, files_snapshot)
 
     status_color = GREEN if not stats["errors"] else RED
     status_text  = "concluido" if not stats["errors"] else "com erros"
@@ -881,9 +1027,10 @@ def backup_directory(
     if stats["errors"]:
         lines.append(f"[bold {RED}]Erros[/bold {RED}]        [{RED}]{stats['errors']}[/{RED}]")
     if absorb_result is not None:
+        modo = "smart skip" if smart_skip_used else "modo acumulativo"
         lines.append(
             f"[{GREEN}]Herdados[/{GREEN}]     [{GREEN}]{absorb_result['inherited']}[/{GREEN}]"
-            f"  [{DIM}](modo acumulativo)[/{DIM}]"
+            f"  [{DIM}]({modo})[/{DIM}]"
         )
 
     console.print()
@@ -1376,6 +1523,10 @@ def main():
                     help="Arquivos por request no /check/batch (padrao: 100)")
     pb.add_argument("--accumulate", action="store_true",
                     help="Herda arquivos ausentes da versao anterior (ideal para galerias)")
+    pb.add_argument("--full-rescan-days", type=float, default=7.0, dest="full_rescan_days",
+                    help="Idade maxima (dias) da ultima versao 'done' para usar o smart skip "
+                         "(pular hash/check/upload via /absorb quando nada mudou); acima disso "
+                         "forca uma verificacao completa (padrao: 7)")
     pb.add_argument("--dry-run", action="store_true")
     pb.add_argument("--verbose", action="store_true",
                     help="Mostra logs de arquivos cacheados e ignorados")
@@ -1462,6 +1613,7 @@ def main():
             args.dry_run, args.prefix, args.exclude,
             args.client, args.workers, args.verbose, args.batch_size,
             args.hash_workers, accumulate=args.accumulate,
+            full_rescan_days=args.full_rescan_days,
         )
 
     elif args.command == "backups":

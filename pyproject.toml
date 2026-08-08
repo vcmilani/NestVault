@@ -1,6 +1,6 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["server", "tests"]
+pythonpath = ["server", "tests", "client"]
 asyncio_mode = "auto"
 
 [project.optional-dependencies]
