@@ -1,5 +1,5 @@
 """
-NestVault  v7.10.0
+NestVault  v7.11.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -7,6 +7,13 @@ Otimizacoes de performance:
 - Indices no banco + WAL mode
 - Cleanup de orfaos em uma unica query
 - Limpeza de arquivos ao deletar label/versao feita em background (nao bloqueia o cliente)
+
+v7.11.0:
+- Sem mudancas de API — versao bump para acompanhar o cliente Python
+  (nestvault.py), que ganhou pipeline de backup sobreposto (hash/check/upload
+  concorrentes), Smart Skip (absorb automatico quando nada mudou) e cache
+  local de hash. Endpoints existentes (/absorb, /check/batch, /files)
+  reutilizados sem alteracao — detalhes no README, secao Otimizacoes.
 
 v7.10.0:
 - Explorer reescrito como navegador em colunas (estilo Finder/macOS): cada
@@ -288,6 +295,13 @@ def _backup_labels_for_sha256s(db, sha256s: list[str]) -> list[str]:
     return sorted(r[0] for r in rows)
 
 
+def _total_size_for_sha256s(db, sha256s: list[str]) -> int:
+    if not sha256s:
+        return 0
+    return (db.query(func.coalesce(func.sum(FileContent.size), 0))
+              .filter(FileContent.sha256.in_(sha256s)).scalar() or 0)
+
+
 def _process_ssd_moves_worker(*, recovery: bool) -> None:
     """Núcleo comum dos workers de move SSD → HDD.
 
@@ -338,12 +352,14 @@ def _process_ssd_moves_worker(*, recovery: bool) -> None:
                 invalidate_activity()
         storage.reconcile_orphaned_ssd_copies(db)
         labels = _backup_labels_for_sha256s(db, all_moved)
+        total_bytes = _total_size_for_sha256s(db, all_moved)
         label_str = ", ".join(labels) if labels else "—"
         job = db.get(MaintenanceJob, job_id)
         if job:
             job.status = "done"
             job.finished_at = datetime.now()
-            job.summary = f"{prefix}{processed} arquivo(s) movidos SSD → HDD — backups: {label_str}"
+            job.summary = (f"{prefix}{processed} arquivo(s) movidos SSD → HDD "
+                            f"({storage.fmt_bytes(total_bytes)}) — backups: {label_str}")
         if recovery:
             log.info(f"[ssd-cache] recovery concluída — {processed} arquivo(s) movidos para HDD")
     except Exception as e:
@@ -417,7 +433,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="7.10.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="7.11.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
