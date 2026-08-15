@@ -82,6 +82,21 @@
   .trend-legend span{display:flex;align-items:center;gap:5px}
   .trend-dot{width:10px;height:10px;border-radius:2px;flex-shrink:0}
 
+  /* Changes chart (stacked) */
+  .changes-chart{display:flex;align-items:flex-end;gap:3px;height:72px;border-bottom:1px solid var(--border);margin-bottom:4px;overflow:hidden}
+  .changes-col{display:flex;flex-direction:column;justify-content:flex-end;flex:1;min-width:0;height:100%;cursor:default}
+  .changes-stack{display:flex;flex-direction:column;gap:2px;width:100%}
+  .changes-seg{width:100%;border-radius:1px}
+  .changes-seg-removed{background:var(--red)}
+  .changes-seg-modified{background:var(--amber)}
+  .changes-seg-added{background:var(--green)}
+  .changes-col:hover .changes-seg{filter:brightness(1.15)}
+  .changes-labels{display:flex;gap:3px;overflow:hidden}
+  .changes-label{flex:1;min-width:0;font-size:8px;color:var(--text-mute);text-align:center;overflow:hidden;white-space:nowrap}
+  .changes-legend{display:flex;gap:16px;margin-top:10px;font-size:10px;color:var(--text-dim);flex-wrap:wrap}
+  .changes-legend span{display:flex;align-items:center;gap:5px}
+  .changes-dot{width:10px;height:10px;border-radius:2px;flex-shrink:0}
+
   /* Dedup numbers */
   .dedup-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:1px;border:1px solid var(--border);background:var(--border);margin-bottom:28px}
   .dedup-num{background:var(--bg2);padding:16px 20px}
@@ -232,6 +247,15 @@
     <div class="loading">Carregando</div>
   </div>
 
+  <!-- 4b. Alterações por dia -->
+  <div class="section-head" style="margin-bottom:10px">
+    <div class="section-title">Alterações por dia — últimos 30 dias</div>
+    <span class="section-sub">arquivos adicionados, modificados e removidos por dia</span>
+  </div>
+  <div id="changesSection" style="margin-bottom:28px">
+    <div class="loading">Carregando</div>
+  </div>
+
   <!-- 4. Top Backups -->
   <div class="section-head" style="margin-bottom:10px">
     <div class="section-title">Top Backups por Tamanho</div>
@@ -363,6 +387,7 @@
     renderStorage(data);
     renderReclaimableByLabel(data.reclaimable_by_label || []);
     renderTrend(data.trend_days);
+    renderChanges(data.changes_days);
     renderTopBackups(data.top_backups);
     renderDedup(data);
     renderMaintenance(data);
@@ -501,6 +526,48 @@
         <div class="trend-legend">
           <span><div class="trend-dot" style="background:var(--amber-dim)"></div>Versões (máx ${maxV})</span>
           <span><div class="trend-dot" style="background:color-mix(in srgb,var(--blue) 40%,transparent)"></div>Volume de dados (máx ${esc(fmtSize(maxS))})</span>
+        </div>
+      </div>`;
+  }
+
+  function renderChanges(days) {
+    const el = document.getElementById('changesSection');
+    if (!days || !days.length) {
+      el.innerHTML = '<div class="empty-state">Sem dados de alterações nos últimos 30 dias</div>';
+      return;
+    }
+    const totals = days.map(d => d.added + d.modified + d.removed);
+    const maxTotal = Math.max(...totals, 1);
+
+    const SEGMENTS = [
+      ['removed',  'changes-seg-removed'],
+      ['modified', 'changes-seg-modified'],
+      ['added',    'changes-seg-added'],
+    ];
+
+    const cols = days.map((d, i) => {
+      const total = totals[i];
+      const heightPct = total > 0 ? Math.max(2, Math.round(total / maxTotal * 100)) : 0;
+      const segs = SEGMENTS
+        .filter(([key]) => d[key] > 0)
+        .map(([key, cls]) => `<div class="changes-seg ${cls}" style="flex:${d[key]} 0 0"></div>`)
+        .join('');
+      const tooltip = `${d.date}\n+${d.added} adicionados\n~${d.modified} modificados\n-${d.removed} removidos`;
+      return `<div class="changes-col" title="${esc(tooltip)}">
+        <div class="changes-stack" style="height:${heightPct}%">${segs}</div>
+      </div>`;
+    }).join('');
+
+    const labelRow = days.map(d => `<div class="changes-label">${esc(d.date.slice(8))}</div>`).join('');
+
+    el.innerHTML = `
+      <div class="trend-wrap">
+        <div class="changes-chart">${cols}</div>
+        <div class="changes-labels">${labelRow}</div>
+        <div class="changes-legend">
+          <span><div class="changes-dot" style="background:var(--green)"></div>Adicionados</span>
+          <span><div class="changes-dot" style="background:var(--amber)"></div>Modificados</span>
+          <span><div class="changes-dot" style="background:var(--red)"></div>Removidos</span>
         </div>
       </div>`;
   }

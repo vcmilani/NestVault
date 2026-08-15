@@ -752,6 +752,12 @@ class TrendDay(BaseModel):
     version_count: int
     total_size_bytes: int
 
+class ChangeDay(BaseModel):
+    date: str
+    added: int
+    modified: int
+    removed: int
+
 class TopBackupEntry(BaseModel):
     label: str
     client_name: Optional[str]
@@ -796,6 +802,7 @@ class StatsResponse(BaseModel):
     total_file_refs: int
     space_saved_bytes: int
     trend_days: list[TrendDay]
+    changes_days: list[ChangeDay]
     top_backups: list[TopBackupEntry]
     maintenance_by_type: list[MaintenanceTypeStat]
     last_maintenance_jobs: list[MaintenanceJobInfo]
@@ -1584,6 +1591,64 @@ def _build_stats_data(db: Session) -> StatsResponse:
     trend_days = [TrendDay(date=r.day, version_count=r.n, total_size_bytes=size_by_day.get(r.day, 0))
                   for r in trend_counts]
 
+    # --- Q5b: alterações por dia (adicionados/modificados/removidos, últimos 30 dias) ---
+    from collections import defaultdict
+    changes_versions = (
+        db.query(BackupVersion.id, BackupVersion.backup_label, BackupVersion.version_key, BackupVersion.created_at)
+        .filter(BackupVersion.status == "done", BackupVersion.created_at >= cutoff)
+        .all()
+    )
+
+    changes_days: list[ChangeDay] = []
+    if changes_versions:
+        changes_labels = {r.backup_label for r in changes_versions}
+        all_done_rows = (
+            db.query(BackupVersion.id, BackupVersion.backup_label, BackupVersion.version_key)
+            .filter(BackupVersion.backup_label.in_(changes_labels), BackupVersion.status == "done")
+            .order_by(BackupVersion.backup_label, BackupVersion.version_key)
+            .all()
+        )
+        by_label: dict[str, list] = defaultdict(list)
+        for row in all_done_rows:
+            by_label[row.backup_label].append(row)
+
+        prev_id_map: dict[int, Optional[int]] = {}
+        for v in changes_versions:
+            rows = by_label.get(v.backup_label, [])
+            idx = next((i for i, r in enumerate(rows) if r.id == v.id), None)
+            prev_id_map[v.id] = rows[idx - 1].id if idx is not None and idx > 0 else None
+
+        all_diff_ids = {v.id for v in changes_versions} | {pid for pid in prev_id_map.values() if pid}
+        files_by_vid: dict[int, dict[str, str]] = {}
+        for row in (
+            db.query(VersionFile.version_id, VersionFile.original_path, VersionFile.sha256)
+            .filter(VersionFile.version_id.in_(all_diff_ids))
+            .all()
+        ):
+            files_by_vid.setdefault(row.version_id, {})[row.original_path] = row.sha256
+
+        totals_by_day: dict[str, dict[str, int]] = defaultdict(lambda: {"added": 0, "modified": 0, "removed": 0})
+        for v in changes_versions:
+            cur = files_by_vid.get(v.id, {})
+            prev_id = prev_id_map.get(v.id)
+            if prev_id is None:
+                diff = {"added": len(cur), "modified": 0, "removed": 0}
+            else:
+                prv = files_by_vid.get(prev_id, {})
+                diff = {
+                    "added":    sum(1 for p in cur if p not in prv),
+                    "modified": sum(1 for p, h in cur.items() if p in prv and prv[p] != h),
+                    "removed":  sum(1 for p in prv if p not in cur),
+                }
+            day = v.created_at.strftime("%Y-%m-%d")
+            for k in ("added", "modified", "removed"):
+                totals_by_day[day][k] += diff[k]
+
+        changes_days = [
+            ChangeDay(date=day, **totals)
+            for day, totals in sorted(totals_by_day.items())
+        ]
+
     # --- Q6: top 10 backups por tamanho da versão mais recente ---
     label_stats = db.query(
         BackupVersion.backup_label.label("label"),
@@ -1787,6 +1852,7 @@ def _build_stats_data(db: Session) -> StatsResponse:
         total_file_refs=total_refs,
         space_saved_bytes=space_saved,
         trend_days=trend_days,
+        changes_days=changes_days,
         top_backups=top_backups,
         maintenance_by_type=maintenance_by_type,
         last_maintenance_jobs=last_maintenance_jobs,
