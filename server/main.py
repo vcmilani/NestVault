@@ -1592,6 +1592,10 @@ def _build_stats_data(db: Session) -> StatsResponse:
                   for r in trend_counts]
 
     # --- Q5b: alterações por dia (adicionados/modificados/removidos, últimos 30 dias) ---
+    # Uma versão por vez: carrega só os arquivos dela e da predecessora e descarta em
+    # seguida (mesmo padrão de daily_digest.py::_version_diff). Evita materializar o
+    # VersionFile de todos os labels/dias de uma vez em memória — isso já causou OOM
+    # em deploys com pouca RAM (Raspberry Pi/NAS).
     from collections import defaultdict
     changes_versions = (
         db.query(BackupVersion.id, BackupVersion.backup_label, BackupVersion.version_key, BackupVersion.created_at)
@@ -1599,55 +1603,47 @@ def _build_stats_data(db: Session) -> StatsResponse:
         .all()
     )
 
-    changes_days: list[ChangeDay] = []
-    if changes_versions:
-        changes_labels = {r.backup_label for r in changes_versions}
-        all_done_rows = (
-            db.query(BackupVersion.id, BackupVersion.backup_label, BackupVersion.version_key)
-            .filter(BackupVersion.backup_label.in_(changes_labels), BackupVersion.status == "done")
-            .order_by(BackupVersion.backup_label, BackupVersion.version_key)
+    totals_by_day: dict[str, dict[str, int]] = defaultdict(lambda: {"added": 0, "modified": 0, "removed": 0})
+    for v in changes_versions:
+        prev_row = (
+            db.query(BackupVersion.id)
+            .filter(
+                BackupVersion.backup_label == v.backup_label,
+                BackupVersion.version_key < v.version_key,
+                BackupVersion.status == "done",
+            )
+            .order_by(BackupVersion.version_key.desc())
+            .first()
+        )
+        prev_id = prev_row.id if prev_row else None
+
+        cur = dict(
+            db.query(VersionFile.original_path, VersionFile.sha256)
+            .filter(VersionFile.version_id == v.id)
             .all()
         )
-        by_label: dict[str, list] = defaultdict(list)
-        for row in all_done_rows:
-            by_label[row.backup_label].append(row)
+        if prev_id is None:
+            diff = {"added": len(cur), "modified": 0, "removed": 0}
+        else:
+            prv = dict(
+                db.query(VersionFile.original_path, VersionFile.sha256)
+                .filter(VersionFile.version_id == prev_id)
+                .all()
+            )
+            diff = {
+                "added":    sum(1 for p in cur if p not in prv),
+                "modified": sum(1 for p, h in cur.items() if p in prv and prv[p] != h),
+                "removed":  sum(1 for p in prv if p not in cur),
+            }
 
-        prev_id_map: dict[int, Optional[int]] = {}
-        for v in changes_versions:
-            rows = by_label.get(v.backup_label, [])
-            idx = next((i for i, r in enumerate(rows) if r.id == v.id), None)
-            prev_id_map[v.id] = rows[idx - 1].id if idx is not None and idx > 0 else None
+        day = v.created_at.strftime("%Y-%m-%d")
+        for k in ("added", "modified", "removed"):
+            totals_by_day[day][k] += diff[k]
 
-        all_diff_ids = {v.id for v in changes_versions} | {pid for pid in prev_id_map.values() if pid}
-        files_by_vid: dict[int, dict[str, str]] = {}
-        for row in (
-            db.query(VersionFile.version_id, VersionFile.original_path, VersionFile.sha256)
-            .filter(VersionFile.version_id.in_(all_diff_ids))
-            .all()
-        ):
-            files_by_vid.setdefault(row.version_id, {})[row.original_path] = row.sha256
-
-        totals_by_day: dict[str, dict[str, int]] = defaultdict(lambda: {"added": 0, "modified": 0, "removed": 0})
-        for v in changes_versions:
-            cur = files_by_vid.get(v.id, {})
-            prev_id = prev_id_map.get(v.id)
-            if prev_id is None:
-                diff = {"added": len(cur), "modified": 0, "removed": 0}
-            else:
-                prv = files_by_vid.get(prev_id, {})
-                diff = {
-                    "added":    sum(1 for p in cur if p not in prv),
-                    "modified": sum(1 for p, h in cur.items() if p in prv and prv[p] != h),
-                    "removed":  sum(1 for p in prv if p not in cur),
-                }
-            day = v.created_at.strftime("%Y-%m-%d")
-            for k in ("added", "modified", "removed"):
-                totals_by_day[day][k] += diff[k]
-
-        changes_days = [
-            ChangeDay(date=day, **totals)
-            for day, totals in sorted(totals_by_day.items())
-        ]
+    changes_days = [
+        ChangeDay(date=day, **totals)
+        for day, totals in sorted(totals_by_day.items())
+    ]
 
     # --- Q6: top 10 backups por tamanho da versão mais recente ---
     label_stats = db.query(
