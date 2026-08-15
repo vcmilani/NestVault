@@ -36,9 +36,9 @@
   .storage-wrap{border:1px solid var(--border);background:var(--bg2);padding:20px;margin-bottom:12px}
   .storage-bar-header{display:flex;justify-content:space-between;font-size:10px;color:var(--text-dim);margin-bottom:8px}
   .storage-bar-track{height:10px;background:var(--bg3);border:1px solid var(--border);display:flex;overflow:hidden}
-  .storage-seg-used{height:100%;background:var(--chart-1);transition:width .5s ease}
-  .storage-seg-reclaimable{height:100%;background:var(--chart-2);transition:width .5s ease}
-  .storage-seg-free{height:100%;background:var(--chart-3);flex:1;transition:width .5s ease}
+  .storage-seg-used{height:100%;background:var(--chart-1,#3987e5);transition:width .5s ease}
+  .storage-seg-reclaimable{height:100%;background:var(--chart-2,#d95926);transition:width .5s ease}
+  .storage-seg-free{height:100%;background:var(--chart-3,#199e70);flex:1;transition:width .5s ease}
   .storage-legend{display:flex;gap:16px;margin-top:8px;font-size:10px;color:var(--text-dim);flex-wrap:wrap}
   .legend-item{display:flex;align-items:center;gap:5px}
   .legend-dot{width:8px;height:8px;border-radius:2px;flex-shrink:0}
@@ -46,9 +46,9 @@
   .snum{background:var(--bg3);padding:12px 16px}
   .snum-label{font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim);margin-bottom:5px}
   .snum-value{font-size:17px;font-weight:300;letter-spacing:-.02em}
-  .snum-value.amber{color:var(--chart-2)}
-  .snum-value.blue{color:var(--chart-1)}
-  .snum-value.green{color:var(--chart-3)}
+  .snum-value.amber{color:var(--chart-2,#d95926)}
+  .snum-value.blue{color:var(--chart-1,#3987e5)}
+  .snum-value.green{color:var(--chart-3,#199e70)}
   .snum-value.dim{color:var(--text-dim)}
   .snum-sub{font-size:10px;color:var(--text-mute);margin-top:4px}
 
@@ -72,8 +72,8 @@
   .trend-wrap{border:1px solid var(--border);background:var(--bg2);padding:16px 20px;margin-bottom:28px}
   .trend-chart{display:flex;align-items:flex-end;gap:3px;height:72px;border-bottom:1px solid var(--border);margin-bottom:4px;overflow:hidden}
   .trend-col{display:flex;flex-direction:column;align-items:stretch;justify-content:flex-end;flex:1;min-width:0;gap:1px;height:100%;cursor:default}
-  .trend-bar-s{background:var(--chart-1);transition:height .4s}
-  .trend-bar-v{background:var(--chart-2);transition:height .4s}
+  .trend-bar-s{background:var(--chart-1,#3987e5);transition:height .4s}
+  .trend-bar-v{background:var(--chart-2,#d95926);transition:height .4s}
   .trend-col:hover .trend-bar-s,.trend-col:hover .trend-bar-v{filter:brightness(1.15)}
   .trend-labels{display:flex;gap:3px;overflow:hidden}
   .trend-label{flex:1;min-width:0;font-size:8px;color:var(--text-mute);text-align:center;overflow:hidden;white-space:nowrap}
@@ -86,9 +86,9 @@
   .changes-col{display:flex;flex-direction:column;justify-content:flex-end;flex:1;min-width:0;height:100%;cursor:default}
   .changes-stack{display:flex;flex-direction:column;gap:2px;width:100%}
   .changes-seg{width:100%;border-radius:1px}
-  .changes-seg-removed{background:var(--chart-3)}
-  .changes-seg-modified{background:var(--chart-2)}
-  .changes-seg-added{background:var(--chart-1)}
+  .changes-seg-removed{background:var(--chart-3,#199e70)}
+  .changes-seg-modified{background:var(--chart-2,#d95926)}
+  .changes-seg-added{background:var(--chart-1,#3987e5)}
   .changes-col:hover .changes-seg{filter:brightness(1.15)}
   .changes-labels{display:flex;gap:3px;overflow:hidden}
   .changes-label{flex:1;min-width:0;font-size:8px;color:var(--text-mute);text-align:center;overflow:hidden;white-space:nowrap}
@@ -470,9 +470,9 @@
           <div class="storage-seg-free"></div>
         </div>
         <div class="storage-legend">
-          <div class="legend-item"><div class="legend-dot" style="background:var(--chart-1)"></div>Usado</div>
-          <div class="legend-item"><div class="legend-dot" style="background:var(--chart-2)"></div>Liberável</div>
-          <div class="legend-item"><div class="legend-dot" style="background:var(--chart-3)"></div>Livre</div>
+          <div class="legend-item"><div class="legend-dot" style="background:var(--chart-1,#3987e5)"></div>Usado</div>
+          <div class="legend-item"><div class="legend-dot" style="background:var(--chart-2,#d95926)"></div>Liberável</div>
+          <div class="legend-item"><div class="legend-dot" style="background:var(--chart-3,#199e70)"></div>Livre</div>
         </div>
         <div class="storage-nums">
           <div class="snum"><div class="snum-label">Total</div><div class="snum-value dim">${esc(fmtSize(total))}</div></div>
@@ -523,8 +523,8 @@
         <div class="trend-chart">${cols}</div>
         <div class="trend-labels">${labelRow}</div>
         <div class="trend-legend">
-          <span><div class="trend-dot" style="background:var(--chart-2)"></div>Versões (máx ${maxV})</span>
-          <span><div class="trend-dot" style="background:var(--chart-1)"></div>Volume de dados (máx ${esc(fmtSize(maxS))})</span>
+          <span><div class="trend-dot" style="background:var(--chart-2,#d95926)"></div>Versões (máx ${maxV})</span>
+          <span><div class="trend-dot" style="background:var(--chart-1,#3987e5)"></div>Volume de dados (máx ${esc(fmtSize(maxS))})</span>
         </div>
       </div>`;
   }
@@ -564,9 +564,9 @@
         <div class="changes-chart">${cols}</div>
         <div class="changes-labels">${labelRow}</div>
         <div class="changes-legend">
-          <span><div class="changes-dot" style="background:var(--chart-1)"></div>Adicionados</span>
-          <span><div class="changes-dot" style="background:var(--chart-2)"></div>Modificados</span>
-          <span><div class="changes-dot" style="background:var(--chart-3)"></div>Removidos</span>
+          <span><div class="changes-dot" style="background:var(--chart-1,#3987e5)"></div>Adicionados</span>
+          <span><div class="changes-dot" style="background:var(--chart-2,#d95926)"></div>Modificados</span>
+          <span><div class="changes-dot" style="background:var(--chart-3,#199e70)"></div>Removidos</span>
         </div>
       </div>`;
   }
