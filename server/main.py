@@ -103,8 +103,8 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from urllib.parse import quote
 
-from sqlalchemy import func, select, insert, literal, case, delete, exists
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select, insert, literal, case, delete, exists, and_
+from sqlalchemy.orm import Session, aliased
 from sqlalchemy.exc import IntegrityError
 
 from database import (
@@ -196,18 +196,26 @@ def _get_reclaimable_bytes(db: Session) -> int:
         )
     ]
     if keeper_ids:
+        # "liberável" = tudo que está no store menos o que as versões keeper ainda usam.
+        # Calculado como total - retido, em vez de um LEFT JOIN de file_contents inteiro
+        # contra o subquery de shas retidos: aquele formato levava o SQLite a comparar
+        # cada linha de file_contents contra todo o subquery (minutos de CPU travando o
+        # servidor). Aqui a varredura parte do conjunto pequeno (shas retidos) e entra em
+        # file_contents pela primary key.
         kept_sq = (
             db.query(VersionFile.sha256.label("sha256"))
             .filter(VersionFile.version_id.in_(keeper_ids))
             .distinct()
             .subquery()
         )
-        result = (
+        total_bytes = db.query(func.coalesce(func.sum(FileContent.size), 0)).scalar() or 0
+        kept_bytes = (
             db.query(func.coalesce(func.sum(FileContent.size), 0))
-            .outerjoin(kept_sq, FileContent.sha256 == kept_sq.c.sha256)
-            .filter(kept_sq.c.sha256.is_(None))
+            .select_from(kept_sq)
+            .join(FileContent, FileContent.sha256 == kept_sq.c.sha256)
             .scalar()
         ) or 0
+        result = max(0, int(total_bytes) - int(kept_bytes))
     else:
         result = db.query(func.coalesce(func.sum(FileContent.size), 0)).scalar() or 0
     _reclaimable_cache.update({"value": int(result), "ts": now})
@@ -418,6 +426,9 @@ async def lifespan(_: FastAPI):
     sched.schedule_daily_digest()
     sched.schedule_nightly_cleanup()
     sched.schedule_db_backup()
+    # Aquece o cache de stats fora do request, para que o primeiro acesso à página
+    # depois do boot já encontre os dados prontos.
+    _refresh_stats_async()
     log.info(f"Servidor iniciado — {len(STORAGE_VOLUMES)} volume(s): {[str(v) for v in STORAGE_VOLUMES]}")
     if storage.SSD_CACHE_ENABLED and storage.SSD_CACHE_DIR:
         log.info(f"SSD cache: habilitado — {storage.SSD_CACHE_DIR} (max {storage.SSD_CACHE_MAX_GB} GB)")
@@ -1592,58 +1603,84 @@ def _build_stats_data(db: Session) -> StatsResponse:
                   for r in trend_counts]
 
     # --- Q5b: alterações por dia (adicionados/modificados/removidos, últimos 30 dias) ---
-    # Uma versão por vez: carrega só os arquivos dela e da predecessora e descarta em
-    # seguida (mesmo padrão de daily_digest.py::_version_diff). Evita materializar o
-    # VersionFile de todos os labels/dias de uma vez em memória — isso já causou OOM
-    # em deploys com pouca RAM (Raspberry Pi/NAS).
+    # Agregado inteiramente no banco, em 3 queries de contagem — nenhuma linha de
+    # version_files chega ao Python. Comparar os arquivos em Python (versão a versão)
+    # custava minutos e travava o servidor num Raspberry Pi; materializar tudo de uma
+    # vez num dict estourava a RAM. As contagens saem destas identidades, com
+    # same_path = arquivos presentes nas duas versões e same_both = presentes e com
+    # o mesmo sha256:
+    #     added    = total_atual    - same_path
+    #     removed  = total_anterior - same_path
+    #     modified = same_path      - same_both
     from collections import defaultdict
-    changes_versions = (
-        db.query(BackupVersion.id, BackupVersion.backup_label, BackupVersion.version_key, BackupVersion.created_at)
-        .filter(BackupVersion.status == "done", BackupVersion.created_at >= cutoff)
-        .all()
-    )
 
-    totals_by_day: dict[str, dict[str, int]] = defaultdict(lambda: {"added": 0, "modified": 0, "removed": 0})
-    for v in changes_versions:
-        prev_row = (
-            db.query(BackupVersion.id)
-            .filter(
-                BackupVersion.backup_label == v.backup_label,
-                BackupVersion.version_key < v.version_key,
-                BackupVersion.status == "done",
-            )
-            .order_by(BackupVersion.version_key.desc())
-            .first()
+    # Predecessora de cada versão done do mesmo label (LAG exige SQLite >= 3.25).
+    _vseq = (
+        db.query(
+            BackupVersion.id.label("vid"),
+            BackupVersion.created_at.label("ts"),
+            func.lag(BackupVersion.id).over(
+                partition_by=BackupVersion.backup_label,
+                order_by=BackupVersion.version_key,
+            ).label("prev_id"),
         )
-        prev_id = prev_row.id if prev_row else None
+        .filter(BackupVersion.status == "done")
+        .subquery()
+    )
+    _win = db.query(_vseq).filter(_vseq.c.ts >= cutoff).subquery()
 
-        cur = dict(
-            db.query(VersionFile.original_path, VersionFile.sha256)
-            .filter(VersionFile.version_id == v.id)
+    window_rows = db.query(_win.c.vid, _win.c.ts, _win.c.prev_id).all()
+
+    changes_days: list[ChangeDay] = []
+    if window_rows:
+        # Contagem de arquivos por versão (das versões da janela e de suas predecessoras).
+        _ids = {r.vid for r in window_rows} | {r.prev_id for r in window_rows if r.prev_id}
+        total_by_vid = {
+            r.version_id: int(r.n)
+            for r in db.query(VersionFile.version_id, func.count().label("n"))
+            .filter(VersionFile.version_id.in_(_ids))
+            .group_by(VersionFile.version_id)
+            .all()
+        }
+
+        # Interseção por caminho entre cada versão e sua predecessora, num único
+        # join (coberto pelo índice único uq_version_path).
+        _cf, _pf = aliased(VersionFile), aliased(VersionFile)
+        match_rows = (
+            db.query(
+                _win.c.vid.label("vid"),
+                func.count().label("same_path"),
+                func.coalesce(func.sum(case((_cf.sha256 == _pf.sha256, 1), else_=0)), 0).label("same_both"),
+            )
+            .select_from(_win)
+            .join(_cf, _cf.version_id == _win.c.vid)
+            .join(_pf, and_(_pf.version_id == _win.c.prev_id,
+                            _pf.original_path == _cf.original_path))
+            .group_by(_win.c.vid)
             .all()
         )
-        if prev_id is None:
-            diff = {"added": len(cur), "modified": 0, "removed": 0}
-        else:
-            prv = dict(
-                db.query(VersionFile.original_path, VersionFile.sha256)
-                .filter(VersionFile.version_id == prev_id)
-                .all()
-            )
-            diff = {
-                "added":    sum(1 for p in cur if p not in prv),
-                "modified": sum(1 for p, h in cur.items() if p in prv and prv[p] != h),
-                "removed":  sum(1 for p in prv if p not in cur),
-            }
+        match_by_vid = {r.vid: (int(r.same_path), int(r.same_both)) for r in match_rows}
 
-        day = v.created_at.strftime("%Y-%m-%d")
-        for k in ("added", "modified", "removed"):
-            totals_by_day[day][k] += diff[k]
+        totals_by_day: dict[str, dict[str, int]] = defaultdict(lambda: {"added": 0, "modified": 0, "removed": 0})
+        for r in window_rows:
+            cur_total = total_by_vid.get(r.vid, 0)
+            if r.prev_id is None:
+                diff = {"added": cur_total, "modified": 0, "removed": 0}
+            else:
+                same_path, same_both = match_by_vid.get(r.vid, (0, 0))
+                diff = {
+                    "added":    cur_total - same_path,
+                    "removed":  total_by_vid.get(r.prev_id, 0) - same_path,
+                    "modified": same_path - same_both,
+                }
+            day = r.ts.strftime("%Y-%m-%d")
+            for k in ("added", "modified", "removed"):
+                totals_by_day[day][k] += diff[k]
 
-    changes_days = [
-        ChangeDay(date=day, **totals)
-        for day, totals in sorted(totals_by_day.items())
-    ]
+        changes_days = [
+            ChangeDay(date=day, **totals)
+            for day, totals in sorted(totals_by_day.items())
+        ]
 
     # --- Q6: top 10 backups por tamanho da versão mais recente ---
     label_stats = db.query(
@@ -1777,23 +1814,22 @@ def _build_stats_data(db: Session) -> StatsResponse:
     # inflar pelo mesmo arquivo aparecendo em múltiplas versões antigas.
     reclaimable_by_label: list[ReclaimableLabelEntry] = []
     if latest_ids:
-        keeper_sq = (
-            db.query(VersionFile.sha256.label("sha256"))
-            .filter(VersionFile.version_id.in_(latest_ids))
-            .distinct()
-            .subquery()
-        )
+        # O "não está em nenhuma keeper" usa NOT EXISTS (coberto por idx_sha256) em vez
+        # de LEFT JOIN + IS NULL: no formato anterior o SQLite comparava cada linha de
+        # version_files contra todo o subquery de keepers, e a query não terminava em
+        # tempo útil nos volumes reais.
+        _kf = aliased(VersionFile)
         old_exclusive_sq = (
             db.query(
                 BackupVersion.backup_label.label("label"),
                 VersionFile.sha256.label("sha256"),
             )
             .join(VersionFile, VersionFile.version_id == BackupVersion.id)
-            .outerjoin(keeper_sq, VersionFile.sha256 == keeper_sq.c.sha256)
             .filter(
                 BackupVersion.status == "done",
                 BackupVersion.id.notin_(latest_ids),
-                keeper_sq.c.sha256.is_(None),
+                ~exists().where(and_(_kf.sha256 == VersionFile.sha256,
+                                     _kf.version_id.in_(latest_ids))),
             )
             .distinct()
             .subquery()
@@ -1863,12 +1899,41 @@ def _build_stats_data(db: Session) -> StatsResponse:
     )
 
 
+_stats_refresh_lock = threading.Lock()
+
+
+def _refresh_stats_async() -> None:
+    """Recalcula as stats fora do request, no máximo uma atualização por vez."""
+    if not _stats_refresh_lock.acquire(blocking=False):
+        return  # já há um recálculo em andamento
+    def _work():
+        try:
+            db = SessionLocal()
+            try:
+                data = _build_stats_data(db)
+                _stats_cache.update({"data": data, "ts": time.monotonic()})
+                log.debug("[stats] cache atualizado em background")
+            finally:
+                db.close()
+        except Exception:
+            log.exception("[stats] falha ao atualizar cache em background")
+        finally:
+            _stats_refresh_lock.release()
+    threading.Thread(target=_work, name="stats-refresh", daemon=True).start()
+
+
 @app.get("/api/stats", response_model=StatsResponse, dependencies=[Depends(require_admin)])
 def get_stats(db: Session = Depends(get_db)):
     data = _stats_cache["data"]
-    if data is None or time.monotonic() - _stats_cache["ts"] > _STATS_TTL:
+    if data is None:
+        # Cold start: só a primeira chamada depois do boot calcula inline.
         data = _build_stats_data(db)
         _stats_cache.update({"data": data, "ts": time.monotonic()})
+    elif time.monotonic() - _stats_cache["ts"] > _STATS_TTL:
+        # Cache vencido: devolve o valor atual e recalcula em background. Antes o
+        # request que encontrava o cache vencido pagava a agregação inteira, o que
+        # deixava a página lenta e competia por CPU com o resto do servidor.
+        _refresh_stats_async()
     return data
 
 
