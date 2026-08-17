@@ -2571,10 +2571,11 @@ def rename_backup(label: str, req: BackupRename, db: Session = Depends(get_db),
         raise HTTPException(status_code=422, detail="Novo label idêntico ao atual")
     if db.query(BackupID).filter(BackupID.label == new).first():
         raise HTTPException(status_code=409, detail=f"Label '{new}' já existe")
+    b.label = new
+    db.flush()
     db.query(BackupVersion).filter(BackupVersion.backup_label == label).update(
         {"backup_label": new}, synchronize_session=False
     )
-    b.label = new
     db.commit()
     db.refresh(b)
     log.info(f"[rename] Label [{label}] → [{new}]")
