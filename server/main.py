@@ -2588,14 +2588,29 @@ def rename_backup(label: str, req: BackupRename, db: Session = Depends(get_db),
         raise HTTPException(status_code=422, detail="Novo label idêntico ao atual")
     if db.query(BackupID).filter(BackupID.label == new).first():
         raise HTTPException(status_code=409, detail=f"Label '{new}' já existe")
+    # A FK backup_versions.backup_label → backup_ids.label não é deferrable,
+    # então não dá pra atualizar o label da linha pai enquanto ela ainda tem
+    # filhos apontando pro valor antigo (nem trocar os filhos antes do pai
+    # existir com o novo label). Estratégia: cria um BackupID novo com o
+    # label novo, reaponta as versões pra ele, apaga o antigo.
+    new_b = BackupID(
+        label=new,
+        client_name=b.client_name,
+        prefix=b.prefix,
+        created_at=b.created_at,
+        status=b.status,
+        owner_user_id=b.owner_user_id,
+    )
+    db.add(new_b)
+    db.flush()
     db.query(BackupVersion).filter(BackupVersion.backup_label == label).update(
         {"backup_label": new}, synchronize_session=False
     )
-    b.label = new
+    db.delete(b)
     db.commit()
-    db.refresh(b)
+    db.refresh(new_b)
     log.info(f"[rename] Label [{label}] → [{new}]")
-    return _backup_info(b, db)
+    return _backup_info(new_b, db)
 
 
 @app.get("/backups/{label}/disks", response_model=list[BackupDiskEntry])
