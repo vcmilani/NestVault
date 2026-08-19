@@ -1,5 +1,5 @@
 """
-NestVault  v7.11.0
+NestVault  v7.12.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -7,6 +7,23 @@ Otimizacoes de performance:
 - Indices no banco + WAL mode
 - Cleanup de orfaos em uma unica query
 - Limpeza de arquivos ao deletar label/versao feita em background (nao bloqueia o cliente)
+
+v7.12.0:
+- Novo grafico "Alteracoes por dia" na pagina de stats: arquivos
+  adicionados/modificados/removidos por dia nos ultimos 30 dias, exposto
+  em `changes_days` no GET /api/stats
+- Paleta dos graficos de stats trocada por um trio azul/laranja/agua
+  validado contra simulacao de daltonismo (protan/deutan/tritan), no
+  lugar do verde x vermelho — novas vars --chart-1/2/3 em theme.css
+- Stats saem do caminho do request: o cache vencido e servido na hora e
+  recalculado numa thread de background (uma por vez), com aquecimento
+  no boot. Antes, a cada 5 min um request pagava a agregacao inteira
+- Anti-joins de espaco liberavel (_get_reclaimable_bytes e
+  reclaimable_by_label) reescritos como total-retido e NOT EXISTS: o
+  formato anterior (LEFT JOIN + IS NULL) fazia o SQLite comparar cada
+  linha contra todo o subquery e nao terminava em tempo util
+- sw.js: cache versionado para v2 — assets de /static/ sao cache-first e
+  sem o bump o navegador mistura HTML novo com CSS antigo
 
 v7.11.0:
 - Sem mudancas de API — versao bump para acompanhar o cliente Python
@@ -444,7 +461,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="7.11.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="7.12.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
