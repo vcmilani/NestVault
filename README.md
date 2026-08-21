@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v7.12.0`
+# 🗄️ NestVault  `v7.13.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **backup por usuário** — cada conta só cria, lista e restaura seus próprios backups.
 
@@ -6,6 +6,8 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v7.13.0** — limpeza noturna passa a podar versões `done` com conteúdo idêntico à versão anterior do mesmo label (mesmo conjunto de `original_path`+`sha256`), consequência direta do **Smart Skip** do cliente Python criar uma versão `done` a cada execução mesmo quando nada mudou — herdando tudo via `/absorb`. A poda roda depois da política de retenção temporal, mantém a primeira versão de cada bloco de conteúdo igual (onde a mudança de fato apareceu) e sempre a última versão `done` do label, mesmo que idêntica, já que restore, `/files` e a validação de integridade dependem dela; contabilizada como "sem alteração" no resumo do job de manutenção.
+>
 > **v7.12.0** — novo gráfico **Alterações por dia** na página de Estatísticas: barras empilhadas com os arquivos adicionados, modificados e removidos por dia nos últimos 30 dias, expostos em `changes_days` no `GET /api/stats` (mesmo conceito de "alterações" já usado no resumo diário do Telegram). A **paleta dos gráficos de stats** passa a usar um trio azul/laranja/água validado contra simulação de daltonismo (protanopia/deuteranopia/tritanopia) no lugar do par verde × vermelho, via novas variáveis `--chart-1/2/3` em `theme.css`. **Performance da página de stats**: a agregação sai do caminho do request — o cache vencido é servido na hora e recalculado numa thread de background (uma por vez), com aquecimento no boot; antes, a cada 5 minutos um request pagava a agregação inteira e prendia uma CPU. Os anti-joins de espaço liberável (`_get_reclaimable_bytes` e `reclaimable_by_label`) foram reescritos como `total - retido` e `NOT EXISTS`: o formato anterior (`LEFT JOIN` + `IS NULL`) fazia o SQLite comparar cada linha contra todo o subquery e não terminava em tempo útil. Medido num banco de 105 versões / 525k `version_files`, `_build_stats_data` caiu de mais de 15 min para ~30s e `/api/stats` responde em ~10 ms sem afetar a latência dos outros endpoints. Por fim, o `sw.js` passa a versionar o cache (`v2`): os assets de `/static/` são cache-first, e sem o bump o navegador combinava HTML novo com CSS antigo, deixando os gráficos invisíveis.
 >
 > **v7.11.0** — pipeline de backup do cliente Python (`nestvault.py`) reescrito para sobrepor hashing, `/check/batch` e upload/registro em vez de rodar em fases estanques (hasheia tudo → checa tudo → envia tudo): hashing consome resultados incrementalmente (`ProcessPoolExecutor` + `as_completed`), chunks de `/check/batch` vão para um pool de rede dedicado em paralelo (antes era um loop sequencial), e cache hits disparam imediatamente sem esperar o hashing dos demais arquivos terminar. Novo **Smart Skip**: se um backup roda e nada mudou desde a última versão `done` (sem arquivos novos, modificados ou deletados) e ela não passou de `--full-rescan-days` dias (padrão 7), o backup inteiro vira uma única chamada `/absorb` em vez de recomputar hash/check/register de cada arquivo. Novo **cache local de hash** (`~/.cache/nestvault` no Linux, `~/Library/Caches/nestvault` no macOS, `%LOCALAPPDATA%\nestvault` no Windows) evita refazer o `GET /files` completo da versão anterior quando o `version_key` local já bate com o último "done" do servidor. Estratégias portadas do cliente macOS (`NestVaultClient`), que já usava um pipeline sobreposto equivalente. Sem mudanças na API do servidor — apenas o cliente Python muda de comportamento.
@@ -1401,6 +1403,15 @@ Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Par
 ---
 
 ## ⚡ Otimizações
+
+### v7.13.0
+
+| Componente | Mudança |
+|---|---|
+| **`server/nightly_cleanup.py` — `_version_fingerprint`** | Hash sha256 do conjunto `(original_path, sha256)` de uma versão `done`, lido com `yield_per(1000)` — identifica quando duas versões consecutivas do mesmo label têm conteúdo idêntico |
+| **`server/nightly_cleanup.py` — `_prune_unchanged_versions`** | Roda depois da retenção temporal sobre as versões sobreviventes: remove as `done` com fingerprint igual à anterior no label, mantendo a primeira de cada bloco igual e sempre a última `done` do label |
+| **`server/nightly_cleanup.py` — `run_nightly_cleanup`** | `survivors` passa a ser derivado de `keep_ids` (calculado antes de `_delete_versions`), não reacessando atributos de versões já deletadas — o `commit()` da deleção expira todos os objetos da sessão, e reler um atributo de uma instância apagada explode com `ObjectDeletedError` |
+| **`tests/test_nightly_cleanup.py`** | Novo — 10 casos cobrindo fingerprint, poda em blocos, casos sem alteração real, as faixas da retenção existente e dois testes de ponta a ponta via `run_nightly_cleanup()` (nenhum teste cobria este módulo antes) |
 
 ### v7.12.0
 

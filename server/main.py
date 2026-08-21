@@ -1,5 +1,5 @@
 """
-NestVault  v7.12.0
+NestVault  v7.13.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -7,6 +7,13 @@ Otimizacoes de performance:
 - Indices no banco + WAL mode
 - Cleanup de orfaos em uma unica query
 - Limpeza de arquivos ao deletar label/versao feita em background (nao bloqueia o cliente)
+
+v7.13.0:
+- Limpeza noturna poda versoes done com conteudo identico a versao done
+  anterior do mesmo label (mesmo conjunto original_path+sha256): mantem
+  a primeira ocorrencia de cada bloco igual e sempre a ultima versao
+  done do label, contabilizado como "sem alteracao" no resumo do
+  MaintenanceJob (server/nightly_cleanup.py)
 
 v7.12.0:
 - Novo grafico "Alteracoes por dia" na pagina de stats: arquivos
@@ -461,7 +468,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="7.12.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="7.13.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
