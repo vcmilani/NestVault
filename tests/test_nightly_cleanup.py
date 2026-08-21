@@ -238,3 +238,45 @@ def test_run_nightly_cleanup_prunes_unchanged_versions(client, monkeypatch):
         assert "sem alteração" in mj.summary
     finally:
         db.close()
+
+
+def test_run_nightly_cleanup_combines_retention_and_prune_in_same_run(client, monkeypatch):
+    """Regressão: quando a retenção já apaga alguma versão done (done_to_delete
+    não vazio) e a poda de sem-alteração roda em seguida no mesmo label, acessar
+    atributos de uma versão recém-deletada explode com ObjectDeletedError (o
+    commit() de _delete_versions expira todos os objetos da sessão)."""
+    import main as m
+    import nightly_cleanup as nc
+
+    monkeypatch.setattr(nc, "SessionLocal", m.SessionLocal)
+    monkeypatch.setattr(nc, "engine", m.SessionLocal.kw["bind"])
+
+    make_backup(client, "lbl")
+    Session = m.SessionLocal
+    db = Session()
+    try:
+        now = datetime.now()
+        # Mesmo dia calendário, 10 dias atrás: retenção mantém só a mais recente do dia.
+        v1 = _mkver(db, "lbl", "k1", now - timedelta(days=10, hours=12))
+        v2 = _mkver(db, "lbl", "k2", now - timedelta(days=10))
+        # Dia seguinte, conteúdo igual a v2: sobrevive à retenção, mas é podada por igualdade.
+        v3 = _mkver(db, "lbl", "k3", now - timedelta(days=9))
+        # Recente, conteúdo diferente: sempre mantida (última do label).
+        v4 = _mkver(db, "lbl", "k4", now - timedelta(hours=1))
+        for v in (v1, v2, v3):
+            _mkfile(db, v.id, "/a.txt", "a" * 64)
+        _mkfile(db, v4.id, "/a.txt", "b" * 64)
+    finally:
+        db.close()
+
+    run_nightly_cleanup()  # não deve levantar ObjectDeletedError
+
+    db = Session()
+    try:
+        remaining = {
+            v.version_key
+            for v in db.query(BackupVersion).filter(BackupVersion.backup_label == "lbl").all()
+        }
+        assert remaining == {"k2", "k4"}
+    finally:
+        db.close()

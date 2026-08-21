@@ -450,6 +450,10 @@ def run_nightly_cleanup() -> None:
 
             keep_ids = _versions_to_keep(done_versions, now)
             done_to_delete = [v.id for v in done_versions if v.id not in keep_ids]
+            # Capturado antes de _delete_versions() abaixo: o commit() dela expira todos os
+            # objetos da sessão, e reacessar atributos de uma instância já deletada explode
+            # com ObjectDeletedError — então survivors precisa vir do keep_ids já calculado.
+            survivors = [v for v in done_versions if v.id in keep_ids]
 
             if done_to_delete:
                 # Separar por período para contagem macro
@@ -467,7 +471,6 @@ def run_nightly_cleanup() -> None:
 
             # 3. Podar versões done sem alteração de conteúdo em relação à anterior
             # (preserva a primeira de cada bloco idêntico e sempre a última done do label)
-            survivors = [v for v in done_versions if v.id not in done_to_delete]
             unchanged_to_delete = _prune_unchanged_versions(db, survivors)
             if unchanged_to_delete:
                 _delete_versions(db, unchanged_to_delete)
