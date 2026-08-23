@@ -3,7 +3,11 @@
    APIs e páginas HTML seguem sempre pela rede (dados de backup nunca
    devem vir de cache). Servido em /sw.js (escopo raiz) via main.py. */
 
-const CACHE = 'nestvault-static-v1';
+/* IMPORTANTE: incremente a versão sempre que alterar qualquer arquivo de
+   STATIC_ASSETS. O HTML das páginas vem sempre da rede, mas estes assets são
+   cache-first — sem o bump o navegador mistura HTML novo com CSS/JS antigo
+   (ex.: uma var CSS nova fica indefinida e o elemento some da tela). */
+const CACHE = 'nestvault-static-v2';
 const STATIC_ASSETS = [
   '/static/theme.css',
   '/static/app.css',

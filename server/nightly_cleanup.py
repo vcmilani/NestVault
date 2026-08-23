@@ -1,5 +1,6 @@
 """Rotina de limpeza noturna com política de retenção progressiva de versões."""
 
+import hashlib
 import logging
 import shutil
 import time
@@ -208,6 +209,45 @@ def _versions_to_keep(done_versions: list[BackupVersion], now: datetime) -> set[
     return keep
 
 
+def _version_fingerprint(db, version_id: int) -> str:
+    """Hash do conjunto (original_path, sha256) da versão — identifica conteúdo idêntico."""
+    h = hashlib.sha256()
+    rows = (
+        db.query(VersionFile.original_path, VersionFile.sha256)
+        .filter(VersionFile.version_id == version_id)
+        .order_by(VersionFile.original_path)
+        .yield_per(1000)
+    )
+    for path, sha256 in rows:
+        h.update(f"{path}\0{sha256}\n".encode())
+    return h.hexdigest()
+
+
+def _prune_unchanged_versions(db, done_versions: list[BackupVersion]) -> list[int]:
+    """IDs de versões done idênticas à done imediatamente anterior do mesmo label.
+
+    Recebe as versões já sobreviventes da política de retenção, ordenadas por
+    created_at ascendente. Preserva a primeira versão de cada bloco de conteúdo
+    idêntico (onde a mudança apareceu) e sempre a última done do label, mesmo
+    que idêntica — restore, /files e a validação de integridade dependem dela.
+    """
+    if len(done_versions) < 2:
+        return []
+
+    ordered = sorted(done_versions, key=lambda v: (v.created_at, v.id))
+    last_id = ordered[-1].id
+
+    to_delete: list[int] = []
+    prev_fp: str | None = None
+    for v in ordered:
+        fp = _version_fingerprint(db, v.id)
+        if prev_fp is not None and fp == prev_fp and v.id != last_id:
+            to_delete.append(v.id)
+        else:
+            prev_fp = fp
+    return to_delete
+
+
 def validate_latest_versions_integrity(db, log_fn=None) -> dict:
     """Verifica se todos os arquivos das últimas versões 'done' existem no disco.
     Remove registros de arquivos ausentes e invalida versões afetadas.
@@ -364,11 +404,12 @@ def run_nightly_cleanup() -> None:
         labels = [row[0] for row in db.query(BackupID.label).all()]
         total_labels = len(labels)
 
-        total_stale   = 0
-        total_day     = 0
-        total_week    = 0
-        total_month   = 0
-        labels_touched = 0
+        total_stale     = 0
+        total_day       = 0
+        total_week      = 0
+        total_month     = 0
+        total_unchanged = 0
+        labels_touched  = 0
 
         for idx, label in enumerate(labels, 1):
             mj = db.get(MaintenanceJob, mj_id)
@@ -409,6 +450,10 @@ def run_nightly_cleanup() -> None:
 
             keep_ids = _versions_to_keep(done_versions, now)
             done_to_delete = [v.id for v in done_versions if v.id not in keep_ids]
+            # Capturado antes de _delete_versions() abaixo: o commit() dela expira todos os
+            # objetos da sessão, e reacessar atributos de uma instância já deletada explode
+            # com ObjectDeletedError — então survivors precisa vir do keep_ids já calculado.
+            survivors = [v for v in done_versions if v.id in keep_ids]
 
             if done_to_delete:
                 # Separar por período para contagem macro
@@ -424,10 +469,18 @@ def run_nightly_cleanup() -> None:
                 _delete_versions(db, done_to_delete)
                 log.debug(f"[nightly-cleanup] {label}: {len(done_to_delete)} versão(ões) done removida(s) por retenção")
 
-            if stale_to_delete or done_to_delete:
+            # 3. Podar versões done sem alteração de conteúdo em relação à anterior
+            # (preserva a primeira de cada bloco idêntico e sempre a última done do label)
+            unchanged_to_delete = _prune_unchanged_versions(db, survivors)
+            if unchanged_to_delete:
+                _delete_versions(db, unchanged_to_delete)
+                total_unchanged += len(unchanged_to_delete)
+                log.debug(f"[nightly-cleanup] {label}: {len(unchanged_to_delete)} versão(ões) sem alteração removida(s)")
+
+            if stale_to_delete or done_to_delete or unchanged_to_delete:
                 labels_touched += 1
 
-        total_removed = total_stale + total_day + total_week + total_month
+        total_removed = total_stale + total_day + total_week + total_month + total_unchanged
 
         # Limpeza de conteúdos órfãos após todas as exclusões
         mj = db.get(MaintenanceJob, mj_id)
@@ -477,6 +530,8 @@ def run_nightly_cleanup() -> None:
             removed_parts.append(f"{total_week} done por semana")
         if total_month:
             removed_parts.append(f"{total_month} done por mês")
+        if total_unchanged:
+            removed_parts.append(f"{total_unchanged} sem alteração")
 
         stale_running_note = (
             f"; {total_stale_running} running sem atividade 6h+ → incomplete"
