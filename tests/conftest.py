@@ -10,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 import database as db_mod
 import main as m
 import storage as storage_mod
+import sysmetrics
 
 ADMIN_KEY = "testkey"
 
@@ -53,6 +54,7 @@ def _reset_module_caches():
     m._historical_cache.update({"data": None, "ts": 0.0})
     m._activity_wake.clear()
     m._activity_loop_stop.clear()
+    sysmetrics.reset()
 
 
 @pytest.fixture
