@@ -1,5 +1,5 @@
 """
-NestVault  v7.13.0
+NestVault  v7.14.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -7,6 +7,14 @@ Otimizacoes de performance:
 - Indices no banco + WAL mode
 - Cleanup de orfaos em uma unica query
 - Limpeza de arquivos ao deletar label/versao feita em background (nao bloqueia o cliente)
+
+v7.14.0:
+- Novo widget de CPU e memoria do servidor na pagina de Atividade —
+  server/sysmetrics.py le /proc e /sys/class/thermal diretamente (stdlib,
+  sem depender de psutil), amostrado a cada 5s em background e exposto em
+  GET /api/activity (campo `system`). CPU trata iowait como tempo ocioso
+  (convencao do top/htop), relevante em Raspberry Pi com discos externos
+  onde um backup pesado gera iowait alto sem a CPU estar de fato ocupada
 
 v7.13.0:
 - Limpeza noturna poda versoes done com conteudo identico a versao done
@@ -473,7 +481,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="7.13.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="7.14.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
