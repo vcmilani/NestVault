@@ -1,5 +1,5 @@
 """
-NestVault  v7.13.0
+NestVault  v7.14.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -7,6 +7,14 @@ Otimizacoes de performance:
 - Indices no banco + WAL mode
 - Cleanup de orfaos em uma unica query
 - Limpeza de arquivos ao deletar label/versao feita em background (nao bloqueia o cliente)
+
+v7.14.0:
+- Novo widget de CPU e memoria do servidor na pagina de Atividade —
+  server/sysmetrics.py le /proc e /sys/class/thermal diretamente (stdlib,
+  sem depender de psutil), amostrado a cada 5s em background e exposto em
+  GET /api/activity (campo `system`). CPU trata iowait como tempo ocioso
+  (convencao do top/htop), relevante em Raspberry Pi com discos externos
+  onde um backup pesado gera iowait alto sem a CPU estar de fato ocupada
 
 v7.13.0:
 - Limpeza noturna poda versoes done com conteudo identico a versao done
@@ -138,6 +146,7 @@ from database import (
 )
 import crypto
 import storage
+import sysmetrics
 # Implementação canônica do cleanup de órfãos (era duplicada aqui). O nome antigo
 # é mantido: cada sha256 é commitado individualmente, sem commit final agregado.
 from nightly_cleanup import _cleanup_orphan_contents as _cleanup_orphan_contents_no_commit
@@ -442,9 +451,12 @@ async def lifespan(_: FastAPI):
     asyncio.get_running_loop().run_in_executor(None, _resume_ssd_pending_moves)
     _activity_loop_stop.clear()
     _activity_wake.clear()
+    sysmetrics.reset()
+    sysmetrics.sample()  # semeia _prev_cpu para o primeiro delta ter contra o que comparar
     monitor         = asyncio.create_task(_volume_health_monitor())
     ssd_monitor     = asyncio.create_task(_ssd_space_monitor())
     activity_refresh = asyncio.create_task(_activity_refresh_loop())
+    system_metrics  = asyncio.create_task(_system_metrics_loop())
     sched.scheduler.start()
     sched.reload_rclone_jobs_from_db()
     sched.schedule_daily_digest()
@@ -465,10 +477,11 @@ async def lifespan(_: FastAPI):
     monitor.cancel()
     ssd_monitor.cancel()
     activity_refresh.cancel()
+    system_metrics.cancel()
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="7.13.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="7.14.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
@@ -773,6 +786,28 @@ class MaintenanceJobInfo(BaseModel):
     finished_at: Optional[str]
     summary: Optional[str]
 
+class SystemSamplePoint(BaseModel):
+    t: int
+    cpu: float
+    mem: float
+
+class SystemMetricsResponse(BaseModel):
+    cpu_pct: Optional[float]
+    cpu_per_core: list[float]
+    cpu_count: int
+    load_1: Optional[float]
+    load_5: Optional[float]
+    load_15: Optional[float]
+    mem_total_bytes: Optional[int]
+    mem_used_bytes: Optional[int]
+    mem_pct: Optional[float]
+    swap_total_bytes: Optional[int]
+    swap_used_bytes: Optional[int]
+    swap_pct: float
+    temp_c: Optional[float]
+    uptime_seconds: Optional[int]
+    history: list[SystemSamplePoint]
+
 class ActivityResponse(BaseModel):
     running_versions: list[RunningVersionInfo]
     storage: StorageInfoResponse
@@ -780,6 +815,7 @@ class ActivityResponse(BaseModel):
     recent_versions: list[RecentVersionInfo]
     maintenance_jobs: list[MaintenanceJobInfo]
     server_time: str
+    system: Optional[SystemMetricsResponse] = None
 
 
 class TrendDay(BaseModel):
@@ -2202,6 +2238,20 @@ def _build_historical_data(db: Session) -> tuple:
     return recent_version_infos, maintenance_job_infos
 
 
+async def _system_metrics_loop() -> None:
+    """Amostra CPU/memória/temperatura do host a cada sysmetrics.SAMPLE_INTERVAL.
+    Leituras de /proc e /sys são baratas (arquivos do kernel), então rodam
+    direto no event loop — sem precisar de executor."""
+    while not _activity_loop_stop.is_set():
+        await asyncio.sleep(sysmetrics.SAMPLE_INTERVAL)
+        if _activity_loop_stop.is_set():
+            break
+        try:
+            sysmetrics.sample()
+        except Exception:
+            log.exception("[sysmetrics] Erro ao amostrar métricas de sistema")
+
+
 async def _activity_refresh_loop() -> None:
     """Recalcula o bloco histórico (recent_versions com diffs, maint_jobs)
     apenas quando invalidate_activity() acorda o loop — normalmente ao fim de um backup/job.
@@ -2249,6 +2299,7 @@ def get_activity(db: Session = Depends(get_db)):
         recent_versions=recent_versions,
         maintenance_jobs=maint_jobs,
         server_time=datetime.now().isoformat(),
+        system=sysmetrics.snapshot(),
     )
 
 

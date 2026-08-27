@@ -33,6 +33,28 @@
 
   .empty-state{padding:32px;text-align:center;color:var(--text-mute);font-size:11px;letter-spacing:.08em;border:1px solid var(--border);background:var(--bg2)}
 
+  /* Sistema (CPU/memória) */
+  .sys-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;margin-bottom:12px}
+  .sys-card{border:1px solid var(--border);background:var(--bg2);padding:16px 20px;animation:fadeUp .3s ease}
+  .sys-card-head{display:flex;justify-content:space-between;align-items:center;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-mute);margin-bottom:8px}
+  .sys-temp-badge{font-size:9px;letter-spacing:.06em;text-transform:uppercase;padding:1px 6px}
+  .sys-temp-badge.ok{background:var(--green-dim);color:var(--green)}
+  .sys-temp-badge.warn{background:var(--amber-dim);color:var(--amber)}
+  .sys-temp-badge.crit{background:var(--red-dim);color:var(--red)}
+  .sys-value{font-size:26px;font-weight:300;letter-spacing:-.02em;margin-bottom:2px}
+  .sys-value.ok{color:var(--green)}
+  .sys-value.warn{color:var(--amber)}
+  .sys-value.crit{color:var(--red)}
+  .sys-sub{font-size:11px;color:var(--text-dim);margin-bottom:10px}
+  .sys-bar{height:6px;background:var(--bg3);border:1px solid var(--border);margin-bottom:10px}
+  .sys-fill{height:100%;transition:width .5s ease}
+  .sys-fill.ok{background:var(--green)}
+  .sys-fill.warn{background:var(--amber)}
+  .sys-fill.crit{background:var(--red)}
+  .sys-spark{display:block;width:100%;height:28px;margin-bottom:8px}
+  .sys-cores{display:flex;gap:3px;align-items:flex-end;height:20px}
+  .core-bar{flex:1;background:var(--chart-1);min-width:3px;transition:height .5s ease;border-radius:1px 1px 0 0}
+
   /* Storage */
   .storage-wrap{border:1px solid var(--border);background:var(--bg2);padding:20px;margin-bottom:12px}
   .storage-bar-header{display:flex;justify-content:space-between;font-size:10px;color:var(--text-dim);margin-bottom:8px}
@@ -88,6 +110,7 @@
   /* Após a primeira carga, não re-dispara animações a cada poll */
   body.nv-loaded .running-card,
   body.nv-loaded .disk-mini,
+  body.nv-loaded .sys-card,
   body.nv-loaded .table-wrap{animation:none}
 
   /* Status filter toggles */
@@ -108,6 +131,7 @@
   }
   @media(max-width:480px){
     .running-grid{grid-template-columns:1fr}
+    .sys-grid{grid-template-columns:1fr}
     .storage-nums{grid-template-columns:1fr 1fr}
   }
 </style>
@@ -154,6 +178,15 @@
     <span class="section-sub" id="runningCount"></span>
   </div>
   <div id="runningSection" style="margin-bottom:28px">
+    <div class="loading">Carregando</div>
+  </div>
+
+  <!-- Sistema -->
+  <div class="section-head" style="margin-bottom:10px">
+    <div class="section-title">Sistema</div>
+    <span class="section-sub" id="sysSub"></span>
+  </div>
+  <div id="systemSection" style="margin-bottom:28px">
     <div class="loading">Carregando</div>
   </div>
 
@@ -333,10 +366,16 @@
   let _lastRenderKey = null;
 
   function render(data) {
+    // Métricas de sistema mudam a cada poll — renderizadas fora do diff abaixo,
+    // que existe para não reconstruir running/storage/recent (perderia scroll/
+    // hover) quando esses dados não mudaram.
+    renderSystem(data.system || null);
+
     _checkNotifications(data.running_versions || [], data.recent_versions || []);
     const hasRunning = (data.running_versions || []).length > 0
       || (data.maintenance_jobs || []).some(j => j.status === 'running');
-    const key = JSON.stringify(data) + (hasRunning ? '|' + Math.floor(Date.now() / 30000) : '');
+    const {system, ...rest} = data;
+    const key = JSON.stringify(rest) + (hasRunning ? '|' + Math.floor(Date.now() / 30000) : '');
     if (key === _lastRenderKey) return;
     _lastRenderKey = key;
 
@@ -346,6 +385,127 @@
     setTimeout(applyStatusFilter, 0);
     document.body.classList.add('nv-loaded');
     if (typeof _updateOverflowHints === 'function') _updateOverflowHints();
+  }
+
+  // Sistema (CPU/memória) — monta o esqueleto uma vez e só atualiza valores/
+  // larguras/classes depois, para não recriar o SVG do sparkline nem cortar
+  // a transição de largura das barras a cada poll de poucos segundos.
+  let _sysBuilt = false;
+  let _sysEls = {};
+
+  function _sysSpark(points, color) {
+    if (!points || points.length < 2) return '';
+    const w = 100, h = 28;
+    const step = w / (points.length - 1);
+    const pts = points.map((v, i) =>
+      (i * step).toFixed(1) + ',' + (h - (Math.max(0, Math.min(100, v)) / 100) * h).toFixed(1)
+    ).join(' ');
+    return `<svg class="sys-spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+      <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5" vector-effect="non-scaling-stroke"/>
+    </svg>`;
+  }
+
+  function _sysLevel(pct, warnT, critT) {
+    if (pct == null) return 'ok';
+    return pct >= critT ? 'crit' : pct >= warnT ? 'warn' : 'ok';
+  }
+
+  function _fmtUptime(sec) {
+    if (sec == null) return '—';
+    const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
+    if (d > 0) return `${d}d ${h}h`;
+    if (h > 0) return `${h}h ${m}min`;
+    return `${m}min`;
+  }
+
+  function renderSystem(sys) {
+    const el = document.getElementById('systemSection');
+    const sub = document.getElementById('sysSub');
+
+    if (!sys) {
+      sub.textContent = '';
+      if (!_sysBuilt) el.innerHTML = '<div class="loading">Carregando</div>';
+      return;
+    }
+
+    if (!_sysBuilt) {
+      el.innerHTML = `
+        <div class="sys-grid">
+          <div class="sys-card">
+            <div class="sys-card-head"><span>CPU · <span id="sysCpuCount"></span> núcleos</span><span id="sysTempBadge" class="sys-temp-badge" style="display:none"></span></div>
+            <div class="sys-value" id="sysCpuValue">—</div>
+            <div class="sys-bar"><div class="sys-fill ok" id="sysCpuBar" style="width:0%"></div></div>
+            <div id="sysCpuSpark"></div>
+            <div class="sys-cores" id="sysCores"></div>
+          </div>
+          <div class="sys-card">
+            <div class="sys-card-head"><span>Memória</span></div>
+            <div class="sys-value" id="sysMemValue">—</div>
+            <div class="sys-sub" id="sysMemSub"></div>
+            <div class="sys-bar"><div class="sys-fill ok" id="sysMemBar" style="width:0%"></div></div>
+            <div id="sysMemSpark"></div>
+          </div>
+        </div>
+        <div class="storage-nums">
+          <div class="snum"><div class="snum-label">Load (1m)</div><div class="snum-value dim" id="sysLoad"></div></div>
+          <div class="snum"><div class="snum-label">Swap</div><div class="snum-value dim" id="sysSwap"></div></div>
+          <div class="snum"><div class="snum-label">Temperatura</div><div class="snum-value dim" id="sysTemp"></div></div>
+          <div class="snum"><div class="snum-label">Uptime</div><div class="snum-value dim" id="sysUptime"></div></div>
+        </div>`;
+      _sysEls = {
+        cpuCount: document.getElementById('sysCpuCount'),
+        tempBadge: document.getElementById('sysTempBadge'),
+        cpuValue: document.getElementById('sysCpuValue'),
+        cpuBar: document.getElementById('sysCpuBar'),
+        cpuSpark: document.getElementById('sysCpuSpark'),
+        cores: document.getElementById('sysCores'),
+        memValue: document.getElementById('sysMemValue'),
+        memSub: document.getElementById('sysMemSub'),
+        memBar: document.getElementById('sysMemBar'),
+        memSpark: document.getElementById('sysMemSpark'),
+        load: document.getElementById('sysLoad'),
+        swap: document.getElementById('sysSwap'),
+        temp: document.getElementById('sysTemp'),
+        uptime: document.getElementById('sysUptime'),
+      };
+      _sysBuilt = true;
+    }
+
+    sub.textContent = sys.uptime_seconds != null ? `no ar há ${_fmtUptime(sys.uptime_seconds)}` : '';
+
+    const cpuPct = sys.cpu_pct, memPct = sys.mem_pct;
+    const cpuLvl = _sysLevel(cpuPct, 75, 90);
+    const memLvl = _sysLevel(memPct, 75, 90);
+
+    _sysEls.cpuCount.textContent = sys.cpu_count || '—';
+    _sysEls.cpuValue.className = 'sys-value ' + cpuLvl;
+    _sysEls.cpuValue.textContent = cpuPct != null ? cpuPct.toFixed(0) + '%' : '—';
+    _sysEls.cpuBar.className = 'sys-fill ' + cpuLvl;
+    _sysEls.cpuBar.style.width = (cpuPct || 0).toFixed(1) + '%';
+    _sysEls.cpuSpark.innerHTML = _sysSpark((sys.history || []).map(p => p.cpu), 'var(--chart-1)');
+    _sysEls.cores.innerHTML = (sys.cpu_per_core || []).map(c =>
+      `<div class="core-bar" style="height:${Math.max(4, c)}%" title="core — ${c.toFixed(0)}%"></div>`).join('');
+
+    if (sys.temp_c != null) {
+      _sysEls.tempBadge.className = 'sys-temp-badge ' + _sysLevel(sys.temp_c, 70, 80);
+      _sysEls.tempBadge.textContent = sys.temp_c.toFixed(0) + '°C';
+      _sysEls.tempBadge.style.display = '';
+    } else {
+      _sysEls.tempBadge.style.display = 'none';
+    }
+
+    _sysEls.memValue.className = 'sys-value ' + memLvl;
+    _sysEls.memValue.textContent = memPct != null ? memPct.toFixed(0) + '%' : '—';
+    _sysEls.memSub.textContent = (sys.mem_used_bytes != null && sys.mem_total_bytes != null)
+      ? `${fmtSize(sys.mem_used_bytes)} de ${fmtSize(sys.mem_total_bytes)}` : '';
+    _sysEls.memBar.className = 'sys-fill ' + memLvl;
+    _sysEls.memBar.style.width = (memPct || 0).toFixed(1) + '%';
+    _sysEls.memSpark.innerHTML = _sysSpark((sys.history || []).map(p => p.mem), 'var(--chart-3)');
+
+    _sysEls.load.textContent = sys.load_1 != null ? sys.load_1.toFixed(2) : '—';
+    _sysEls.swap.textContent = sys.swap_total_bytes ? `${fmtSize(sys.swap_used_bytes)} (${sys.swap_pct.toFixed(0)}%)` : '—';
+    _sysEls.temp.textContent = sys.temp_c != null ? sys.temp_c.toFixed(1) + '°C' : '—';
+    _sysEls.uptime.textContent = _fmtUptime(sys.uptime_seconds);
   }
 
   const JOB_TYPE_LABELS = {

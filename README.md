@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v7.13.0`
+# 🗄️ NestVault  `v7.14.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **backup por usuário** — cada conta só cria, lista e restaura seus próprios backups.
 
@@ -6,6 +6,8 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v7.14.0** — novo widget de **CPU e memória do servidor** na página de Atividade: `server/sysmetrics.py` lê `/proc/stat`, `/proc/meminfo`, `/proc/uptime`, `os.getloadavg()` e `/sys/class/thermal/*` diretamente (stdlib, sem depender de `psutil`), amostrando a cada 5s em background e expondo o resultado no `GET /api/activity` já existente (campo `system`). O cálculo de CPU trata `iowait` como tempo ocioso — a mesma convenção do `top`/`htop` — em vez de contá-lo como uso de CPU, diferença relevante em Raspberry Pi com discos externos, onde um backup pesado gera iowait alto sem a CPU estar de fato ocupada. A nova seção "Sistema" mostra uso de CPU (com barra por núcleo) e memória com sparkline dos últimos ~5 min, além de load average, swap, temperatura e uptime; a renderização foi separada do diff existente de `render()` para essas métricas, que mudam a cada poll, não forçarem reconstrução do DOM das outras seções da página.
+>
 > **v7.13.0** — limpeza noturna passa a podar versões `done` com conteúdo idêntico à versão anterior do mesmo label (mesmo conjunto de `original_path`+`sha256`), consequência direta do **Smart Skip** do cliente Python criar uma versão `done` a cada execução mesmo quando nada mudou — herdando tudo via `/absorb`. A poda roda depois da política de retenção temporal, mantém a primeira versão de cada bloco de conteúdo igual (onde a mudança de fato apareceu) e sempre a última versão `done` do label, mesmo que idêntica, já que restore, `/files` e a validação de integridade dependem dela; contabilizada como "sem alteração" no resumo do job de manutenção.
 >
 > **v7.12.0** — novo gráfico **Alterações por dia** na página de Estatísticas: barras empilhadas com os arquivos adicionados, modificados e removidos por dia nos últimos 30 dias, expostos em `changes_days` no `GET /api/stats` (mesmo conceito de "alterações" já usado no resumo diário do Telegram). A **paleta dos gráficos de stats** passa a usar um trio azul/laranja/água validado contra simulação de daltonismo (protanopia/deuteranopia/tritanopia) no lugar do par verde × vermelho, via novas variáveis `--chart-1/2/3` em `theme.css`. **Performance da página de stats**: a agregação sai do caminho do request — o cache vencido é servido na hora e recalculado numa thread de background (uma por vez), com aquecimento no boot; antes, a cada 5 minutos um request pagava a agregação inteira e prendia uma CPU. Os anti-joins de espaço liberável (`_get_reclaimable_bytes` e `reclaimable_by_label`) foram reescritos como `total - retido` e `NOT EXISTS`: o formato anterior (`LEFT JOIN` + `IS NULL`) fazia o SQLite comparar cada linha contra todo o subquery e não terminava em tempo útil. Medido num banco de 105 versões / 525k `version_files`, `_build_stats_data` caiu de mais de 15 min para ~30s e `/api/stats` responde em ~10 ms sem afetar a latência dos outros endpoints. Por fim, o `sw.js` passa a versionar o cache (`v2`): os assets de `/static/` são cache-first, e sem o bump o navegador combinava HTML novo com CSS antigo, deixando os gráficos invisíveis.
@@ -1403,6 +1405,15 @@ Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Par
 ---
 
 ## ⚡ Otimizações
+
+### v7.14.0
+
+| Componente | Mudança |
+|---|---|
+| **`server/sysmetrics.py`** | Novo módulo — amostra CPU/memória/swap/load/temperatura/uptime via `/proc` e `/sys/class/thermal` (stdlib puro, sem `psutil`), com histórico em ring buffer de 60 pontos (~5 min a 5s/amostra) para o sparkline. CPU calculada por delta contra a amostra anterior, tratando `iowait` como tempo ocioso (convenção do `top`/`htop`) |
+| **`server/main.py` — `_system_metrics_loop` / `ActivityResponse.system`** | Task de background amostra a cada 5s fora do caminho do request; `GET /api/activity` expõe o resultado sem I/O adicional por chamada. Campo opcional — cobre cold start e hosts sem `/proc` sem derrubar o endpoint |
+| **`server/static/activity.html` — seção "Sistema"** | Cards de CPU e Memória com sparkline SVG e barras por núcleo, tiles de Load/Swap/Temperatura/Uptime. `render()` passou a excluir `system` do diff de `_lastRenderKey` para essas métricas (que mudam a cada poll) não recriarem o DOM das demais seções da página |
+| **`tests/test_sysmetrics.py`** | Novo — 8 casos cobrindo parsing de `/proc/stat`/`/proc/meminfo`, cálculo de delta de CPU, proteção contra divisão por zero, cap do histórico e degradação graciosa sem `/proc` |
 
 ### v7.13.0
 
