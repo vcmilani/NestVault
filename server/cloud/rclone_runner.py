@@ -44,6 +44,7 @@ from pathlib import Path
 
 import shutil
 
+import config
 import crypto
 import storage
 from cache_state import invalidate_activity
@@ -101,12 +102,26 @@ class RcloneFileEntry:
 # Helpers de subprocess rclone
 # ---------------------------------------------------------------------------
 
+def _rclone_env() -> dict:
+    """Env do subprocess rclone, com RCLONE_CONFIG quando configurado.
+
+    O binário resolve RCLONE_CONFIG por conta própria a partir do env herdado;
+    passamos explicitamente para que o valor venha do config.json e não do
+    ambiente em que o uvicorn por acaso subiu.
+    """
+    env = os.environ.copy()
+    cfg = config.get("rclone.config_path")
+    if cfg:
+        env["RCLONE_CONFIG"] = cfg
+    return env
+
 async def _rclone_run(*args: str, timeout: int = 300) -> tuple[bytes, bytes, int]:
     """Executa rclone com os args dados. Nunca usa shell=True."""
     proc = await asyncio.create_subprocess_exec(
         "rclone", *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=_rclone_env(),
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -132,6 +147,7 @@ async def _run_lsjson(*args: str, timeout: int = 14400) -> tuple[bytes, bytes, i
         "rclone", "lsjson", *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=_rclone_env(),
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -465,6 +481,7 @@ async def _bulk_copy(
         "--contimeout", "60s",
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
+        env=_rclone_env(),
     )
     stderr_bytes = await proc.stderr.read()
     await proc.wait()

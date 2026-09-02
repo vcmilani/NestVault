@@ -10,27 +10,31 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import config
+
 log = logging.getLogger("backup-server")
 
 # -- Config -------------------------------------------------------------------
-_raw_dirs = os.getenv("STORAGE_DIRS") or os.getenv("STORAGE_DIR", "./storage")
-STORAGE_VOLUMES: list[Path] = [Path(p.strip()) for p in _raw_dirs.split(",") if p.strip()]
+# Os valores vêm de config.json (ver server/config.py). Os que não exigem
+# reinício são reatribuídos aqui por config.apply_runtime() quando a tela
+# /settings salva — por isso as funções abaixo leem os globais, nunca cópias.
+STORAGE_VOLUMES: list[Path] = [Path(p) for p in config.get("storage.dirs")]
 STORAGE_DIR = STORAGE_VOLUMES[0]
 for _v in STORAGE_VOLUMES:
     _v.mkdir(parents=True, exist_ok=True)
 
-ENCRYPTION_ENABLED = os.getenv("ENCRYPTION_ENABLED", "false").lower() == "true"
+ENCRYPTION_ENABLED = config.get("storage.encryption_enabled")
 encryption_key: bytes | None = None  # set by main.py lifespan: storage.encryption_key = ...
 
 CHUNK_SIZE = 1024 * 1024
-REPLICATION_FACTOR = int(os.getenv("REPLICATION_FACTOR", "1"))
+REPLICATION_FACTOR = config.get("storage.replication_factor")
 # Limiar absoluto (GB) abaixo do qual um volume é considerado esgotado para escrita e para o auto-cleanup.
-STORAGE_FALLBACK_THRESHOLD_GB = float(os.getenv("STORAGE_FALLBACK_THRESHOLD_GB", "10.0"))
+STORAGE_FALLBACK_THRESHOLD_GB = config.get("storage.fallback_threshold_gb")
 
 # -- SSD cache config ---------------------------------------------------------
-SSD_CACHE_ENABLED = os.getenv("SSD_CACHE_ENABLED", "false").lower() == "true"
-SSD_CACHE_MAX_GB  = float(os.getenv("SSD_CACHE_MAX_GB", "20.0"))
-_ssd_cache_raw    = os.getenv("SSD_CACHE_DIR", "")
+SSD_CACHE_ENABLED = config.get("ssd_cache.enabled")
+SSD_CACHE_MAX_GB  = config.get("ssd_cache.max_gb")
+_ssd_cache_raw    = config.get("ssd_cache.dir")
 SSD_CACHE_DIR: Path | None = Path(_ssd_cache_raw) if _ssd_cache_raw else None
 if SSD_CACHE_DIR:
     (SSD_CACHE_DIR / "_content").mkdir(parents=True, exist_ok=True)

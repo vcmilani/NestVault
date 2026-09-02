@@ -37,9 +37,6 @@ def _mk_client(monkeypatch, volumes, replication_factor=2):
     Session = sessionmaker(bind=engine)
     _seed_admin(Session)
 
-    monkeypatch.setattr(m, "STORAGE_VOLUMES", volumes)
-    monkeypatch.setattr(m, "STORAGE_DIR", volumes[0])
-    monkeypatch.setattr(m, "REPLICATION_FACTOR", replication_factor)
     # As funções de storage.py leem os globais do próprio módulo storage — é
     # preciso propagar os patches para lá, não só para os aliases em main.
     monkeypatch.setattr(storage_mod, "STORAGE_VOLUMES", volumes)
@@ -280,7 +277,6 @@ def test_rereplicate_fills_single_copy_to_target(tmp_path, monkeypatch):
         total = len(_copies_in(v1, sha)) + len(_copies_in(v2, sha))
         assert total == 1
 
-        monkeypatch.setattr(m, "REPLICATION_FACTOR", 2)
         monkeypatch.setattr(storage_mod, "REPLICATION_FACTOR", 2)
         r = c.post("/maintenance/rereplicate")
         assert r.status_code == 200
@@ -325,7 +321,6 @@ def test_rereplicate_skips_when_source_degraded(tmp_path, monkeypatch):
 
         # v1 degraded: cópia inacessível. v2/v3 saudáveis → target=min(2,2)=2 → underfilled
         m._degraded_volumes.add(v1)
-        monkeypatch.setattr(m, "REPLICATION_FACTOR", 2)
         monkeypatch.setattr(storage_mod, "REPLICATION_FACTOR", 2)
 
         r = c.post("/maintenance/rereplicate")
@@ -351,7 +346,6 @@ def test_rereplicate_dedup_path_triggers_replication(tmp_path, monkeypatch):
         assert total == 1
 
         # Ativa replicação e reenvia via caminho dedup (X-Content-Sha256, sem body)
-        monkeypatch.setattr(m, "REPLICATION_FACTOR", 2)
         monkeypatch.setattr(storage_mod, "REPLICATION_FACTOR", 2)
         resp = c.post(
             "/upload",

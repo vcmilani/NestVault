@@ -7,7 +7,7 @@
    STATIC_ASSETS. O HTML das páginas vem sempre da rede, mas estes assets são
    cache-first — sem o bump o navegador mistura HTML novo com CSS/JS antigo
    (ex.: uma var CSS nova fica indefinida e o elemento some da tela). */
-const CACHE = 'nestvault-static-v2';
+const CACHE = 'nestvault-static-v3';
 const STATIC_ASSETS = [
   '/static/theme.css',
   '/static/app.css',
