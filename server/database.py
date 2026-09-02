@@ -1,10 +1,13 @@
 """
-Models do banco de dados — v7.14.0
-Suporte dual: SQLite (padrão) ou PostgreSQL (opcional via DATABASE_URL).
+Models do banco de dados — v7.15.0
+Suporte dual: SQLite (padrão) ou PostgreSQL (opcional via database.url).
 
-SQLite:  configurado via DB_PATH (padrão ./backup.db) — ideal para uso doméstico/NAS.
-PostgreSQL: configurado via DATABASE_URL (ex: postgresql://user:pass@host/db) —
+SQLite:  configurado via database.path (padrão ./backup.db) — ideal para uso doméstico/NAS.
+PostgreSQL: configurado via database.url (ex: postgresql://user:pass@host/db) —
             recomendado para ambientes com muitos uploads concorrentes.
+
+Ambos vivem em config.json (ver server/config.py) e exigem reinício para valer,
+já que a engine é criada no import deste módulo.
 """
 
 from sqlalchemy import (
@@ -17,11 +20,13 @@ from sqlalchemy.pool import NullPool
 from datetime import datetime, timezone
 import os
 
+import config
+
 def _utcnow():
     return datetime.now()
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-DB_PATH      = os.getenv("DB_PATH", "./backup.db")
+DATABASE_URL = config.get("database.url") or None
+DB_PATH      = config.get("database.path")
 
 if DATABASE_URL:
     # Valida que o driver PostgreSQL está instalado antes de tentar conectar
@@ -29,7 +34,7 @@ if DATABASE_URL:
         import psycopg2  # noqa: F401
     except ImportError:
         raise RuntimeError(
-            "DATABASE_URL está definida, mas o driver PostgreSQL não está instalado.\n"
+            "database.url está definida em config.json, mas o driver PostgreSQL não está instalado.\n"
             "  Instale com:  pip install -r requirements-postgres.txt\n"
             "  Raspberry Pi: sudo apt install -y python3-psycopg2"
         )

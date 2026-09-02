@@ -24,17 +24,22 @@ NONCE_SIZE = 12       # bytes — padrão AES-GCM
 CHUNK_SIZE = 1 << 20  # 1 MB de plaintext por chunk
 
 
-def load_key() -> bytes:
-    raw = os.getenv("ENCRYPTION_KEY", "")
+def load_key(raw: str | None = None) -> bytes:
+    """Decodifica a chave. Sem argumento, lê storage.encryption_key do config.json."""
+    if raw is None:
+        import config
+        raw = config.get("storage.encryption_key")
     if not raw:
-        raise ValueError("ENCRYPTION_KEY não definida — necessária quando ENCRYPTION_ENABLED=true")
+        raise ValueError(
+            "storage.encryption_key não definida — necessária quando storage.encryption_enabled=true"
+        )
     try:
         key = base64.b64decode(raw)
     except Exception:
-        raise ValueError("ENCRYPTION_KEY inválida: deve estar em Base64")
+        raise ValueError("storage.encryption_key inválida: deve estar em Base64")
     if len(key) != 32:
         raise ValueError(
-            f"ENCRYPTION_KEY deve ter 32 bytes após decodificação (atual: {len(key)})"
+            f"storage.encryption_key deve ter 32 bytes após decodificação (atual: {len(key)})"
         )
     return key
 

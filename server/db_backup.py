@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
+import config
 from cache_state import invalidate_activity
 from database import DATABASE_URL, DB_PATH, SessionLocal, MaintenanceJob, engine
 from sqlalchemy import text
@@ -16,10 +17,11 @@ from storage import healthy_volumes, fmt_bytes as _fmt_bytes
 
 log = logging.getLogger("backup-server")
 
-DB_BACKUP_ENABLED   = os.getenv("DB_BACKUP_ENABLED", "true").lower() == "true"
-DB_BACKUP_RETENTION = int(os.getenv("DB_BACKUP_RETENTION", "7"))
-DB_BACKUP_HOUR      = int(os.getenv("DB_BACKUP_HOUR", "1"))
-DB_BACKUP_MINUTE    = int(os.getenv("DB_BACKUP_MINUTE", "0"))
+# Reatribuídos a quente por config.apply_runtime() — leia sempre o global.
+DB_BACKUP_ENABLED   = config.get("db_backup.enabled")
+DB_BACKUP_RETENTION = config.get("db_backup.retention")
+DB_BACKUP_HOUR      = config.get("db_backup.hour")
+DB_BACKUP_MINUTE    = config.get("db_backup.minute")
 
 _BACKUP_SUBDIR = "_db_backups"
 

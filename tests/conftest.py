@@ -1,5 +1,25 @@
+import os
 import shutil
+import tempfile
 from collections import namedtuple
+from pathlib import Path
+
+# config.py carrega o arquivo no import e, se ele não existir, o cria a partir
+# do ambiente. Aponta para um diretório descartável ANTES de importar qualquer
+# módulo do servidor, senão a suíte escreveria/leria o server/config.json real.
+_CONFIG_TMPDIR = tempfile.mkdtemp(prefix="nestvault-test-config-")
+os.environ["NESTVAULT_CONFIG"] = str(Path(_CONFIG_TMPDIR) / "config.json")
+# ...e limpa as variáveis legadas, senão o shell do dev (com TELEGRAM_BOT_TOKEN,
+# STORAGE_DIRS etc. exportados) semearia a config e a suíte deixaria de ser
+# determinística.
+for _legacy in ("STORAGE_DIRS", "STORAGE_DIR", "REPLICATION_FACTOR",
+                "STORAGE_FALLBACK_THRESHOLD_GB", "ENCRYPTION_ENABLED", "ENCRYPTION_KEY",
+                "SSD_CACHE_ENABLED", "SSD_CACHE_DIR", "SSD_CACHE_MAX_GB",
+                "DATABASE_URL", "DB_PATH", "DB_BACKUP_ENABLED", "DB_BACKUP_RETENTION",
+                "DB_BACKUP_HOUR", "DB_BACKUP_MINUTE", "DIGEST_HOUR",
+                "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "ANTHROPIC_API_KEY",
+                "OLLAMA_URL", "OLLAMA_MODEL", "RCLONE_CONFIG"):
+    os.environ.pop(_legacy, None)
 
 import pytest
 from fastapi.testclient import TestClient
@@ -7,6 +27,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+import config as config_mod
 import database as db_mod
 import main as m
 import storage as storage_mod
@@ -72,8 +93,8 @@ def _setup_app(tmp_vol, monkeypatch):
     db_mod.Base.metadata.create_all(bind=engine)
     Session = sessionmaker(bind=engine)
 
-    monkeypatch.setattr(m, "STORAGE_VOLUMES", [tmp_vol])
-    monkeypatch.setattr(m, "STORAGE_DIR", tmp_vol)
+    # Desde a v7.15.0 main.py lê storage.X direto — não há mais alias local para
+    # espelhar, então basta patchar o módulo storage.
     monkeypatch.setattr(storage_mod, "STORAGE_VOLUMES", [tmp_vol])
     monkeypatch.setattr(storage_mod, "STORAGE_DIR", tmp_vol)
     monkeypatch.setattr(storage_mod.shutil, "disk_usage", _fake_ample_disk_usage)

@@ -10,10 +10,11 @@ scheduler = AsyncIOScheduler(timezone="UTC")
 
 
 def schedule_daily_digest() -> None:
-    """Agenda o digest diário. Hora configurável via DIGEST_HOUR (horário local, default 18)."""
+    """Agenda o digest diário. Hora configurável via digest.hour (horário local, default 18)."""
     from daily_digest import send_daily_digest
     from datetime import datetime as _dt
-    hour     = int(os.getenv("DIGEST_HOUR", "18"))
+    import config
+    hour     = config.get("digest.hour")
     local_tz = _dt.now().astimezone().tzinfo
     scheduler.add_job(
         send_daily_digest,
@@ -70,11 +71,14 @@ def remove_rclone_job(job_id: int) -> None:
 
 
 def schedule_db_backup() -> None:
-    """Agenda o backup do banco de dados. Hora/minuto configuráveis via DB_BACKUP_HOUR/DB_BACKUP_MINUTE."""
+    """Agenda o backup do banco de dados. Hora/minuto configuráveis via db_backup.hour/db_backup.minute."""
     from db_backup import run_db_backup, DB_BACKUP_ENABLED, DB_BACKUP_HOUR, DB_BACKUP_MINUTE
     from datetime import datetime as _dt
     if not DB_BACKUP_ENABLED:
-        log.info("[scheduler] Backup do banco desabilitado (DB_BACKUP_ENABLED=false)")
+        # Pode ter sido desabilitado a quente pela tela /settings: remove o job já agendado.
+        if scheduler.get_job("db_backup"):
+            scheduler.remove_job("db_backup")
+        log.info("[scheduler] Backup do banco desabilitado (db_backup.enabled=false)")
         return
     local_tz = _dt.now().astimezone().tzinfo
     scheduler.add_job(

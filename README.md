@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v7.14.0`
+# 🗄️ NestVault  `v7.15.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **backup por usuário** — cada conta só cria, lista e restaura seus próprios backups.
 
@@ -6,6 +6,8 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
+> **v7.15.0** — a configuração do servidor deixa de viver em variáveis de ambiente e passa a ser **persistida em arquivo** (`server/config.json`), com uma **tela de Configurações** (`/settings`) para editá-la. O novo `server/config.py` define um SCHEMA declarativo — tipo, faixa, rótulo, ajuda, se é segredo e se exige reinício — usado ao mesmo tempo para validar as escritas, montar o `GET /api/settings` e renderizar a tela, de modo que um parâmetro novo aparece na interface sem precisar mexer no HTML. A migração é automática: no primeiro boot sem `config.json` o arquivo é gerado a partir das variáveis de ambiente atuais, e a partir daí o arquivo é a única fonte da verdade (a exceção é `BACKUP_API_KEY`, segredo de bootstrap que continua no ambiente). Replicação, limiar de disco, teto do SSD cache e os grupos `db_backup` e `digest` são aplicados **a quente**, reagendando os jobs cron sem reiniciar; volumes, engine do banco e criptografia continuam exigindo reinício e são marcados como tal na tela, que oferece um botão para reiniciar o servidor sob systemd. Segredos são gravados com permissão `0600` e nunca voltam em texto puro pela API. No caminho, os aliases de `storage.*` copiados no import de `main.py` foram removidos — eram justamente o que impedia qualquer mudança em runtime de chegar até lá — e `rclone.config_path` passa a ser de fato repassado ao binário `rclone`, algo que o README documentava mas o código nunca fazia.
+>
 > **v7.14.0** — novo widget de **CPU e memória do servidor** na página de Atividade: `server/sysmetrics.py` lê `/proc/stat`, `/proc/meminfo`, `/proc/uptime`, `os.getloadavg()` e `/sys/class/thermal/*` diretamente (stdlib, sem depender de `psutil`), amostrando a cada 5s em background e expondo o resultado no `GET /api/activity` já existente (campo `system`). O cálculo de CPU trata `iowait` como tempo ocioso — a mesma convenção do `top`/`htop` — em vez de contá-lo como uso de CPU, diferença relevante em Raspberry Pi com discos externos, onde um backup pesado gera iowait alto sem a CPU estar de fato ocupada. A nova seção "Sistema" mostra uso de CPU (com barra por núcleo) e memória com sparkline dos últimos ~5 min, além de load average, swap, temperatura e uptime; a renderização foi separada do diff existente de `render()` para essas métricas, que mudam a cada poll, não forçarem reconstrução do DOM das outras seções da página.
 >
 > **v7.13.0** — limpeza noturna passa a podar versões `done` com conteúdo idêntico à versão anterior do mesmo label (mesmo conjunto de `original_path`+`sha256`), consequência direta do **Smart Skip** do cliente Python criar uma versão `done` a cada execução mesmo quando nada mudou — herdando tudo via `/absorb`. A poda roda depois da política de retenção temporal, mantém a primeira versão de cada bloco de conteúdo igual (onde a mudança de fato apareceu) e sempre a última versão `done` do label, mesmo que idêntica, já que restore, `/files` e a validação de integridade dependem dela; contabilizada como "sem alteração" no resumo do job de manutenção.
@@ -96,6 +98,7 @@ Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **com
 NestVault/
 ├── server/
 │   ├── main.py                  ← API FastAPI
+│   ├── config.py                ← Configuração persistida em arquivo (v7.15)
 │   ├── database.py              ← Modelos SQLite/SQLAlchemy
 │   ├── storage.py               ← Helpers de storage (dedup, replicação, volumes)
 │   ├── crypto.py                ← Criptografia AES-256-GCM (v3.1)
@@ -109,8 +112,10 @@ NestVault/
 │   │   └── rclone_router.py     ← Endpoints /rclone/*
 │   ├── requirements.txt
 │   ├── requirements-postgres.txt ← Dependências opcionais para PostgreSQL (v7.1)
+│   ├── config.json              ← Configuração do servidor (gerado no 1º boot, gitignored)
 │   └── static/
-│       └── index.html           ← Dashboard web
+│       ├── index.html           ← Dashboard web
+│       └── settings.html        ← Tela de configurações (v7.15)
 ├── client/
 │   ├── nestvault.py             ← Cliente de backup/restore
 │   └── requirements.txt
@@ -200,15 +205,16 @@ sqlite3 /mnt/hd-externo/backup.db ".schema file_contents"
 python3 -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"
 # Exemplo: dGhpcyBpcyBhIDMyLWJ5dGUga2V5IGZvciBleGFtcGxl
 
-# Adicionar ao serviço systemd:
-Environment="ENCRYPTION_ENABLED=true"
-Environment="ENCRYPTION_KEY=<chave-gerada-acima>"
-sudo systemctl daemon-reload && sudo systemctl restart backup-server
+# Cole a chave em Configurações → Storage (ou direto no config.json) e reinicie:
+#   "storage": { "encryption_enabled": true, "encryption_key": "<chave-gerada-acima>" }
+sudo systemctl restart backup-server
 ```
+
+> A partir da v7.15.0 a tela `/settings` faz isso sem SSH: os dois campos ficam no cartão **Storage**, marcados como `requer reinício`, e a própria tela oferece o botão de reiniciar. Alterar a criptografia com conteúdo já gravado pede confirmação por palavra-chave.
 
 > **Guarde a chave em local seguro.** Se perdida, arquivos cifrados se tornam irrecuperáveis. Rotação de chave não está disponível na v3.1.
 
-**Migrar arquivos existentes** (após ativar `ENCRYPTION_ENABLED=true`):
+**Migrar arquivos existentes** (após ativar `storage.encryption_enabled`):
 
 ```bash
 nestvault encrypt-existing --server http://192.168.1.100:8000
@@ -234,17 +240,17 @@ sqlite3 /mnt/hd-externo/backup.db "SELECT COUNT(*) FROM file_content_copies;"
 
 Para ativar a replicação após migrar:
 
-```bash
-# Editar o serviço systemd e adicionar:
-Environment="REPLICATION_FACTOR=2"
-sudo systemctl daemon-reload && sudo systemctl restart backup-server
+Em Configurações → Storage, ajuste **Fator de replicação** para `2` — vale na hora, sem reiniciar. Direto no arquivo, seria:
+
+```json
+"storage": { "replication_factor": 2 }
 ```
 
 Novos uploads serão replicados. Conteúdos existentes **não** são re-replicados automaticamente retroativamente — apenas quando sofrem novo upload ou quando um volume degraded se recupera.
 
 ### Adicionando um disco novo ao cluster
 
-Se você adicionar um novo ponto de montagem ao `STORAGE_DIRS`, o servidor o reconhece como volume saudável imediatamente — mas **não re-replica os arquivos existentes para ele**. Apenas novos uploads passarão a usar o disco novo.
+Se você adicionar um novo ponto de montagem a `storage.dirs`, o servidor o reconhece como volume saudável imediatamente — mas **não re-replica os arquivos existentes para ele**. Apenas novos uploads passarão a usar o disco novo.
 
 Para forçar a re-replicação dos conteúdos existentes, será necessário um endpoint de manutenção (planejado para versão futura). Por enquanto, a alternativa é aguardar que os arquivos sejam naturalmente re-enviados pelo cliente.
 
@@ -263,7 +269,7 @@ usuário troca o disco físico, formata e remonta em /mnt/disk2
 **⚠️ Caminho diferente — sem re-replicação automática:**
 ```
 disco /mnt/disk2 falha → degraded
-usuário monta o disco novo em /mnt/disk3 e adiciona ao STORAGE_DIRS
+usuário monta o disco novo em /mnt/disk3 e adiciona a storage.dirs
 → servidor vê /mnt/disk3 como volume novo e saudável
 → nenhuma re-replicação: arquivos existentes continuam com cópia única em /mnt/disk1
 → novos uploads passam a usar /mnt/disk3 normalmente
@@ -362,109 +368,139 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Configurar variáveis de ambiente
+### 2. Configuração (`config.json`)
+
+A partir da **v7.15.0** todos os parâmetros do servidor vivem em um arquivo de configuração — não mais em variáveis de ambiente. O arquivo é criado sozinho no primeiro boot e pode ser editado pela tela **[Configurações](#-tela-de-configurações)** (`/settings`, restrita a admins) ou à mão.
+
+| | |
+|---|---|
+| **Local padrão** | `server/config.json` (ao lado de `main.py`) |
+| **Como mudar o local** | variável de ambiente `NESTVAULT_CONFIG=/caminho/config.json` |
+| **Permissão** | `0600` — o arquivo guarda segredos (chave de criptografia, tokens, DSN do Postgres) |
+| **Precedência** | arquivo > padrão. As variáveis de ambiente **só semeiam** o arquivo no primeiro boot |
+
+A única variável de ambiente que continua obrigatória é **`BACKUP_API_KEY`**: é o segredo de bootstrap que vira o primeiro usuário admin. Ela não vai para o `config.json` de propósito — persistir uma chave de administrador em texto no disco não compensa, e a rotação já é feita pela tela `/manage-users`.
 
 ```bash
-export BACKUP_API_KEY="uma-chave-secreta-forte-aqui"   # obrigatória (v7.9+) — vira a chave do admin no primeiro boot
-export DB_PATH="/mnt/hd-externo/backup.db"
-
-# Um disco (compatibilidade legada)
-export STORAGE_DIR="/mnt/hd-externo/backups"
-
-# Dois ou mais discos — use STORAGE_DIRS (tem precedência sobre STORAGE_DIR)
-export STORAGE_DIRS="/mnt/disk1/backups,/mnt/disk2/backups"
-
-# Replicação entre volumes (opcional — padrão 1 = sem replicação)
-# 1 = sem replicação (compatível com RAID físico ou disco único)
-# 2 = espelhar para 2 volumes
-# 0 = espelhar para todos os volumes saudáveis
-export REPLICATION_FACTOR=2
-
-# Criptografia em repouso AES-256-GCM (opcional — padrão desabilitada)
-# Omitir se o disco já tem criptografia (LUKS, ZFS encryption, macOS FileVault)
-export ENCRYPTION_ENABLED=true
-export ENCRYPTION_KEY="$(python3 -c 'import os,base64; print(base64.b64encode(os.urandom(32)).decode())')"
-
-# Threshold mínimo de espaço livre (GB) antes de usar o próximo disco da lista (padrão: 10)
-export STORAGE_FALLBACK_THRESHOLD_GB=10
-
-# SSD cache tier (opcional — padrão desabilitado)
-# Uploads são gravados no SSD primeiro; movidos para HDD em background
-export SSD_CACHE_ENABLED=true
-export SSD_CACHE_DIR="/tmp/nestvault_ssd_cache"   # diretório no SSD
-export SSD_CACHE_MAX_GB=20                         # limite de staging no SSD (padrão: 20 GB)
-
-# Daily digest via Telegram (opcional — omitir desabilita o envio)
-export TELEGRAM_BOT_TOKEN="123456789:ABCdef..."   # token gerado pelo @BotFather
-export TELEGRAM_CHAT_ID="987654321"               # seu chat_id (veja abaixo como obter)
-
-# Geração do resumo por IA (opcional — sem nenhuma das duas usa texto estruturado)
-export ANTHROPIC_API_KEY="sk-ant-..."             # Claude Haiku (console.anthropic.com)
-export OLLAMA_URL="http://localhost:11434"         # fallback local se não houver API key
-export OLLAMA_MODEL="llama3"                       # modelo Ollama a usar
-
-# Horário de envio do digest em horário local (padrão: 18h)
-export DIGEST_HOUR=18
-
-# Backup do banco de dados para os volumes de storage (padrão: habilitado, às 01:00)
-export DB_BACKUP_ENABLED=true
-export DB_BACKUP_HOUR=1          # hora de execução (0-23)
-export DB_BACKUP_MINUTE=0        # minuto de execução
-export DB_BACKUP_RETENTION=7     # quantos backups manter por volume
-
-# rclone backup (opcional — omitir usa ~/.config/rclone/rclone.conf)
-export RCLONE_CONFIG="/etc/rclone/rclone.conf"
+export BACKUP_API_KEY="uma-chave-secreta-forte-aqui"   # obrigatória — vira a chave do admin no primeiro boot
+uvicorn main:app --host 0.0.0.0 --port 8000            # gera server/config.json com os padrões
 ```
 
-#### Configuração Backup do Banco de Dados
+Exemplo do arquivo gerado (só as chaves que você quiser mudar precisam estar presentes — o que faltar cai no padrão):
 
-| Variável | Obrigatório | Padrão | Descrição |
-|---|:-:|---|---|
-| `DB_BACKUP_ENABLED` | | `true` | Habilita o backup automático do banco |
-| `DB_BACKUP_HOUR` | | `1` | Hora de execução do backup (0–23, horário local) |
-| `DB_BACKUP_MINUTE` | | `0` | Minuto de execução do backup |
-| `DB_BACKUP_RETENTION` | | `7` | Número máximo de backups mantidos por volume |
+```json
+{
+  "_schema_version": 1,
+  "storage": {
+    "dirs": ["/mnt/disk1/backups", "/mnt/disk2/backups"],
+    "replication_factor": 2,
+    "fallback_threshold_gb": 10.0,
+    "encryption_enabled": false,
+    "encryption_key": ""
+  },
+  "ssd_cache": { "enabled": false, "dir": "", "max_gb": 20.0 },
+  "database":  { "url": "", "path": "/mnt/disk1/backup.db" },
+  "db_backup": { "enabled": true, "retention": 7, "hour": 1, "minute": 0 },
+  "digest": {
+    "hour": 18,
+    "telegram_bot_token": "", "telegram_chat_id": "",
+    "anthropic_api_key": "",
+    "ollama_url": "http://localhost:11434", "ollama_model": "llama3"
+  },
+  "rclone": { "config_path": "" }
+}
+```
 
-O backup exporta o banco para `_db_backups/` em **cada volume saudável** listado em `STORAGE_DIRS`. Para PostgreSQL usa `pg_dump --format=custom` (requer `pg_dump` no PATH); para SQLite usa `sqlite3.backup()` — cópia consistente sem travar leituras em andamento. Cada arquivo recebe timestamp no nome (`nestvault_db_YYYYMMDD_HHMMSS.dump|db`). Backups além do limite de retenção são removidos automaticamente.
+#### Migrando de uma instalação anterior à v7.15.0
 
-> **Por que isso importa?** Com 1 SSD + N HDDs, o SSD guarda o banco (mapa sha256 → caminhos físicos, versões, labels). Se o SSD falhar, os arquivos dos HDDs ficam intactos mas irrecuperáveis sem o banco. O backup automático resolve isso exportando o banco para os próprios HDDs.
+Não é preciso reconfigurar nada à mão. Suba a v7.15.0 **uma vez com as `Environment=` ainda no lugar**: como não existe `config.json`, o servidor gera o arquivo a partir das variáveis atuais e loga o que migrou.
 
-#### Configuração rclone
+```
+[config] migrando 6 variavel(is) de ambiente: STORAGE_DIRS, REPLICATION_FACTOR, DB_PATH, ...
+[config] /home/pi/backup_system/server/config.json gerado a partir do ambiente
+```
 
-| Variável | Obrigatório | Padrão | Descrição |
-|---|:-:|---|---|
-| `RCLONE_CONFIG` | | `~/.config/rclone/rclone.conf` | Path do arquivo de configuração do rclone. Útil quando o servidor roda como systemd service com usuário diferente do que configurou o rclone |
+Depois disso: confira os valores em `/settings`, remova as linhas `Environment=` da unit systemd (menos `BACKUP_API_KEY`) e faça `daemon-reload`. A partir daí o arquivo é a única fonte da verdade — variáveis de ambiente deixadas para trás passam a ser **ignoradas**, não sobrescrevem o arquivo.
 
-Sem `RCLONE_CONFIG` o NestVault usa o config padrão do usuário que executa o processo. O rclone precisa estar instalado e acessível no `PATH`.
+#### Referência dos parâmetros
 
-#### Configuração Daily Digest
+Os parâmetros marcados com **↻** só passam a valer depois de reiniciar o servidor (volumes, engine do banco e chave de criptografia são fixados no import). Os demais são aplicados na hora ao salvar, inclusive o reagendamento dos jobs cron.
 
-| Variável | Obrigatório | Padrão | Descrição |
-|---|:-:|---|---|
-| `TELEGRAM_BOT_TOKEN` | ✓ | — | Token do bot gerado pelo @BotFather no Telegram |
-| `TELEGRAM_CHAT_ID` | ✓ | — | ID do chat que receberá o digest (veja como obter abaixo) |
-| `ANTHROPIC_API_KEY` | | — | Usa Claude Haiku para gerar o resumo ([console.anthropic.com](https://console.anthropic.com)) |
-| `OLLAMA_URL` | | `http://localhost:11434` | Fallback local quando não há `ANTHROPIC_API_KEY` |
-| `OLLAMA_MODEL` | | `llama3` | Modelo Ollama a usar |
-| `DIGEST_HOUR` | | `18` | Hora de envio (horário local da máquina) |
+**`storage`** — armazenamento e replicação
 
-**Como obter o `TELEGRAM_CHAT_ID`:** crie o bot com @BotFather, mande qualquer mensagem para ele e acesse `https://api.telegram.org/bot<TOKEN>/getUpdates` no browser — o campo `chat.id` no JSON é o valor a usar.
+| Chave | Tipo | Padrão | ↻ | Descrição |
+|---|---|---|:-:|---|
+| `dirs` | lista | `["./storage"]` | ↻ | Volumes em ordem de prioridade. Um único diretório também é válido |
+| `replication_factor` | int | `1` | | `1` = sem replicação; `2` = espelha em 2 volumes; `0` = todos os volumes saudáveis |
+| `fallback_threshold_gb` | float | `10.0` | | Piso de espaço livre por disco antes de passar para o próximo da lista |
+| `encryption_enabled` | bool | `false` | ↻ | Criptografia AES-256-GCM em repouso. Omitir se o disco já é criptografado (LUKS, ZFS, FileVault) |
+| `encryption_key` | str 🔒 | `""` | ↻ | 32 bytes em Base64. Obrigatória quando `encryption_enabled` é `true` |
 
-Sem `TELEGRAM_BOT_TOKEN` e `TELEGRAM_CHAT_ID` o digest é gerado internamente mas não enviado. Sem variável de IA o servidor envia um resumo estruturado com os dados brutos do banco.
+Gere a chave com:
 
-#### Configuração SSD Cache
+```bash
+python3 -c 'import os,base64; print(base64.b64encode(os.urandom(32)).decode())'
+```
 
-| Variável | Obrigatório | Padrão | Descrição |
-|---|:-:|---|---|
-| `SSD_CACHE_ENABLED` | | `false` | Habilita o cache tier no SSD |
-| `SSD_CACHE_DIR` | ✓ se enabled | — | Caminho de um diretório **no SSD** para staging de uploads |
-| `SSD_CACHE_MAX_GB` | | `20.0` | Limite máximo de uso do SSD pela fila pendente (GB) |
+**`ssd_cache`** — cache tier em SSD
+
+| Chave | Tipo | Padrão | ↻ | Descrição |
+|---|---|---|:-:|---|
+| `enabled` | bool | `false` | ↻ | Habilita o staging de uploads no SSD |
+| `dir` | str | `""` | ↻ | Diretório **no SSD**. Obrigatório quando `enabled` é `true` |
+| `max_gb` | float | `20.0` | | Limite de uso do SSD pela fila pendente (GB) |
 
 Quando habilitado, uploads são escritos no SSD e o servidor responde ao cliente imediatamente; a movimentação para o HDD ocorre em background. Se o SSD atingir o limite ou tiver menos de 2 GB livres, o upload recai silenciosamente para o HDD. Moves pendentes sobrevivem a reinicializações (persistidos em `ssd_cache_pending_moves` no banco).
 
-> **Não use MicroSD como `SSD_CACHE_DIR`.** Write sequencial de cartões rápidos (~130 MB/s) é marginalmente melhor que HDD, mas sofrem throttling térmico sob carga e têm endurance muito inferior a um SSD real. O benefício é nulo e o desgaste é alto.
+> **Não use MicroSD como `ssd_cache.dir`.** Write sequencial de cartões rápidos (~130 MB/s) é marginalmente melhor que HDD, mas sofrem throttling térmico sob carga e têm endurance muito inferior a um SSD real. O benefício é nulo e o desgaste é alto.
 
-`STORAGE_DIRS` e `STORAGE_DIR` são mutuamente compatíveis: se apenas `STORAGE_DIR` estiver definido, o servidor opera normalmente com um único volume. Se `STORAGE_DIRS` estiver definido, ele tem precedência e pode listar quantos pontos de montagem forem necessários.
+**`database`** — backend do banco
+
+| Chave | Tipo | Padrão | ↻ | Descrição |
+|---|---|---|:-:|---|
+| `url` | str 🔒 | `""` | ↻ | DSN do PostgreSQL (`postgresql://user:pass@host/db`). Vazio = SQLite |
+| `path` | str | `"./backup.db"` | ↻ | Arquivo do SQLite, usado quando `url` está vazio |
+
+**`db_backup`** — backup automático do próprio banco
+
+| Chave | Tipo | Padrão | ↻ | Descrição |
+|---|---|---|:-:|---|
+| `enabled` | bool | `true` | | Habilita o backup automático do banco |
+| `retention` | int | `7` | | Número máximo de backups mantidos por volume |
+| `hour` | int | `1` | | Hora de execução (0–23, horário local) |
+| `minute` | int | `0` | | Minuto de execução (0–59) |
+
+O backup exporta o banco para `_db_backups/` em **cada volume saudável** listado em `storage.dirs`. Para PostgreSQL usa `pg_dump --format=custom` (requer `pg_dump` no PATH); para SQLite usa `sqlite3.backup()` — cópia consistente sem travar leituras em andamento. Cada arquivo recebe timestamp no nome (`nestvault_db_YYYYMMDD_HHMMSS.dump|db`). Backups além do limite de retenção são removidos automaticamente.
+
+> **Por que isso importa?** Com 1 SSD + N HDDs, o SSD guarda o banco (mapa sha256 → caminhos físicos, versões, labels). Se o SSD falhar, os arquivos dos HDDs ficam intactos mas irrecuperáveis sem o banco. O backup automático resolve isso exportando o banco para os próprios HDDs.
+
+**`digest`** — resumo diário via Telegram
+
+| Chave | Tipo | Padrão | ↻ | Descrição |
+|---|---|---|:-:|---|
+| `hour` | int | `18` | | Hora de envio (0–23, horário local) |
+| `telegram_bot_token` | str 🔒 | `""` | | Token do bot gerado pelo @BotFather |
+| `telegram_chat_id` | str | `""` | | ID do chat que receberá o digest |
+| `anthropic_api_key` | str 🔒 | `""` | | Usa Claude Haiku para gerar o resumo ([console.anthropic.com](https://console.anthropic.com)) |
+| `ollama_url` | str | `http://localhost:11434` | | Fallback local quando não há `anthropic_api_key` |
+| `ollama_model` | str | `llama3` | | Modelo Ollama a usar |
+
+**Como obter o `telegram_chat_id`:** crie o bot com @BotFather, mande qualquer mensagem para ele e acesse `https://api.telegram.org/bot<TOKEN>/getUpdates` no browser — o campo `chat.id` no JSON é o valor a usar.
+
+Sem `telegram_bot_token` e `telegram_chat_id` o digest é gerado internamente mas não enviado. Sem chave de IA o servidor envia um resumo estruturado com os dados brutos do banco.
+
+**`rclone`** — cloud backup
+
+| Chave | Tipo | Padrão | ↻ | Descrição |
+|---|---|---|:-:|---|
+| `config_path` | str | `""` | | Caminho do `rclone.conf`, repassado ao binário via `RCLONE_CONFIG`. Vazio usa `~/.config/rclone/rclone.conf` do usuário que executa o processo |
+
+Útil quando o servidor roda como serviço systemd com usuário diferente do que configurou o rclone. O rclone precisa estar instalado e acessível no `PATH`.
+
+#### 🔒 Segredos
+
+Os campos marcados com 🔒 nunca são devolvidos em texto puro pelo `GET /api/settings` — a API responde com uma máscara (`••••••5678`) e um flag `is_set`. Na tela, deixar um campo de segredo em branco **mantém** o valor atual; só um valor novo e não-vazio substitui o que está gravado.
+
 
 ### 3. Iniciar o servidor
 
@@ -484,21 +520,12 @@ After=network.target
 [Service]
 User=pi
 WorkingDirectory=/home/pi/backup_system/server
+# Único segredo que continua no ambiente: cria o primeiro admin no boot inicial.
 Environment="BACKUP_API_KEY=sua-chave-aqui"
-Environment="STORAGE_DIRS=/mnt/disk1/backups,/mnt/disk2/backups"
-Environment="DB_PATH=/mnt/disk1/backup.db"
-Environment="REPLICATION_FACTOR=2"
-# Criptografia em repouso — omitir se o disco já tem criptografia própria
-# Environment="ENCRYPTION_ENABLED=true"
-# Environment="ENCRYPTION_KEY=<chave-base64-32-bytes>"
-# SSD cache — omitir se não houver SSD interno ou ganho não for necessário
-# Environment="SSD_CACHE_ENABLED=true"
-# Environment="SSD_CACHE_DIR=/tmp/nestvault_ssd_cache"
-# Environment="SSD_CACHE_MAX_GB=20"
-# Backup do banco de dados — habilitado por padrão; ajuste horário se necessário
-# Environment="DB_BACKUP_HOUR=1"
-# Environment="DB_BACKUP_MINUTE=0"
-# Environment="DB_BACKUP_RETENTION=7"
+# Opcional — só se o config.json não estiver em WorkingDirectory/config.json
+# Environment="NESTVAULT_CONFIG=/etc/nestvault/config.json"
+# Todo o resto (volumes, replicação, criptografia, SSD cache, digest, backup do
+# banco) vive em config.json e é editável em /settings — ver "2. Configuração".
 ExecStart=/home/pi/backup_system/server/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
 Restart=always
 
@@ -511,6 +538,8 @@ sudo systemctl daemon-reload
 sudo systemctl enable backup-server
 sudo systemctl start backup-server
 ```
+
+O `Restart=always` é o que faz o botão **Reiniciar servidor** da tela de Configurações funcionar: o endpoint encerra o processo e o systemd o sobe de novo. Sem supervisor, o servidor simplesmente para.
 
 ---
 
@@ -967,11 +996,11 @@ Limpeza concluida: 14 arquivo(s) removido(s), 312.4 MB liberados
 
 ### rereplicate
 
-Força a re-replicação de todos os arquivos que possuem menos cópias físicas do que o `REPLICATION_FACTOR` configurado no servidor. Use após:
+Força a re-replicação de todos os arquivos que possuem menos cópias físicas do que o `storage.replication_factor` configurado no servidor. Use após:
 
 - Adicionar um disco novo ao cluster (arquivos existentes não são replicados automaticamente)
 - Recuperar um disco que ficou `degraded` por um longo período
-- Aumentar o valor de `REPLICATION_FACTOR`
+- Aumentar o valor de `storage.replication_factor`
 
 ```bash
 nestvault rereplicate \
@@ -995,7 +1024,7 @@ Se `skipped > 0`, significa que alguns arquivos têm a única cópia em um volum
 
 ### reconcile-replication
 
-Reconcilia o acervo inteiro com o `REPLICATION_FACTOR` atual do servidor, resolvendo **ambas** as direções:
+Reconcilia o acervo inteiro com o `storage.replication_factor` atual do servidor, resolvendo **ambas** as direções:
 
 - **Sub-replicados** (fator aumentou ou disco foi adicionado): cria cópias faltantes
 - **Sobre-replicados** (fator diminuiu): remove cópias excedentes do disco e do banco
@@ -1021,7 +1050,7 @@ Se `skipped > 0`, algum arquivo tem a única cópia em volume `degraded`. Recupe
 
 ### encrypt-existing
 
-Cifra todos os arquivos físicos que ainda não foram criptografados. Use após ativar `ENCRYPTION_ENABLED=true` no servidor para migrar um acervo existente. Requer que o servidor esteja rodando com `ENCRYPTION_ENABLED=true`.
+Cifra todos os arquivos físicos que ainda não foram criptografados. Use após ativar `storage.encryption_enabled` no servidor para migrar um acervo existente. Requer que o servidor esteja rodando com a criptografia habilitada.
 
 ```bash
 nestvault encrypt-existing \
@@ -1047,7 +1076,7 @@ Iniciando criptografia de arquivos existentes...
 - Arquivos em volumes `degraded` são pulados e contados em "pulados" — rode novamente após recuperar o disco.
 - A operação é **idempotente**: arquivos já cifrados são ignorados automaticamente.
 - Em caso de interrupção, os arquivos já processados permanecem cifrados — reprocessar os restantes é seguro.
-- Novos uploads feitos com `ENCRYPTION_ENABLED=true` já chegam cifrados; o `encrypt-existing` trata apenas o acervo pré-v3.1.
+- Novos uploads feitos com `storage.encryption_enabled` já chegam cifrados; o `encrypt-existing` trata apenas o acervo pré-v3.1.
 
 > Requer NestVault v3.1+ no servidor. Em servidores mais antigos, retorna `404` com mensagem de erro clara.
 
@@ -1061,8 +1090,8 @@ Da mesma forma, ao excluir um label (`DELETE /backups/{label}`) ou uma versão (
 
 **Comportamento:**
 
-- Com múltiplos discos (`STORAGE_DIRS`), verifica o **menor** percentual livre entre todos os volumes — o cleanup dispara se **qualquer** disco estiver abaixo de 5%
-- Com disco único (`STORAGE_DIR`), verifica o espaço do filesystem onde o storage está montado
+- Com múltiplos discos (`storage.dirs`), verifica o **menor** percentual livre entre todos os volumes — o cleanup dispara se **qualquer** disco estiver abaixo de 5%
+- Com um único volume em `storage.dirs`, verifica o espaço do filesystem onde o storage está montado
 - Apaga as versões mais antigas primeiro, distribuindo entre todos os labels
 - **Nunca apaga a versão mais recente** de cada label — cada label sempre terá ao menos 1 versão
 - Após cada deleção, reavalia o espaço e para assim que atingir 5%
@@ -1327,7 +1356,7 @@ cat ~/.config/rclone/rclone.conf
 scp ~/.config/rclone/rclone.conf pi@192.168.1.100:~/.config/rclone/rclone.conf
 ```
 
-O NestVault usa o `rclone.conf` padrão do usuário que roda o servidor. Para um path customizado, exporte `RCLONE_CONFIG=/path/to/rclone.conf` no ambiente do serviço.
+O NestVault usa o `rclone.conf` padrão do usuário que roda o servidor. Para um path customizado, defina `rclone.config_path` em Configurações — o valor é repassado ao binário via `RCLONE_CONFIG`.
 
 ---
 
@@ -1390,7 +1419,7 @@ Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Par
 - **Cloud Backup (rclone)** — gerencie jobs de backup rclone agendados e execute manualmente via `/rclone-jobs`
 - **Manutenção** — página dedicada a operações administrativas de storage:
   - **Limpeza de Órfãos** — remove arquivos físicos sem referência em nenhuma versão ativa
-  - **Re-replicar** — cria cópias faltantes para conteúdos com menos réplicas que `REPLICATION_FACTOR`
+  - **Re-replicar** — cria cópias faltantes para conteúdos com menos réplicas que `storage.replication_factor`
   - **Reconciliar Replicação** — remove cópias excedentes e preenche faltantes em uma só operação
   - **Cifrar Existentes** — cifra arquivos não criptografados (requer confirmar digitando `CIFRAR` — irreversível)
   - **Limpar Versões Antigas** — mantém apenas N versões mais recentes de um label escolhido
@@ -1398,9 +1427,24 @@ Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Par
   - **Excluir Label Completo** — exclui um label e todas as suas versões (requer digitar o nome do label)
   - **Reatribuir Dono** *(v7.9)* — transfere a posse de um backup para outro usuário; necessário para labels criados antes da migração para backup por usuário (ficam com o admin) ou ao reorganizar contas
 - **Usuários** *(v7.9)* — página `/manage-users`: cria contas (admin ou usuário comum), gira chaves e ativa/desativa acesso. A chave gerada é exibida uma única vez
+- **Configurações** *(v7.15)* — página `/settings`, ver abaixo
 - **Discos** — página `/disks` com painel de volumes: espaço total/livre/usado, arquivos físicos por volume e status (ok/degraded)
 - **Explorer de arquivos** — navegação e download de arquivos de uma versão específica via `/explorer`
 - **Backups em tempo real** — indicador no cabeçalho com contagem de backups em andamento; polling automático a cada 3 s com botão ⏸ para pausar
+
+### ⚒ Tela de Configurações
+
+`/settings` — restrita a admins. Edita o `config.json` descrito em [2. Configuração](#2-configuração-configjson) sem SSH.
+
+Os campos são renderizados a partir do schema devolvido pelo `GET /api/settings`, então um parâmetro novo em `server/config.py` aparece na tela automaticamente, com o rótulo, a ajuda e a validação que o schema declara.
+
+- **Um cartão por grupo**, com botão de salvar próprio — você envia só o grupo que mexeu
+- **Badge `requer reinício`** nos parâmetros estruturais (volumes, criptografia, banco, diretório do SSD cache); os demais valem no instante em que você salva, incluindo o reagendamento dos jobs de digest e backup do banco
+- **Faixa de reinício pendente** aparece quando algum parâmetro ↻ foi alterado, com o botão **⏻ Reiniciar servidor** (pede a palavra `REINICIAR`). A página fica aguardando o `/health` responder e recarrega sozinha quando o servidor volta
+- **Segredos** mostram máscara e a nota *"deixe em branco para manter"* — o valor real nunca chega ao browser
+- **Erros de validação** aparecem no rodapé do próprio cartão, com o nome do campo e a faixa aceita
+
+Mudar a criptografia com conteúdo já gravado abre uma confirmação por palavra-chave antes de enviar: os arquivos existentes ficam ilegíveis com a chave nova.
 
 ---
 
@@ -1743,7 +1787,7 @@ storage/
         └── f7a923bc11d24e5f...
 ```
 
-**Storage físico — dois discos (`STORAGE_DIRS=/mnt/disk1,/mnt/disk2`):**
+**Storage físico — dois discos (`storage.dirs = ["/mnt/disk1", "/mnt/disk2"]`):**
 ```
 /mnt/disk1/
 └── _content/
@@ -1758,9 +1802,9 @@ storage/
         └── 3ca812de55f09b1a...   ← cada FileContent.stored_at guarda o path absoluto
 ```
 
-O conteúdo de cada arquivo é armazenado **uma única vez por sha256**, independente de quantas versões ou labels o referenciem. Com `REPLICATION_FACTOR=1` (padrão), cada conteúdo fica em um único volume. Com `REPLICATION_FACTOR=2`, uma cópia adicional é gravada em outro volume:
+O conteúdo de cada arquivo é armazenado **uma única vez por sha256**, independente de quantas versões ou labels o referenciem. Com `storage.replication_factor = 1` (padrão), cada conteúdo fica em um único volume. Com `2`, uma cópia adicional é gravada em outro volume:
 
-**Storage físico — replicação ativa (`REPLICATION_FACTOR=2`):**
+**Storage físico — replicação ativa (`storage.replication_factor = 2`):**
 ```
 /mnt/disk1/
 └── _content/
@@ -1783,7 +1827,7 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 
 ## 🔌 Endpoints da API
 
-> **v7.9 — dois níveis de acesso.** Toda rota exige `X-API-Key` de uma conta válida. Rotas em **Backups/Versões/Arquivos** funcionam para qualquer usuário autenticado, mas são **escopadas por dono**: um usuário comum só enxerga/cria/altera labels em que é `owner_user_id`; tentar acessar um label de outro usuário retorna `403`. Admin não tem essa restrição. Rotas em **Storage/Manutenção/Cloud Backup/Usuários** exigem `role=admin` — uma chave de usuário comum recebe `403` nelas.
+> **v7.9 — dois níveis de acesso.** Toda rota exige `X-API-Key` de uma conta válida. Rotas em **Backups/Versões/Arquivos** funcionam para qualquer usuário autenticado, mas são **escopadas por dono**: um usuário comum só enxerga/cria/altera labels em que é `owner_user_id`; tentar acessar um label de outro usuário retorna `403`. Admin não tem essa restrição. Rotas em **Storage/Manutenção/Cloud Backup/Usuários/Configuração** exigem `role=admin` — uma chave de usuário comum recebe `403` nelas.
 
 ### Dashboard e Health
 
@@ -1794,6 +1838,17 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 | `GET` | `/maintenance` | Página de manutenção (HTML, admin) |
 | `GET` | `/explorer` | Explorer de arquivos (HTML, admin) |
 | `GET` | `/manage-users` | Gerenciamento de usuários (HTML, admin) *(v7.9)* |
+| `GET` | `/settings` | Tela de configurações (HTML, admin) *(v7.15)* |
+
+### Configuração (admin) *(v7.15)*
+
+| Método | Endpoint | Descrição |
+|--------|----------|-----------|
+| `GET` | `/api/settings` | Devolve todos os parâmetros agrupados, com tipo, faixa, ajuda, se exige reinício e se há reinício pendente. Segredos vêm mascarados |
+| `PUT` | `/api/settings` | Atualização parcial (`{"storage": {"replication_factor": 2}}`). Valida, persiste e aplica a quente o que não exige reinício. `400` com a mensagem do campo em caso de valor inválido |
+| `POST` | `/api/settings/restart` | Encerra o processo para que o supervisor o suba de novo — única forma de aplicar os parâmetros marcados com ↻ sem SSH |
+
+> Alterar `storage.encryption_enabled` ou `storage.encryption_key` com conteúdo já gravado retorna `409`; para prosseguir, reenvie com `"confirm_encryption_change": true` no corpo. Um segredo enviado vazio mantém o valor atual — a tela nunca reenvia o valor real, só a máscara.
 
 ### Usuários (admin) *(v7.9)*
 
@@ -1856,9 +1911,9 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 | Método | Endpoint | Descrição |
 |--------|----------|-----------|
 | `POST` | `/maintenance/cleanup-orphans` | Remove todos os arquivos físicos não referenciados por nenhuma versão |
-| `POST` | `/maintenance/rereplicate` | Re-replica conteúdos com menos cópias que `REPLICATION_FACTOR` |
-| `POST` | `/maintenance/reconcile-replication` | Reconcilia replicação: remove cópias excedentes e preenche faltantes conforme `REPLICATION_FACTOR` |
-| `POST` | `/maintenance/encrypt-existing` | Cifra arquivos físicos ainda não criptografados (requer `ENCRYPTION_ENABLED=true`) |
+| `POST` | `/maintenance/rereplicate` | Re-replica conteúdos com menos cópias que `storage.replication_factor` |
+| `POST` | `/maintenance/reconcile-replication` | Reconcilia replicação: remove cópias excedentes e preenche faltantes conforme `storage.replication_factor` |
+| `POST` | `/maintenance/encrypt-existing` | Cifra arquivos físicos ainda não criptografados (requer `storage.encryption_enabled`) |
 | `GET` | `/maintenance/cleanup-by-date/preview` | Preview de versões elegíveis para remoção antes de uma data (`?before=YYYY-MM-DD[&label=X]`) |
 | `POST` | `/maintenance/cleanup-by-date` | Remove versões anteriores a uma data; preserva última versão `done` por label e versões `running` (`?before=YYYY-MM-DD[&label=X]`) |
 
@@ -1882,9 +1937,9 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 >
 > `/maintenance/rereplicate` — retorna `{ "replicated": N, "skipped": N, "target_copies": N }`. `replicated` = arquivos que receberam ao menos uma nova cópia. `skipped` = arquivos cuja única cópia está em volume `degraded`. Operação **síncrona** — pode demorar em acervos grandes.
 >
-> `/maintenance/reconcile-replication` — retorna `{ "replicated": N, "skipped": N, "cleaned": N, "target_copies": N }`. Remove cópias excedentes e preenche arquivos sub-replicados em uma única chamada. Útil ao reduzir ou aumentar `REPLICATION_FACTOR`. Operação **síncrona** — pode demorar em acervos grandes.
+> `/maintenance/reconcile-replication` — retorna `{ "replicated": N, "skipped": N, "cleaned": N, "target_copies": N }`. Remove cópias excedentes e preenche arquivos sub-replicados em uma única chamada. Útil ao reduzir ou aumentar `storage.replication_factor`. Operação **síncrona** — pode demorar em acervos grandes.
 >
-> `/maintenance/encrypt-existing` — retorna `{ "files_encrypted": N, "bytes_processed": N, "skipped": N }`. `skipped` inclui arquivos sem cópia acessível (volume degraded) e erros de I/O. Operação **síncrona** — use timeout longo em acervos grandes (cliente usa 600 s). Retorna `400` se `ENCRYPTION_ENABLED=false`.
+> `/maintenance/encrypt-existing` — retorna `{ "files_encrypted": N, "bytes_processed": N, "skipped": N }`. `skipped` inclui arquivos sem cópia acessível (volume degraded) e erros de I/O. Operação **síncrona** — use timeout longo em acervos grandes (cliente usa 600 s). Retorna `400` se `storage.encryption_enabled` for `false`.
 
 ---
 
@@ -2159,7 +2214,7 @@ A resposta de `/check/batch` é `list[CheckBatchResultItem]` na mesma ordem dos 
 }
 ```
 
-`total_bytes`, `used_bytes` e `free_bytes` são a **soma de todos os volumes** configurados em `STORAGE_DIRS` (ou o volume único de `STORAGE_DIR`).
+`total_bytes`, `used_bytes` e `free_bytes` são a **soma de todos os volumes** configurados em `storage.dirs`.
 
 #### `DiskVolumeInfo`
 ```json
@@ -2322,26 +2377,20 @@ psql -U nestvault -h localhost -d nestvault -c "SELECT version();"
 
 ### Configurando o NestVault para usar PostgreSQL
 
-Em vez de `DB_PATH`, defina `DATABASE_URL`:
+Preencha `database.url` em Configurações → Banco de dados, ou direto no `config.json`:
 
-```bash
-export DATABASE_URL="postgresql://nestvault:sua_senha_aqui@localhost/nestvault"
+```json
+"database": {
+  "url": "postgresql://nestvault:sua_senha_aqui@localhost/nestvault",
+  "path": "./backup.db"
+}
 ```
 
-> **Nota:** `DB_PATH` é ignorado quando `DATABASE_URL` está definido.
+> **Nota:** `database.path` é ignorado quando `database.url` está preenchido. O DSN é tratado como segredo: a API devolve apenas uma máscara.
 
-Se estiver usando systemd, adicione a variável ao arquivo de serviço:
-
-```ini
-[Service]
-Environment="DATABASE_URL=postgresql://nestvault:sua_senha_aqui@localhost/nestvault"
-# Remova ou comente a linha DB_PATH se existir
-```
-
-Reinicie o serviço após a alteração:
+O par é marcado como `requer reinício` — a engine do SQLAlchemy é criada no import do módulo:
 
 ```bash
-sudo systemctl daemon-reload
 sudo systemctl restart nestvault
 ```
 
@@ -2372,7 +2421,7 @@ python tools/migrate_to_postgres.py \
   --dry-run
 ```
 
-Após a migração bem-sucedida, configure `DATABASE_URL` e reinicie o servidor. Verifique o dashboard para confirmar que os backups aparecem normalmente.
+Após a migração bem-sucedida, preencha `database.url` e reinicie o servidor. Verifique o dashboard para confirmar que os backups aparecem normalmente.
 
 ### Revertendo para SQLite
 
@@ -2385,8 +2434,8 @@ python tools/migrate_to_sqlite.py \
 ```
 
 Após a migração:
-1. Remova `DATABASE_URL` do ambiente (ou do arquivo systemd)
-2. Configure `DB_PATH=/caminho/para/backup_restored.db` (ou mova o arquivo para o local padrão)
+1. Esvazie `database.url` no `config.json` (ou em Configurações → Banco de dados)
+2. Aponte `database.path` para `/caminho/para/backup_restored.db` (ou mova o arquivo para o local padrão)
 3. Reinicie o servidor
 
 Para verificar sem migrar dados:
