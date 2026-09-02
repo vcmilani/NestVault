@@ -1,5 +1,5 @@
 """
-NestVault  v7.15.0
+NestVault  v8.0.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -8,11 +8,13 @@ Otimizacoes de performance:
 - Cleanup de orfaos em uma unica query
 - Limpeza de arquivos ao deletar label/versao feita em background (nao bloqueia o cliente)
 
-v7.15.0:
+v8.0.0 (BREAKING):
 - Configuracao persistida em arquivo (server/config.json) no lugar das variaveis
   de ambiente: novo modulo config.py com SCHEMA declarativo (tipo, faixa, label,
   ajuda, requires_restart, secret) usado ao mesmo tempo para validacao, para a
   API e para a renderizacao da tela.
+- BREAKING: depois do primeiro boot as variaveis de ambiente sao ignoradas. So
+  BACKUP_API_KEY e NESTVAULT_CONFIG continuam sendo lidas do ambiente.
 - Migracao automatica: no primeiro boot sem config.json o arquivo e gerado a
   partir das variaveis de ambiente atuais. Depois disso o arquivo e a unica
   fonte da verdade (excecao: BACKUP_API_KEY, segredo de bootstrap).
@@ -183,7 +185,7 @@ logging.basicConfig(
 log = logging.getLogger("backup-server")
 
 # -- Config -------------------------------------------------------------------
-# Os aliases locais de storage.* foram removidos na v7.15.0: eram cópias feitas
+# Os aliases locais de storage.* foram removidos na v8.0.0: eram cópias feitas
 # no import, então config.apply_runtime() (tela /settings) nunca chegava aqui.
 # Leia sempre storage.X / crypto.CHUNK_SIZE diretamente.
 
@@ -500,7 +502,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="7.15.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="8.0.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():

@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v7.15.0`
+# 🗄️ NestVault  `v8.0.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **backup por usuário** — cada conta só cria, lista e restaura seus próprios backups.
 
@@ -6,7 +6,7 @@ Cada execução de backup cria uma nova versão dentro do label. O servidor arma
 
 Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **computadores antigos**, inclusive com discos externos USB.
 
-> **v7.15.0** — a configuração do servidor deixa de viver em variáveis de ambiente e passa a ser **persistida em arquivo** (`server/config.json`), com uma **tela de Configurações** (`/settings`) para editá-la. O novo `server/config.py` define um SCHEMA declarativo — tipo, faixa, rótulo, ajuda, se é segredo e se exige reinício — usado ao mesmo tempo para validar as escritas, montar o `GET /api/settings` e renderizar a tela, de modo que um parâmetro novo aparece na interface sem precisar mexer no HTML. A migração é automática: no primeiro boot sem `config.json` o arquivo é gerado a partir das variáveis de ambiente atuais, e a partir daí o arquivo é a única fonte da verdade (a exceção é `BACKUP_API_KEY`, segredo de bootstrap que continua no ambiente). Replicação, limiar de disco, teto do SSD cache e os grupos `db_backup` e `digest` são aplicados **a quente**, reagendando os jobs cron sem reiniciar; volumes, engine do banco e criptografia continuam exigindo reinício e são marcados como tal na tela, que oferece um botão para reiniciar o servidor sob systemd. Segredos são gravados com permissão `0600` e nunca voltam em texto puro pela API. No caminho, os aliases de `storage.*` copiados no import de `main.py` foram removidos — eram justamente o que impedia qualquer mudança em runtime de chegar até lá — e `rclone.config_path` passa a ser de fato repassado ao binário `rclone`, algo que o README documentava mas o código nunca fazia.
+> **v8.0.0** ⚠️ **breaking** — a configuração do servidor deixa de viver em variáveis de ambiente e passa a ser **persistida em arquivo** (`server/config.json`), com uma **tela de Configurações** (`/settings`) para editá-la. Depois do primeiro boot as variáveis de ambiente são **ignoradas** — só `BACKUP_API_KEY` continua no ambiente, por ser o segredo de bootstrap que cria o primeiro admin. A migração é automática e não exige reconfigurar nada à mão: subindo a v8.0.0 uma vez com as `Environment=` ainda no lugar, o servidor gera o `config.json` a partir delas e loga o que migrou; depois disso as linhas podem sair da unit systemd (ver [Migrando de uma instalação anterior à v8.0.0](#migrando-de-uma-instalação-anterior-à-v800)). O novo `server/config.py` define um SCHEMA declarativo — tipo, faixa, rótulo, ajuda, se é segredo e se exige reinício — usado ao mesmo tempo para validar as escritas, montar o `GET /api/settings` e renderizar a tela, de modo que um parâmetro novo aparece na interface sem precisar mexer no HTML. Valor inválido agora vira erro de validação com o nome do campo e a faixa aceita, em vez de derrubar o import do módulo. Replicação, limiar de disco, teto do SSD cache e os grupos `db_backup` e `digest` são aplicados **a quente**, reagendando os jobs cron sem reiniciar; volumes, engine do banco e criptografia continuam exigindo reinício e são marcados como tal na tela, que oferece um botão para reiniciar o servidor sob systemd. Segredos são gravados com permissão `0600` e nunca voltam em texto puro pela API. No caminho, os aliases de `storage.*` copiados no import de `main.py` foram removidos — eram justamente o que impedia qualquer mudança em runtime de chegar até lá — e `rclone.config_path` passa a ser de fato repassado ao binário `rclone`, algo que o README documentava mas o código nunca fazia.
 >
 > **v7.14.0** — novo widget de **CPU e memória do servidor** na página de Atividade: `server/sysmetrics.py` lê `/proc/stat`, `/proc/meminfo`, `/proc/uptime`, `os.getloadavg()` e `/sys/class/thermal/*` diretamente (stdlib, sem depender de `psutil`), amostrando a cada 5s em background e expondo o resultado no `GET /api/activity` já existente (campo `system`). O cálculo de CPU trata `iowait` como tempo ocioso — a mesma convenção do `top`/`htop` — em vez de contá-lo como uso de CPU, diferença relevante em Raspberry Pi com discos externos, onde um backup pesado gera iowait alto sem a CPU estar de fato ocupada. A nova seção "Sistema" mostra uso de CPU (com barra por núcleo) e memória com sparkline dos últimos ~5 min, além de load average, swap, temperatura e uptime; a renderização foi separada do diff existente de `render()` para essas métricas, que mudam a cada poll, não forçarem reconstrução do DOM das outras seções da página.
 >
@@ -98,7 +98,7 @@ Projetado para consumir poucos recursos: roda bem em **Raspberry Pi** e em **com
 NestVault/
 ├── server/
 │   ├── main.py                  ← API FastAPI
-│   ├── config.py                ← Configuração persistida em arquivo (v7.15)
+│   ├── config.py                ← Configuração persistida em arquivo (v8.0)
 │   ├── database.py              ← Modelos SQLite/SQLAlchemy
 │   ├── storage.py               ← Helpers de storage (dedup, replicação, volumes)
 │   ├── crypto.py                ← Criptografia AES-256-GCM (v3.1)
@@ -115,7 +115,7 @@ NestVault/
 │   ├── config.json              ← Configuração do servidor (gerado no 1º boot, gitignored)
 │   └── static/
 │       ├── index.html           ← Dashboard web
-│       └── settings.html        ← Tela de configurações (v7.15)
+│       └── settings.html        ← Tela de configurações (v8.0)
 ├── client/
 │   ├── nestvault.py             ← Cliente de backup/restore
 │   └── requirements.txt
@@ -210,7 +210,7 @@ python3 -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"
 sudo systemctl restart backup-server
 ```
 
-> A partir da v7.15.0 a tela `/settings` faz isso sem SSH: os dois campos ficam no cartão **Storage**, marcados como `requer reinício`, e a própria tela oferece o botão de reiniciar. Alterar a criptografia com conteúdo já gravado pede confirmação por palavra-chave.
+> A partir da v8.0.0 a tela `/settings` faz isso sem SSH: os dois campos ficam no cartão **Storage**, marcados como `requer reinício`, e a própria tela oferece o botão de reiniciar. Alterar a criptografia com conteúdo já gravado pede confirmação por palavra-chave.
 
 > **Guarde a chave em local seguro.** Se perdida, arquivos cifrados se tornam irrecuperáveis. Rotação de chave não está disponível na v3.1.
 
@@ -370,7 +370,7 @@ pip install -r requirements.txt
 
 ### 2. Configuração (`config.json`)
 
-A partir da **v7.15.0** todos os parâmetros do servidor vivem em um arquivo de configuração — não mais em variáveis de ambiente. O arquivo é criado sozinho no primeiro boot e pode ser editado pela tela **[Configurações](#-tela-de-configurações)** (`/settings`, restrita a admins) ou à mão.
+A partir da **v8.0.0** todos os parâmetros do servidor vivem em um arquivo de configuração — não mais em variáveis de ambiente. O arquivo é criado sozinho no primeiro boot e pode ser editado pela tela **[Configurações](#-tela-de-configurações)** (`/settings`, restrita a admins) ou à mão.
 
 | | |
 |---|---|
@@ -411,9 +411,9 @@ Exemplo do arquivo gerado (só as chaves que você quiser mudar precisam estar p
 }
 ```
 
-#### Migrando de uma instalação anterior à v7.15.0
+#### Migrando de uma instalação anterior à v8.0.0
 
-Não é preciso reconfigurar nada à mão. Suba a v7.15.0 **uma vez com as `Environment=` ainda no lugar**: como não existe `config.json`, o servidor gera o arquivo a partir das variáveis atuais e loga o que migrou.
+Não é preciso reconfigurar nada à mão. Suba a v8.0.0 **uma vez com as `Environment=` ainda no lugar**: como não existe `config.json`, o servidor gera o arquivo a partir das variáveis atuais e loga o que migrou.
 
 ```
 [config] migrando 6 variavel(is) de ambiente: STORAGE_DIRS, REPLICATION_FACTOR, DB_PATH, ...
@@ -1427,7 +1427,7 @@ Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Par
   - **Excluir Label Completo** — exclui um label e todas as suas versões (requer digitar o nome do label)
   - **Reatribuir Dono** *(v7.9)* — transfere a posse de um backup para outro usuário; necessário para labels criados antes da migração para backup por usuário (ficam com o admin) ou ao reorganizar contas
 - **Usuários** *(v7.9)* — página `/manage-users`: cria contas (admin ou usuário comum), gira chaves e ativa/desativa acesso. A chave gerada é exibida uma única vez
-- **Configurações** *(v7.15)* — página `/settings`, ver abaixo
+- **Configurações** *(v8.0)* — página `/settings`, ver abaixo
 - **Discos** — página `/disks` com painel de volumes: espaço total/livre/usado, arquivos físicos por volume e status (ok/degraded)
 - **Explorer de arquivos** — navegação e download de arquivos de uma versão específica via `/explorer`
 - **Backups em tempo real** — indicador no cabeçalho com contagem de backups em andamento; polling automático a cada 3 s com botão ⏸ para pausar
@@ -1838,9 +1838,9 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 | `GET` | `/maintenance` | Página de manutenção (HTML, admin) |
 | `GET` | `/explorer` | Explorer de arquivos (HTML, admin) |
 | `GET` | `/manage-users` | Gerenciamento de usuários (HTML, admin) *(v7.9)* |
-| `GET` | `/settings` | Tela de configurações (HTML, admin) *(v7.15)* |
+| `GET` | `/settings` | Tela de configurações (HTML, admin) *(v8.0)* |
 
-### Configuração (admin) *(v7.15)*
+### Configuração (admin) *(v8.0)*
 
 | Método | Endpoint | Descrição |
 |--------|----------|-----------|

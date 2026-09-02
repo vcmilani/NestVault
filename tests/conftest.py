@@ -93,7 +93,7 @@ def _setup_app(tmp_vol, monkeypatch):
     db_mod.Base.metadata.create_all(bind=engine)
     Session = sessionmaker(bind=engine)
 
-    # Desde a v7.15.0 main.py lê storage.X direto — não há mais alias local para
+    # Desde a v8.0.0 main.py lê storage.X direto — não há mais alias local para
     # espelhar, então basta patchar o módulo storage.
     monkeypatch.setattr(storage_mod, "STORAGE_VOLUMES", [tmp_vol])
     monkeypatch.setattr(storage_mod, "STORAGE_DIR", tmp_vol)

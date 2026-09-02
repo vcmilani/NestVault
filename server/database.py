@@ -1,5 +1,5 @@
 """
-Models do banco de dados — v7.15.0
+Models do banco de dados — v8.0.0
 Suporte dual: SQLite (padrão) ou PostgreSQL (opcional via database.url).
 
 SQLite:  configurado via database.path (padrão ./backup.db) — ideal para uso doméstico/NAS.

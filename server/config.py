@@ -1,5 +1,5 @@
 """
-Configuração persistida em arquivo — v7.15.0
+Configuração persistida em arquivo — v8.0.0
 
 Substitui a leitura direta de variáveis de ambiente espalhada pelos módulos.
 A fonte da verdade é um JSON (default: server/config.json, sobrescrevível por
