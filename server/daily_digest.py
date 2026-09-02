@@ -1,12 +1,12 @@
 """
 Daily digest do NestVault: coleta atividade do dia, gera resumo com IA e envia via Telegram.
 
-Variáveis de ambiente:
-  TELEGRAM_BOT_TOKEN  — token do bot (obrigatório para envio)
-  TELEGRAM_CHAT_ID    — chat_id do destinatário (obrigatório para envio)
-  ANTHROPIC_API_KEY   — usa Claude Haiku se definida; caso contrário tenta Ollama
-  OLLAMA_URL          — URL do Ollama local (default: http://localhost:11434)
-  OLLAMA_MODEL        — modelo Ollama (default: llama3)
+Configuração (grupo "digest" do config.json — ver server/config.py):
+  telegram_bot_token  — token do bot (obrigatório para envio)
+  telegram_chat_id    — chat_id do destinatário (obrigatório para envio)
+  anthropic_api_key   — usa Claude Haiku se definida; caso contrário tenta Ollama
+  ollama_url          — URL do Ollama local (default: http://localhost:11434)
+  ollama_model        — modelo Ollama (default: llama3)
 """
 import json
 import logging
@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 from sqlalchemy import func
+
+import config
 
 from database import (
     FileContent,
@@ -26,11 +28,12 @@ from storage import fmt_bytes as _fmt_bytes
 
 log = logging.getLogger("backup-server")
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
-ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
-OLLAMA_URL         = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL       = os.getenv("OLLAMA_MODEL", "llama3")
+# Reatribuídos a quente por config.apply_runtime() — leia sempre o global.
+TELEGRAM_BOT_TOKEN = config.get("digest.telegram_bot_token")
+TELEGRAM_CHAT_ID   = config.get("digest.telegram_chat_id")
+ANTHROPIC_API_KEY  = config.get("digest.anthropic_api_key")
+OLLAMA_URL         = config.get("digest.ollama_url")
+OLLAMA_MODEL       = config.get("digest.ollama_model")
 
 
 def _today_local_range() -> tuple[datetime, datetime, str]:

@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#e8a940">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="NestVault">
+<link rel="icon" type="image/png" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<link rel="manifest" href="/static/manifest.json">
+<title>Configurações — NestVault</title>
+<link rel="stylesheet" href="/static/theme.css">
+<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/nav.css">
+<script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
+<style>
+  main{max-width:900px}
+
+  .page-title{display:flex;align-items:center;gap:10px;margin-bottom:24px;animation:fadeUp .3s ease}
+  .page-title-icon{font-size:18px;color:var(--amber)}
+  .page-title-text{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--text)}
+  .page-title-sub{font-size:10px;color:var(--text-mute);letter-spacing:.08em;margin-top:2px}
+
+  .cfg-path{font-size:10px;color:var(--text-mute);margin-bottom:20px;word-break:break-all}
+  .cfg-path b{color:var(--text-dim);font-weight:normal}
+
+  .restart-bar{border:1px solid var(--amber);border-top:2px solid var(--amber);background:var(--amber-dim);
+               padding:14px 20px;margin-bottom:24px;display:none;animation:fadeUp .3s ease;
+               align-items:center;gap:16px;flex-wrap:wrap}
+  .restart-bar.visible{display:flex}
+  .restart-text{flex:1;font-size:11px;color:var(--text);line-height:1.6;min-width:240px}
+  .restart-text b{color:var(--amber)}
+
+  .cfg-card{border:1px solid var(--border);background:var(--bg2);padding:20px 24px;margin-bottom:20px;
+            animation:fadeUp .4s ease both}
+  .cfg-card-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;
+                 border-bottom:1px solid var(--border);padding-bottom:12px;margin-bottom:16px}
+  .cfg-card-title{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim)}
+  .cfg-card-dirty{font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--amber);
+                  visibility:hidden}
+  .cfg-card.dirty .cfg-card-dirty{visibility:visible}
+
+  .cfg-field{display:grid;grid-template-columns:210px 1fr;gap:10px 16px;align-items:start;
+             padding:11px 0;border-bottom:1px solid var(--border)}
+  .cfg-field:last-of-type{border-bottom:none}
+  .cfg-label{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--text-dim);
+             padding-top:8px;line-height:1.5}
+  .cfg-restart-tag{display:inline-block;font-size:8px;letter-spacing:.08em;text-transform:uppercase;
+                   color:var(--amber);border:1px solid var(--amber);padding:1px 5px;margin-left:6px;
+                   white-space:nowrap;vertical-align:1px}
+  .cfg-help{font-size:10px;color:var(--text-mute);line-height:1.6;margin-top:5px}
+  .cfg-key{font-size:9px;color:var(--text-mute);opacity:.8}
+
+  .op-input{background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:var(--mono);
+            font-size:12px;padding:7px 10px;outline:none;width:100%;max-width:420px}
+  .op-input:focus{border-color:var(--amber)}
+  .op-input.changed{border-color:var(--amber)}
+  .cfg-check{display:flex;align-items:center;gap:9px;padding-top:6px;cursor:pointer;font-size:12px;
+             color:var(--text);user-select:none;width:max-content}
+  .cfg-check input{accent-color:var(--amber);width:14px;height:14px;cursor:pointer}
+
+  .run-btn{display:inline-flex;align-items:center;gap:7px;background:none;border:1px solid var(--border2);
+           color:var(--text-dim);padding:7px 16px;font-family:var(--mono);font-size:11px;cursor:pointer;
+           letter-spacing:.06em;transition:all .15s;white-space:nowrap}
+  .run-btn:hover:not(:disabled){border-color:var(--amber);color:var(--amber)}
+  .run-btn:disabled{opacity:.5;cursor:not-allowed}
+  .run-btn.btn-danger:hover:not(:disabled){border-color:var(--red);color:var(--red)}
+
+  .cfg-card-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;
+                 border-top:1px solid var(--border);padding-top:16px;margin-top:16px}
+  .cfg-msg{font-size:11px;min-height:14px}
+  .cfg-msg.err{color:var(--red)}
+  .cfg-msg.ok{color:var(--green)}
+
+  @media(max-width:640px){
+    .cfg-field{grid-template-columns:1fr;gap:4px}
+    .cfg-label{padding-top:0}
+    .op-input{max-width:none}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">◈</div>
+    <div><div class="logo-text">NestVault</div><div class="logo-sub">Configurações</div></div>
+  </div>
+  <div class="header-right">
+    <span class="last-updated" id="lastUpdated"></span>
+    <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
+    <button class="hbtn" onclick="load()" title="Refresh">↻<span class="hbtn-label"> Refresh</span></button>
+    <a class="hbtn" href="/" title="Voltar">←<span class="hbtn-label"> Voltar</span></a>
+    <a class="hbtn" href="/disks" title="Discos">⊞<span class="hbtn-label"> Discos</span></a>
+    <a class="hbtn" href="/maintenance" title="Manutenção">⚙<span class="hbtn-label"> Manutenção</span></a>
+    <a class="hbtn" href="/manage-users" title="Usuários">☺<span class="hbtn-label"> Usuários</span></a>
+    <button class="hbtn always-visible" id="logoutBtn" title="API Key">⌀<span class="hbtn-label"> API Key</span></button>
+    <button class="nav-hamburger"></button>
+  </div>
+</header>
+
+<nav class="mobile-nav">
+  <button onclick="load();closeNav()">↻ Refresh</button>
+  <a href="/">← Voltar</a>
+  <a href="/disks">⊞ Discos</a>
+  <a href="/maintenance">⚙ Manutenção</a>
+  <a href="/manage-users">☺ Usuários</a>
+</nav>
+<div class="mobile-nav-backdrop"></div>
+
+<main>
+  <div class="error-bar" id="errorBar"></div>
+
+  <div class="page-title">
+    <span class="page-title-icon">⚒</span>
+    <div>
+      <div class="page-title-text">Configurações do Servidor</div>
+      <div class="page-title-sub">Persistidas em arquivo — tela restrita a administradores</div>
+    </div>
+  </div>
+
+  <div class="cfg-path" id="cfgPath"></div>
+
+  <div class="restart-bar" id="restartBar">
+    <div class="restart-text">
+      <b>Reinício pendente.</b> Alguns parâmetros já foram gravados no arquivo mas só passam a valer
+      quando o servidor reiniciar.
+    </div>
+    <button class="run-btn btn-danger" id="restartBtn" onclick="restartServer()">⏻ Reiniciar servidor</button>
+  </div>
+
+  <div id="groupsContainer"><div class="loading">Carregando</div></div>
+</main>
+
+<!-- Login overlay -->
+<div class="login-overlay" id="loginOverlay" style="display:none">
+  <div class="login-box">
+    <div class="login-title">◈ NestVault</div>
+    <div class="login-sub">Informe a API Key para continuar</div>
+    <form id="loginForm">
+      <label class="login-label" for="apiKeyInput">API Key</label>
+      <input class="login-input" id="apiKeyInput" type="password" placeholder="sua-api-key-aqui" autocomplete="off">
+      <button class="login-btn" type="submit">Entrar →</button>
+      <div class="login-error" id="loginError"></div>
+    </form>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+  // Os campos são renderizados a partir do SCHEMA devolvido pelo backend — novos
+  // parâmetros em config.py aparecem aqui sem precisar mexer neste HTML.
+  let _groups = [];
+
+  function fieldId(key) { return 'f_' + key.replace('.', '__'); }
+
+  function inputEl(f) {
+    if (f.type === 'bool') {
+      return `<label class="cfg-check">
+                <input type="checkbox" id="${fieldId(f.key)}" ${f.value ? 'checked' : ''}
+                       onchange="markDirty('${f.key}')">
+                <span>${f.value ? 'habilitado' : 'desabilitado'}</span>
+              </label>`;
+    }
+    const isNum = f.type === 'int' || f.type === 'float';
+    const value = f.type === 'list[str]' ? f.value.join(', ') : String(f.value ?? '');
+    const attrs = [
+      `id="${fieldId(f.key)}"`,
+      `class="op-input"`,
+      `oninput="markDirty('${f.key}')"`,
+      `autocomplete="off"`,
+      isNum ? `type="number"` : `type="text"`,
+      isNum && f.type === 'float' ? `step="any"` : '',
+      f.min !== null && f.min !== undefined ? `min="${f.min}"` : '',
+      f.max !== null && f.max !== undefined ? `max="${f.max}"` : '',
+      f.secret ? `placeholder="${f.is_set ? esc(f.value) + ' — deixe em branco para manter' : 'não definido'}"` : '',
+      f.secret ? `value=""` : `value="${esc(value)}"`,
+    ].filter(Boolean).join(' ');
+    return `<input ${attrs}>`;
+  }
+
+  function render() {
+    const container = document.getElementById('groupsContainer');
+    container.innerHTML = _groups.map(g => `
+      <div class="cfg-card" id="card_${g.name}">
+        <div class="cfg-card-head">
+          <span class="cfg-card-title">${esc(g.label)}</span>
+          <span class="cfg-card-dirty">alterações não salvas</span>
+        </div>
+        ${g.fields.map(f => `
+          <div class="cfg-field">
+            <div class="cfg-label">
+              ${esc(f.label)}${f.requires_restart ? '<span class="cfg-restart-tag">requer reinício</span>' : ''}
+              <div class="cfg-key">${esc(f.key)}</div>
+            </div>
+            <div>
+              ${inputEl(f)}
+              <div class="cfg-help">${esc(f.help)}</div>
+            </div>
+          </div>`).join('')}
+        <div class="cfg-card-foot">
+          <span class="cfg-msg" id="msg_${g.name}"></span>
+          <button class="run-btn" id="save_${g.name}" onclick="saveGroup('${g.name}')">✓ Salvar ${esc(g.label)}</button>
+        </div>
+      </div>`).join('');
+  }
+
+  function markDirty(key) {
+    const group = key.split('.')[0];
+    document.getElementById('card_' + group)?.classList.add('dirty');
+    document.getElementById('msg_' + group).textContent = '';
+    const el = document.getElementById(fieldId(key));
+    if (el && el.type !== 'checkbox') el.classList.add('changed');
+    if (el && el.type === 'checkbox') el.nextElementSibling.textContent = el.checked ? 'habilitado' : 'desabilitado';
+  }
+
+  function collect(group) {
+    const g = _groups.find(x => x.name === group);
+    const out = {};
+    for (const f of g.fields) {
+      const el = document.getElementById(fieldId(f.key));
+      if (!el) continue;
+      if (f.type === 'bool')            out[f.name] = el.checked;
+      else if (f.type === 'list[str]')  out[f.name] = el.value.split(',').map(s => s.trim()).filter(Boolean);
+      else if (f.secret)                { if (el.value !== '') out[f.name] = el.value; }
+      else                              out[f.name] = el.value;
+    }
+    return out;
+  }
+
+  // A troca de criptografia é irreversível para o conteúdo já gravado: o backend
+  // responde 409 e só aceita com o flag de confirmação explícito.
+  async function saveGroup(group, confirmEncryption) {
+    const btn = document.getElementById('save_' + group);
+    const msg = document.getElementById('msg_' + group);
+    const body = {[group]: collect(group)};
+    if (confirmEncryption) body.confirm_encryption_change = true;
+
+    btn.disabled = true;
+    msg.className = 'cfg-msg';
+    msg.textContent = 'Salvando…';
+    try {
+      const r = await fetch('/api/settings', {
+        method: 'PUT', headers: {...H(), 'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+      });
+      if (r.status === 401) { showLogin('API Key inválida.'); return; }
+      if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); return; }
+      const data = await r.json().catch(() => ({}));
+
+      if (r.status === 409) {
+        msg.textContent = '';
+        const ok = await nvConfirm('Alterar criptografia', data.detail || '', {word: 'CONFIRMAR'});
+        if (ok) return saveGroup(group, true);
+        msg.className = 'cfg-msg';
+        msg.textContent = 'Alteração cancelada.';
+        return;
+      }
+      if (!r.ok) { msg.className = 'cfg-msg err'; msg.textContent = data.detail || `Erro ${r.status}`; return; }
+
+      apply(data);
+      document.getElementById('msg_' + group).className = 'cfg-msg ok';
+      document.getElementById('msg_' + group).textContent = 'Salvo.';
+      nvMarkUpdated();
+    } catch(e) {
+      msg.className = 'cfg-msg err';
+      msg.textContent = 'Erro de conexão: ' + e.message;
+    } finally {
+      const b = document.getElementById('save_' + group);
+      if (b) b.disabled = false;
+    }
+  }
+
+  function apply(data) {
+    _groups = data.groups;
+    document.getElementById('cfgPath').innerHTML = 'Arquivo: <b>' + esc(data.config_path) + '</b>';
+    document.getElementById('restartBar').classList.toggle('visible', !!data.pending_restart);
+    render();
+  }
+
+  async function load() {
+    clearError();
+    const container = document.getElementById('groupsContainer');
+    if (!container.querySelector('.cfg-card')) container.innerHTML = '<div class="loading">Carregando</div>';
+    try {
+      const r = await fetch('/api/settings', {headers: H()});
+      if (r.status === 401) { showLogin('API Key inválida.'); container.innerHTML = ''; return; }
+      if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); container.innerHTML = ''; return; }
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      apply(await r.json());
+      nvMarkUpdated();
+    } catch(e) {
+      showError('Não foi possível conectar: '+e.message);
+      container.innerHTML = '<div class="empty">Nenhum dado disponível</div>';
+    }
+  }
+
+  async function restartServer() {
+    const ok = await nvConfirm(
+      'Reiniciar servidor',
+      'O processo será encerrado e o supervisor (systemd Restart=always) deve subi-lo de novo em alguns '
+      + 'segundos. Uploads e jobs em andamento são interrompidos. Sem supervisor configurado, o servidor '
+      + 'não volta sozinho.',
+      {word: 'REINICIAR'}
+    );
+    if (!ok) return;
+
+    const btn = document.getElementById('restartBtn');
+    btn.disabled = true;
+    btn.textContent = '⏳ Reiniciando…';
+    try {
+      await fetch('/api/settings/restart', {method: 'POST', headers: H()});
+    } catch(e) { /* a conexão cai junto com o processo — esperado */ }
+    waitForServer();
+  }
+
+  // O /health não exige auth, então serve de sinal de "voltou" sem depender da chave.
+  function waitForServer(attempt = 0) {
+    if (attempt > 60) {
+      showError('O servidor não voltou em 60s — verifique o supervisor (systemctl status).');
+      const btn = document.getElementById('restartBtn');
+      btn.disabled = false;
+      btn.textContent = '⏻ Reiniciar servidor';
+      return;
+    }
+    setTimeout(async () => {
+      try {
+        const r = await fetch('/health', {cache: 'no-store'});
+        if (r.ok) { location.reload(); return; }
+      } catch(e) { /* ainda subindo */ }
+      waitForServer(attempt + 1);
+    }, 1000);
+  }
+
+  // Init — a própria carga inicial faz o auth-check (401/403 → login)
+  load();
+</script>
+<script src="/static/nav.js"></script>
+</body>
+</html>

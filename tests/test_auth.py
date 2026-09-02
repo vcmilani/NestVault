@@ -13,6 +13,9 @@ PROTECTED_ENDPOINTS = [
     ("POST",   "/check/batch"),
     ("POST",   "/upload"),
     ("POST",   "/maintenance/cleanup-orphans"),
+    ("GET",    "/api/settings"),
+    ("PUT",    "/api/settings"),
+    ("POST",   "/api/settings/restart"),
 ]
 
 ADMIN_ONLY_ENDPOINTS = [
@@ -20,6 +23,15 @@ ADMIN_ONLY_ENDPOINTS = [
     ("GET",  "/api/stats"),
     ("POST", "/maintenance/cleanup-orphans"),
     ("GET",  "/users"),
+    ("GET",  "/api/settings"),
+]
+
+# Também restritos a admin, mas não podem ser chamados "a seco" com a chave de
+# admin: o PUT exige corpo (422 sem ele) e o restart derrubaria o processo de
+# teste. Só entram no teste de 403.
+ADMIN_ONLY_NOT_SMOKEABLE = [
+    ("PUT",  "/api/settings"),
+    ("POST", "/api/settings/restart"),
 ]
 
 
@@ -56,7 +68,7 @@ def test_health_never_requires_auth(auth_client):
     assert r.status_code == 200
 
 
-@pytest.mark.parametrize("method,path", ADMIN_ONLY_ENDPOINTS)
+@pytest.mark.parametrize("method,path", ADMIN_ONLY_ENDPOINTS + ADMIN_ONLY_NOT_SMOKEABLE)
 def test_regular_user_gets_403_on_admin_endpoints(two_users, method, path):
     _admin, alice, _bob = two_users
     r = alice.request(method, path)

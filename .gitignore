@@ -17,6 +17,9 @@ __pycache__/
 # Logs
 *.log
 
+# Configuração do servidor (contém segredos: chave de criptografia, tokens, DSN)
+server/config.json
+
 # Variáveis de ambiente
 .env
 

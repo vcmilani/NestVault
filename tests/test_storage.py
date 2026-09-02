@@ -34,8 +34,6 @@ def _make_client(monkeypatch, volumes, disk_usage_fn):
     Session = sessionmaker(bind=engine)
     _seed_admin(Session)
 
-    monkeypatch.setattr(m, "STORAGE_VOLUMES", volumes)
-    monkeypatch.setattr(m, "STORAGE_DIR", volumes[0])
     # storage.py lê os globais do próprio módulo — propaga os patches para lá.
     monkeypatch.setattr(storage_mod, "STORAGE_VOLUMES", volumes)
     monkeypatch.setattr(storage_mod, "STORAGE_DIR", volumes[0])

@@ -1,5 +1,5 @@
 """
-NestVault  v7.14.0
+NestVault  v8.0.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -7,6 +7,26 @@ Otimizacoes de performance:
 - Indices no banco + WAL mode
 - Cleanup de orfaos em uma unica query
 - Limpeza de arquivos ao deletar label/versao feita em background (nao bloqueia o cliente)
+
+v8.0.0 (BREAKING):
+- Configuracao persistida em arquivo (server/config.json) no lugar das variaveis
+  de ambiente: novo modulo config.py com SCHEMA declarativo (tipo, faixa, label,
+  ajuda, requires_restart, secret) usado ao mesmo tempo para validacao, para a
+  API e para a renderizacao da tela.
+- BREAKING: depois do primeiro boot as variaveis de ambiente sao ignoradas. So
+  BACKUP_API_KEY e NESTVAULT_CONFIG continuam sendo lidas do ambiente.
+- Migracao automatica: no primeiro boot sem config.json o arquivo e gerado a
+  partir das variaveis de ambiente atuais. Depois disso o arquivo e a unica
+  fonte da verdade (excecao: BACKUP_API_KEY, segredo de bootstrap).
+- Nova tela /settings (admin) para editar todos os parametros, com badge de
+  "requer reinicio", segredos mascarados e botao de reiniciar o servidor.
+- Novos endpoints GET/PUT /api/settings e POST /api/settings/restart (admin).
+- Aplicacao a quente de replicacao, limiar de disco, teto do SSD cache, grupo
+  db_backup (reagenda o cron) e grupo digest — sem reiniciar.
+- Aliases stale de storage.* em main.py removidos: eram copias feitas no import,
+  entao nenhuma mudanca em runtime chegava ate aqui.
+- rclone.config_path passa a ser realmente repassado ao binario rclone via
+  RCLONE_CONFIG; antes so estava documentado no README.
 
 v7.14.0:
 - Novo widget de CPU e memoria do servidor na pagina de Atividade —
@@ -126,8 +146,9 @@ v7.2.0:
 """
 
 from fastapi import FastAPI, Request, HTTPException, Depends, Header, BackgroundTasks, Query
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
 import asyncio, os, tempfile, hashlib, base64, shutil, logging, time, threading, re, secrets
@@ -144,6 +165,7 @@ from database import (
     VersionFile, MaintenanceJob, SsdCachePendingMove, RcloneBackupJob, DiskSnapshot,
     User, hash_api_key, bootstrap_admin_user,
 )
+import config
 import crypto
 import storage
 import sysmetrics
@@ -162,13 +184,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("backup-server")
 
-# -- Config (aliases de storage para retrocompatibilidade) --------------------
-STORAGE_VOLUMES      = storage.STORAGE_VOLUMES
-STORAGE_DIR          = storage.STORAGE_DIR
-ENCRYPTION_ENABLED   = storage.ENCRYPTION_ENABLED
-CHUNK_SIZE           = storage.CHUNK_SIZE
-REPLICATION_FACTOR   = storage.REPLICATION_FACTOR
-STORAGE_FALLBACK_THRESHOLD_GB = storage.STORAGE_FALLBACK_THRESHOLD_GB
+# -- Config -------------------------------------------------------------------
+# Os aliases locais de storage.* foram removidos na v8.0.0: eram cópias feitas
+# no import, então config.apply_runtime() (tela /settings) nunca chegava aqui.
+# Leia sempre storage.X / crypto.CHUNK_SIZE diretamente.
 
 STATIC_DIR   = Path(__file__).parent / "static"
 
@@ -439,10 +458,12 @@ async def _ssd_space_monitor():
 
 
 async def lifespan(_: FastAPI):
+    config.flush_boot_log()  # config.py é importado antes do basicConfig acima
+    log.info(f"Config: {config.path()}")
     init_db()
     bootstrap_admin_user(os.getenv("BACKUP_API_KEY", ""))
     _cleanup_stale_running_states()
-    if ENCRYPTION_ENABLED:
+    if storage.ENCRYPTION_ENABLED:
         storage.encryption_key = crypto.load_key()  # lança ValueError se inválida — falha rápido
         log.info("Criptografia: habilitada (AES-256-GCM)")
     else:
@@ -465,7 +486,7 @@ async def lifespan(_: FastAPI):
     # Aquece o cache de stats fora do request, para que o primeiro acesso à página
     # depois do boot já encontre os dados prontos.
     _refresh_stats_async()
-    log.info(f"Servidor iniciado — {len(STORAGE_VOLUMES)} volume(s): {[str(v) for v in STORAGE_VOLUMES]}")
+    log.info(f"Servidor iniciado — {len(storage.STORAGE_VOLUMES)} volume(s): {[str(v) for v in storage.STORAGE_VOLUMES]}")
     if storage.SSD_CACHE_ENABLED and storage.SSD_CACHE_DIR:
         log.info(f"SSD cache: habilitado — {storage.SSD_CACHE_DIR} (max {storage.SSD_CACHE_MAX_GB} GB)")
     log.info("Auth: habilitada (por usuario)")
@@ -481,7 +502,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="7.14.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="8.0.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
@@ -574,12 +595,53 @@ class AbsorbResponse(BaseModel):
     inherited: int
     skipped: int
 
+class SettingsUpdate(BaseModel):
+    """Atualização parcial: só os grupos/campos enviados são alterados.
+
+    Os grupos são livres (dict) de propósito — a validação de nome, tipo e faixa
+    de cada campo vive no SCHEMA de config.py, fonte única também para a tela.
+    """
+    storage:   Optional[dict] = None
+    ssd_cache: Optional[dict] = None
+    database:  Optional[dict] = None
+    db_backup: Optional[dict] = None
+    digest:    Optional[dict] = None
+    rclone:    Optional[dict] = None
+    confirm_encryption_change: bool = False
+
 
 # -- Schemas: Responses -------------------------------------------------------
 class HealthResponse(BaseModel):
     status: Literal["ok"]
     version: str
     time: str
+
+class SettingsField(BaseModel):
+    key: str
+    name: str
+    label: str
+    help: str
+    type: str
+    value: object
+    default: object
+    requires_restart: bool
+    secret: bool
+    is_set: Optional[bool] = None
+    min: Optional[float] = None
+    max: Optional[float] = None
+
+class SettingsGroup(BaseModel):
+    name: str
+    label: str
+    fields: list[SettingsField]
+
+class SettingsResponse(BaseModel):
+    groups: list[SettingsGroup]
+    pending_restart: bool
+    config_path: str
+
+class StatusResponse(BaseModel):
+    status: str
 
 class BackupInfo(BaseModel):
     """Detalhes de um backup com agregados da ultima versao 'done'."""
@@ -1081,7 +1143,7 @@ def _auto_cleanup_if_needed(db: Session, exclude_version_id: Optional[int] = Non
         return None
 
     log.warning(
-        f"[auto-cleanup] Apenas {ok}/{len(_healthy_volumes())} volume(s) com ≥{STORAGE_FALLBACK_THRESHOLD_GB:.0f} GB livre "
+        f"[auto-cleanup] Apenas {ok}/{len(_healthy_volumes())} volume(s) com ≥{storage.STORAGE_FALLBACK_THRESHOLD_GB:.0f} GB livre "
         f"— fator de replicação={factor} não pode ser mantido, iniciando limpeza..."
     )
 
@@ -1557,6 +1619,14 @@ def users_page():
     return HTMLResponse(page.read_text(encoding="utf-8"))
 
 
+@app.get("/settings", response_class=HTMLResponse, include_in_schema=False)
+def settings_page():
+    page = STATIC_DIR / "settings.html"
+    if not page.exists():
+        return HTMLResponse("<h1>Página não encontrada</h1>", status_code=404)
+    return HTMLResponse(page.read_text(encoding="utf-8"))
+
+
 @app.get("/sw.js", include_in_schema=False)
 def service_worker():
     # Servido na raiz (não em /static/) para que o service worker tenha
@@ -1570,7 +1640,7 @@ def service_worker():
 def _build_stats_data(db: Session) -> StatsResponse:
     """Agrega estatísticas globais do sistema em ~7 queries. Resultado cacheado por _STATS_TTL."""
 
-    _is_sqlite = not bool(os.getenv("DATABASE_URL"))
+    _is_sqlite = not bool(config.get("database.url"))
 
     # --- Q1: contagens de backups e versões ---
     counts = db.query(
@@ -1600,7 +1670,7 @@ def _build_stats_data(db: Session) -> StatsResponse:
     avg_duration = round(float(avg_sec), 1) if avg_sec is not None else None
 
     # --- Q3: storage via helpers existentes ---
-    usages = [u for u in (_safe_disk_usage(v) for v in STORAGE_VOLUMES) if u]
+    usages = [u for u in (_safe_disk_usage(v) for v in storage.STORAGE_VOLUMES) if u]
     storage_total      = sum(u.total for u in usages)
     storage_used_disk  = sum(u.used  for u in usages)
     storage_free       = sum(u.free  for u in usages)
@@ -2076,7 +2146,7 @@ def _build_fast_data(db: Session) -> tuple:
     ]
 
     # 2. Storage — um statvfs por volume, reaproveitado no bloco de disks
-    usage_map = {v: _safe_disk_usage(v) for v in STORAGE_VOLUMES}
+    usage_map = {v: _safe_disk_usage(v) for v in storage.STORAGE_VOLUMES}
     usages = [u for u in usage_map.values() if u]
     usage_total = sum(u.total for u in usages)
     usage_used  = sum(u.used  for u in usages)
@@ -2087,7 +2157,7 @@ def _build_fast_data(db: Session) -> tuple:
     )
 
     # 4. Disks — 1 query GROUP BY em vez de 2 queries por volume
-    _vol_paths = [str(v) for v in STORAGE_VOLUMES]
+    _vol_paths = [str(v) for v in storage.STORAGE_VOLUMES]
     _disk_rows = (
         db.query(
             FileContentCopy.volume_path,
@@ -2101,7 +2171,7 @@ def _build_fast_data(db: Session) -> tuple:
     )
     _disk_stats = {r.volume_path: (r.cnt, int(r.bytes)) for r in _disk_rows}
     disks_list = []
-    for vol in STORAGE_VOLUMES:
+    for vol in storage.STORAGE_VOLUMES:
         usage = usage_map[vol]
         files, bytes_ = _disk_stats.get(str(vol), (0, 0))
         disks_list.append(DiskVolumeInfo(
@@ -2310,7 +2380,7 @@ def health():
 
 @app.get("/storage/info", response_model=StorageInfoResponse, dependencies=[Depends(require_admin)])
 def storage_info(db: Session = Depends(get_db)):
-    usages = [u for u in (_safe_disk_usage(v) for v in STORAGE_VOLUMES) if u]
+    usages = [u for u in (_safe_disk_usage(v) for v in storage.STORAGE_VOLUMES) if u]
     usage_total = sum(u.total for u in usages)
     usage_used  = sum(u.used  for u in usages)
     usage_free  = sum(u.free  for u in usages)
@@ -2337,7 +2407,7 @@ def storage_disks(db: Session = Depends(get_db)):
     )
     vol_stats = {r.volume_path: (r.cnt, int(r.bytes)) for r in rows}
 
-    all_vols = [(str(v), _safe_disk_usage(v), False) for v in STORAGE_VOLUMES]
+    all_vols = [(str(v), _safe_disk_usage(v), False) for v in storage.STORAGE_VOLUMES]
     if storage.SSD_CACHE_ENABLED and storage.SSD_CACHE_DIR:
         all_vols.append((str(storage.SSD_CACHE_DIR), _safe_disk_usage(storage.SSD_CACHE_DIR), True))
 
@@ -2734,6 +2804,50 @@ def delete_backup(label: str, background_tasks: BackgroundTasks, db: Session = D
     return BackupDeletedResponse(status="deleted", label=label)
 
 
+# -- Settings (admin) ---------------------------------------------------------
+@app.get("/api/settings", response_model=SettingsResponse, dependencies=[Depends(require_admin)])
+def get_settings():
+    return config.public()
+
+
+@app.put("/api/settings", response_model=SettingsResponse, dependencies=[Depends(require_admin)])
+def update_settings(req: SettingsUpdate, db: Session = Depends(get_db)):
+    updates = req.model_dump(exclude_none=True, exclude={"confirm_encryption_change"})
+    try:
+        if config.touches_encryption(updates) and not req.confirm_encryption_change:
+            if db.query(FileContent.sha256).first() is not None:
+                raise HTTPException(
+                    409,
+                    "Alterar a criptografia com conteudo ja gravado torna os arquivos existentes "
+                    "ilegiveis. Reenvie com confirm_encryption_change=true para prosseguir.",
+                )
+        changed = config.save(updates)
+    except config.ConfigError as e:
+        raise HTTPException(400, str(e))
+    if changed:
+        log.info(f"[settings] {len(changed)} parametro(s) alterado(s): {', '.join(sorted(changed))}")
+    return config.public()
+
+
+@app.post("/api/settings/restart", response_model=StatusResponse,
+          dependencies=[Depends(require_admin)])
+def restart_server():
+    """Encerra o processo para que o supervisor (systemd Restart=always) o suba de novo.
+
+    Único jeito de aplicar os parâmetros marcados como requires_restart sem SSH.
+    Sem supervisor configurado, o servidor simplesmente para — documentado no README.
+    """
+    def _exit():
+        log.warning("[settings] Reinicio solicitado pela tela de configuracoes — encerrando")
+        os._exit(0)
+
+    log.info("[settings] Reinicio agendado")
+    return JSONResponse(
+        content=StatusResponse(status="restarting").model_dump(),
+        background=BackgroundTask(_exit),
+    )
+
+
 # -- Versions -----------------------------------------------------------------
 @app.post("/backups/{label}/versions", response_model=VersionCreatedResponse)
 def create_version(label: str, req: VersionCreate, db: Session = Depends(get_db),
@@ -3051,7 +3165,7 @@ def _store_new_content(
     use_ssd = ssd_dir is not None
     dest = _ssd_content_path(sha256) if use_ssd else _content_path(sha256, volume)
     shutil.move(str(tmp_path), str(dest))
-    if ENCRYPTION_ENABLED:
+    if storage.ENCRYPTION_ENABLED:
         log.info(f"[upload] cifrando {original_path!r} ({size / 1024 / 1024:.2f} MB) — sha256={sha256[:8]}…")
         _fd, _tmp_enc = tempfile.mkstemp(dir=dest.parent, prefix="_enc_")
         os.close(_fd)
@@ -3068,7 +3182,7 @@ def _store_new_content(
     else:
         log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — nova sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
     fc = FileContent(sha256=sha256, stored_at=str(dest), size=size,
-                     encrypted=ENCRYPTION_ENABLED)
+                     encrypted=storage.ENCRYPTION_ENABLED)
     try:
         db.add(fc)
         if use_ssd:
@@ -3447,7 +3561,7 @@ def force_cleanup_orphans(background_tasks: BackgroundTasks, db: Session = Depen
 
 @app.post("/maintenance/rereplicate", response_model=RereplicateResponse, dependencies=[Depends(require_admin)])
 def force_rereplicate(db: Session = Depends(get_db)):
-    """Re-replica conteúdos com menos cópias que REPLICATION_FACTOR. Útil após adicionar um disco novo."""
+    """Re-replica conteúdos com menos cópias que storage.replication_factor. Útil após adicionar um disco novo."""
     replicated, skipped = _rereplicate_all(db)
     target = _target_replicas()
     mj = MaintenanceJob(
@@ -3464,7 +3578,7 @@ def force_rereplicate(db: Session = Depends(get_db)):
 
 @app.post("/maintenance/reconcile-replication", response_model=ReconcileResponse, dependencies=[Depends(require_admin)])
 def reconcile_replication(db: Session = Depends(get_db)):
-    """Remove cópias excedentes e preenche arquivos sub-replicados conforme REPLICATION_FACTOR."""
+    """Remove cópias excedentes e preenche arquivos sub-replicados conforme storage.replication_factor."""
     cleaned = _cleanup_excess_copies(db)
     replicated, skipped = _rereplicate_all(db)
     target = _target_replicas()
@@ -3646,9 +3760,9 @@ def _bg_encrypt_existing(job_id: int) -> None:
 
 @app.post("/maintenance/encrypt-existing", dependencies=[Depends(require_admin)])
 def encrypt_existing_files(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    """Cifra todos os FileContents ainda não cifrados. Requer ENCRYPTION_ENABLED=true no servidor."""
-    if not ENCRYPTION_ENABLED:
-        raise HTTPException(400, "Criptografia não habilitada no servidor (ENCRYPTION_ENABLED=false)")
+    """Cifra todos os FileContents ainda não cifrados. Requer storage.encryption_enabled=true no servidor."""
+    if not storage.ENCRYPTION_ENABLED:
+        raise HTTPException(400, "Criptografia não habilitada no servidor (storage.encryption_enabled=false)")
     mj = MaintenanceJob(
         job_type="encrypt-existing",
         status="running",
@@ -3787,7 +3901,7 @@ def _migrate_disk_preview_data(
     db: Session,
 ) -> MigrateDiskPreviewResponse:
     """Calcula o preview de migração sem iniciar nenhuma operação."""
-    volume_strs = [str(v) for v in STORAGE_VOLUMES]
+    volume_strs = [str(v) for v in storage.STORAGE_VOLUMES]
     if source not in volume_strs:
         raise HTTPException(status_code=400, detail=f"Volume de origem inválido: {source}")
     invalid = [d for d in destinations if d not in volume_strs]
