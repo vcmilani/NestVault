@@ -31,6 +31,13 @@ REPLICATION_FACTOR = config.get("storage.replication_factor")
 # Limiar absoluto (GB) abaixo do qual um volume é considerado esgotado para escrita e para o auto-cleanup.
 STORAGE_FALLBACK_THRESHOLD_GB = config.get("storage.fallback_threshold_gb")
 
+# -- Rebalanceamento entre discos ----------------------------------------------
+AUTO_REBALANCE_ENABLED = config.get("storage.auto_rebalance_enabled")
+REBALANCE_CHECK_INTERVAL_MINUTES = config.get("storage.rebalance_check_interval_minutes")
+# Margem sobre STORAGE_FALLBACK_THRESHOLD_GB usada como meta de espaço livre ao
+# rebalancear — evita que o disco de origem volte a disparar o gatilho no ciclo seguinte.
+REBALANCE_TARGET_FACTOR = 1.2
+
 # -- SSD cache config ---------------------------------------------------------
 SSD_CACHE_ENABLED = config.get("ssd_cache.enabled")
 SSD_CACHE_MAX_GB  = config.get("ssd_cache.max_gb")
@@ -255,6 +262,195 @@ def volumes_with_free_space() -> int:
         if u and u.free >= STORAGE_FALLBACK_THRESHOLD_GB * 1024 ** 3:
             count += 1
     return count
+
+
+def rebalance_sources() -> list[Path]:
+    """Volumes saudáveis com espaço livre abaixo do limiar — precisam de alívio."""
+    threshold_bytes = STORAGE_FALLBACK_THRESHOLD_GB * 1024 ** 3
+    sources = []
+    for v in healthy_volumes():
+        usage = safe_disk_usage(v)
+        if usage and usage.free < threshold_bytes:
+            sources.append(v)
+    return sources
+
+
+def rebalance_destinations(exclude: set = frozenset()) -> list[Path]:
+    """Volumes saudáveis, fora de `exclude`, com espaço livre acima do limiar —
+    na ordem de prioridade declarada em storage.dirs (mesma ordem de STORAGE_VOLUMES)."""
+    threshold_bytes = STORAGE_FALLBACK_THRESHOLD_GB * 1024 ** 3
+    dests = []
+    for v in healthy_volumes():
+        if v in exclude:
+            continue
+        usage = safe_disk_usage(v)
+        if usage and usage.free > threshold_bytes:
+            dests.append(v)
+    return dests
+
+
+def _pick_rebalance_dest(destinations: list[str], dest_free: dict[str, int], threshold_bytes: float) -> str | None:
+    """Primeiro destino com espaço acima do limiar, na ordem de prioridade — mesmo
+    critério de pick_volume() para uploads normais: prioridade declarada, não
+    "quem tem mais espaço livre". Preenche o disco 3 até a meta antes de tocar
+    no disco 4, em vez de espalhar entre os dois só porque ambos têm espaço."""
+    for d in destinations:
+        if dest_free[d] >= threshold_bytes:
+            return d
+    return None
+
+
+def _remove_rebalance_source_copy(db, copy, sha256: str, source_volume: str) -> None:
+    """Apaga a cópia de origem já liberada (copiada para um destino, ou já
+    replicada lá) e realinha FileContent.stored_at se ele apontava para ela."""
+    from database import FileContent, FileContentCopy
+    path = Path(copy.stored_at)
+    stale_stored_at = copy.stored_at
+    db.delete(copy)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as e:
+        log.warning(f"[rebalance] falha ao remover {path}: {e}")
+    fc = db.get(FileContent, sha256)
+    if fc and fc.stored_at == stale_stored_at:
+        alt = (
+            db.query(FileContentCopy)
+            .filter(FileContentCopy.sha256 == sha256,
+                    FileContentCopy.volume_path != source_volume)
+            .first()
+        )
+        if alt:
+            fc.stored_at = alt.stored_at
+
+
+_REBALANCE_BATCH = 50
+
+
+def rebalance_disks(db, dry_run: bool = False) -> dict:
+    """Move o necessário (não necessariamente tudo) dos volumes abaixo do
+    limiar de espaço livre para volumes com espaço sobrando, até cada origem
+    atingir STORAGE_FALLBACK_THRESHOLD_GB * REBALANCE_TARGET_FACTOR de folga.
+
+    Destinos são preenchidos em ordem de prioridade (storage.dirs), igual a
+    pick_volume(): o próximo destino só recebe arquivos depois que o anterior
+    na ordem de prioridade fica sem espaço acima do limiar — nunca "quem tem
+    mais espaço livre agora".
+
+    dry_run=True calcula o mesmo plano sem copiar/apagar nada — usado pelo preview.
+    """
+    from database import FileContent, FileContentCopy
+
+    threshold_bytes = STORAGE_FALLBACK_THRESHOLD_GB * 1024 ** 3
+    target_bytes = threshold_bytes * REBALANCE_TARGET_FACTOR
+
+    sources = rebalance_sources()
+    if not sources:
+        return {"moved": 0, "bytes_moved": 0, "skipped": 0, "sources": [], "destinations": []}
+
+    destinations = rebalance_destinations(exclude=set(sources))
+    dest_strs = [str(d) for d in destinations]
+    dest_free: dict[str, int] = {}
+    for d in destinations:
+        usage = safe_disk_usage(d)
+        dest_free[str(d)] = usage.free if usage else 0
+
+    moved = total_bytes_moved = total_skipped = 0
+    source_reports = []
+
+    for source in sources:
+        source_str = str(source)
+        usage = safe_disk_usage(source)
+        free = usage.free if usage else 0
+
+        candidates = (
+            db.query(FileContentCopy, FileContent.size)
+            .join(FileContent, FileContent.sha256 == FileContentCopy.sha256)
+            .filter(FileContentCopy.volume_path == source_str)
+            .order_by(FileContent.size.desc())
+            .all()
+        )
+
+        src_moved = src_bytes = src_skipped = 0
+
+        for copy, size in candidates:
+            if free >= target_bytes or not dest_strs:
+                break
+            sha256 = copy.sha256
+
+            existing_dest = (
+                db.query(FileContentCopy.volume_path)
+                .filter(FileContentCopy.sha256 == sha256,
+                        FileContentCopy.volume_path.in_(dest_strs))
+                .first()
+            )
+
+            if existing_dest:
+                resolved_dest = existing_dest.volume_path
+            else:
+                best_dest = _pick_rebalance_dest(dest_strs, dest_free, threshold_bytes)
+                if best_dest is None:
+                    src_skipped += 1
+                    continue
+                src_path = Path(copy.stored_at)
+                if not src_path.exists():
+                    src_skipped += 1
+                    continue
+                if not dry_run:
+                    dest_path = content_path(sha256, Path(best_dest))
+                    try:
+                        shutil.copy2(str(src_path), str(dest_path))
+                        if file_sha256(dest_path) != sha256:
+                            dest_path.unlink(missing_ok=True)
+                            src_skipped += 1
+                            continue
+                        db.add(FileContentCopy(sha256=sha256, stored_at=str(dest_path), volume_path=best_dest))
+                    except OSError as e:
+                        log.warning(f"[rebalance] falha ao copiar {sha256[:8]}… para {best_dest}: {e}")
+                        src_skipped += 1
+                        continue
+                dest_free[best_dest] -= size
+                resolved_dest = best_dest
+
+            if not dry_run:
+                detail = " (já replicado no destino — apenas liberando a origem)" if existing_dest else ""
+                log.info(f"[rebalance] {copy.stored_at} ({fmt_bytes(size)}, sha256={sha256[:8]}…) "
+                         f"{source_str} → {resolved_dest}{detail}")
+                _remove_rebalance_source_copy(db, copy, sha256, source_str)
+                src_moved += 1
+                if src_moved % _REBALANCE_BATCH == 0:
+                    db.commit()
+            else:
+                src_moved += 1
+
+            free += size
+            src_bytes += size
+
+        if not dry_run:
+            db.commit()
+
+        moved += src_moved
+        total_bytes_moved += src_bytes
+        total_skipped += src_skipped
+        source_reports.append({
+            "path": source_str,
+            "free_before": usage.free if usage else 0,
+            "free_after_estimate": free,
+            "files_moved": src_moved,
+            "bytes_moved": src_bytes,
+            "skipped": src_skipped,
+        })
+
+    log.info(f"[rebalance] {moved} arquivo(s), {total_bytes_moved / 1024**3:.2f} GB "
+             f"{'(simulado) ' if dry_run else ''}movido(s) de {len(sources)} origem(ns) "
+             f"para {len(destinations)} destino(s)")
+
+    return {
+        "moved": moved,
+        "bytes_moved": total_bytes_moved,
+        "skipped": total_skipped,
+        "sources": source_reports,
+        "destinations": [{"path": str(d), "free_bytes": dest_free[str(d)]} for d in destinations],
+    }
 
 
 def rereplicate_to_volume(v: Path) -> None:

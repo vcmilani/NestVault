@@ -1,5 +1,5 @@
 """
-NestVault  v8.0.0
+NestVault  v8.1.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -208,6 +208,7 @@ _ssd_content_path        = storage.ssd_content_path
 
 
 _ssd_move_lock = threading.Lock()
+_rebalance_lock = threading.Lock()
 
 # Sinaliza o desligamento ao _activity_refresh_loop. Necessário porque o loop
 # espera em _activity_wake.wait() dentro de uma thread do executor: cancelar a
@@ -483,6 +484,7 @@ async def lifespan(_: FastAPI):
     sched.schedule_daily_digest()
     sched.schedule_nightly_cleanup()
     sched.schedule_db_backup()
+    sched.schedule_disk_rebalance_check()
     # Aquece o cache de stats fora do request, para que o primeiro acesso à página
     # depois do boot já encontre os dados prontos.
     _refresh_stats_async()
@@ -502,7 +504,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="8.0.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="8.1.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
@@ -771,6 +773,25 @@ class MigrateDiskPreviewResponse(BaseModel):
     destinations: list[MigrateDiskDestInfo]
     can_proceed: bool
     reason: Optional[str]
+
+class RebalanceSourceInfo(BaseModel):
+    path: str
+    free_before: int
+    free_after_estimate: int
+    files_moved: int
+    bytes_moved: int
+    skipped: int
+
+class RebalanceDestInfo(BaseModel):
+    path: str
+    free_bytes: int
+
+class RebalanceDisksPreviewResponse(BaseModel):
+    sources: list[RebalanceSourceInfo]
+    destinations: list[RebalanceDestInfo]
+    files_to_move: int
+    bytes_to_move: int
+    can_proceed: bool
 
 class StorageInfoResponse(BaseModel):
     total_bytes: int
@@ -1552,6 +1573,80 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
         raise
     finally:
         db.close()
+
+
+# -- Rebalanceamento de discos --------------------------------------------------
+def _bg_rebalance_disks(job_id: int) -> None:
+    """Background task: roda storage.rebalance_disks e atualiza o MaintenanceJob.
+    Chamado tanto pelo endpoint manual (via BackgroundTasks) quanto pela checagem
+    periódica automática (_process_rebalance_check, direto — já roda fora do loop
+    de eventos, na thread do scheduler)."""
+    db = SessionLocal()
+    try:
+        result = storage.rebalance_disks(db)
+        if not result["sources"]:
+            summary = "Nenhum disco abaixo do limiar de espaço livre — nada a fazer"
+        else:
+            summary = (
+                f"{result['moved']} arquivo(s) movido(s) ({storage.fmt_bytes(result['bytes_moved'])}) "
+                f"de {len(result['sources'])} disco(s) de origem"
+                + (f", {result['skipped']} pulado(s)" if result["skipped"] else "")
+            )
+        mj = db.get(MaintenanceJob, job_id)
+        if mj:
+            mj.status = "done"
+            mj.finished_at = datetime.now()
+            mj.summary = summary
+            db.commit()
+            invalidate_activity()
+        log.info(f"[rebalance] job #{job_id} concluído — {summary}")
+    except Exception:
+        log.exception("[rebalance] erro inesperado")
+        try:
+            mj = db.get(MaintenanceJob, job_id)
+            if mj:
+                mj.status = "failed"
+                mj.finished_at = datetime.now()
+                db.commit()
+                invalidate_activity()
+        except Exception:
+            pass
+        raise
+    finally:
+        db.close()
+
+
+def _process_rebalance_check() -> None:
+    """Alvo do job periódico do scheduler (storage.auto_rebalance_enabled). Só cria
+    um MaintenanceJob e dispara o rebalanceamento se realmente houver disco abaixo
+    do limiar e nenhum outro rebalanceamento já estiver em execução."""
+    if not storage.AUTO_REBALANCE_ENABLED:
+        return
+    if not _rebalance_lock.acquire(blocking=False):
+        log.debug("[rebalance] checagem automática já em execução — ignorando disparo duplicado")
+        return
+    try:
+        db = SessionLocal()
+        try:
+            already_running = (
+                db.query(MaintenanceJob)
+                .filter(MaintenanceJob.job_type == "disk-rebalance", MaintenanceJob.status == "running")
+                .first()
+            )
+            if already_running or not storage.rebalance_sources():
+                return
+            mj = MaintenanceJob(job_type="disk-rebalance", status="running",
+                                 summary="Rebalanceamento automático iniciado...")
+            db.add(mj)
+            db.commit()
+            db.refresh(mj)
+            job_id = mj.id
+        finally:
+            db.close()
+        invalidate_activity()
+        _bg_rebalance_disks(job_id)
+    finally:
+        _rebalance_lock.release()
 
 
 # -- Dashboard ----------------------------------------------------------------
@@ -4031,4 +4126,47 @@ def migrate_disk(
 
     background_tasks.add_task(_bg_migrate_disk, req.source, req.destinations, job_id)
     log.info(f"[migrate-disk] job #{job_id} agendado")
+    return {"scheduled": True, "job_id": job_id}
+
+
+# -- Rebalanceamento de discos ---------------------------------------------------
+@app.get(
+    "/maintenance/rebalance-disks/preview",
+    response_model=RebalanceDisksPreviewResponse,
+    dependencies=[Depends(require_admin)],
+)
+def rebalance_disks_preview(db: Session = Depends(get_db)):
+    result = storage.rebalance_disks(db, dry_run=True)
+    return RebalanceDisksPreviewResponse(
+        sources=[RebalanceSourceInfo(**s) for s in result["sources"]],
+        destinations=[RebalanceDestInfo(**d) for d in result["destinations"]],
+        files_to_move=result["moved"],
+        bytes_to_move=result["bytes_moved"],
+        can_proceed=bool(result["sources"]),
+    )
+
+
+@app.post(
+    "/maintenance/rebalance-disks",
+    dependencies=[Depends(require_admin)],
+)
+def rebalance_disks_run(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    already_running = (
+        db.query(MaintenanceJob)
+        .filter(MaintenanceJob.job_type == "disk-rebalance", MaintenanceJob.status == "running")
+        .first()
+    )
+    if already_running:
+        raise HTTPException(status_code=409, detail="Já existe um rebalanceamento em execução")
+    if not storage.rebalance_sources():
+        raise HTTPException(status_code=400, detail="Nenhum disco está abaixo do limiar de espaço livre")
+
+    mj = MaintenanceJob(job_type="disk-rebalance", status="running", summary="Iniciando rebalanceamento...")
+    db.add(mj)
+    db.commit()
+    db.refresh(mj)
+    job_id = mj.id
+
+    background_tasks.add_task(_bg_rebalance_disks, job_id)
+    log.info(f"[rebalance] job #{job_id} agendado manualmente")
     return {"scheduled": True, "job_id": job_id}
