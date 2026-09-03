@@ -118,6 +118,86 @@ def test_rebalance_moves_only_enough_to_clear_threshold(tmp_path, monkeypatch):
     assert len(v2_files) == 2
 
 
+def test_rebalance_fills_higher_priority_destination_first(tmp_path, monkeypatch):
+    """v1 e v2 abaixo do limiar, v3 e v4 com espaço — mesmo v4 tendo MUITO mais
+    espaço livre em termos absolutos, tudo deve ir para v3 primeiro (ordem de
+    prioridade de storage.dirs), nunca para "quem tem mais espaço livre agora"."""
+    v1 = tmp_path / "v1"; v1.mkdir()
+    v2 = tmp_path / "v2"; v2.mkdir()
+    v3 = tmp_path / "v3"; v3.mkdir()
+    v4 = tmp_path / "v4"; v4.mkdir()
+    db = _make_session()
+
+    v1_free = int(0.3 * GB)
+    v2_free = int(0.3 * GB)
+    v3_free = int(5 * GB)
+    v4_free = int(50 * GB)  # bem mais espaço livre que v3, mas prioridade menor
+
+    def fake_usage(path):
+        if path == v1:
+            return DiskUsage(total=10 * GB, used=10 * GB - v1_free, free=v1_free)
+        if path == v2:
+            return DiskUsage(total=10 * GB, used=10 * GB - v2_free, free=v2_free)
+        if path == v3:
+            return DiskUsage(total=200 * GB, used=200 * GB - v3_free, free=v3_free)
+        return DiskUsage(total=200 * GB, used=200 * GB - v4_free, free=v4_free)
+
+    _patch_threshold(monkeypatch, [v1, v2, v3, v4], 1.0, fake_usage)
+
+    file_size = int(0.5 * GB)
+    for i in range(2):
+        _seed_file(db, v1, f"v1-{i}", file_size)
+    for i in range(2):
+        _seed_file(db, v2, f"v2-{i}", file_size)
+
+    result = storage_mod.rebalance_disks(db)
+
+    assert result["moved"] == 4
+    assert db.query(db_mod.FileContentCopy).filter_by(volume_path=str(v3)).count() == 4
+    assert db.query(db_mod.FileContentCopy).filter_by(volume_path=str(v4)).count() == 0
+    assert db.query(db_mod.FileContentCopy).filter_by(volume_path=str(v1)).count() == 0
+    assert db.query(db_mod.FileContentCopy).filter_by(volume_path=str(v2)).count() == 0
+
+
+def test_rebalance_spills_to_next_priority_destination_once_full(tmp_path, monkeypatch):
+    """v3 (maior prioridade entre os destinos) só recebe até ficar sem espaço
+    acima do limiar; o que sobrar transborda para v4, nunca antes disso."""
+    v1 = tmp_path / "v1"; v1.mkdir()
+    v3 = tmp_path / "v3"; v3.mkdir()
+    v4 = tmp_path / "v4"; v4.mkdir()
+    db = _make_session()
+
+    v1_free = int(0.1 * GB)
+    v3_free = int(1.5 * GB)   # cabe 1 arquivo de 0.6 GiB antes de cair abaixo do limiar (1 GiB)
+    v4_free = int(50 * GB)
+
+    def fake_usage(path):
+        if path == v1:
+            return DiskUsage(total=10 * GB, used=10 * GB - v1_free, free=v1_free)
+        if path == v3:
+            return DiskUsage(total=200 * GB, used=200 * GB - v3_free, free=v3_free)
+        return DiskUsage(total=200 * GB, used=200 * GB - v4_free, free=v4_free)
+
+    _patch_threshold(monkeypatch, [v1, v3, v4], 1.0, fake_usage)
+
+    file_size = int(0.6 * GB)
+    sha_a = _seed_file(db, v1, "a", file_size)
+    sha_b = _seed_file(db, v1, "b", file_size)
+
+    result = storage_mod.rebalance_disks(db)
+
+    # 0.1 (livre) + 0.6 (1º) = 0.7 GiB < meta (1.2 GiB) -> continua
+    # 0.7 + 0.6 (2º) = 1.3 GiB >= meta -> pára
+    assert result["moved"] == 2
+
+    copy_a = db.query(db_mod.FileContentCopy).filter_by(sha256=sha_a).first()
+    copy_b = db.query(db_mod.FileContentCopy).filter_by(sha256=sha_b).first()
+    # 1º arquivo: v3 tem 1.5 GiB >= limiar -> recebe. Depois disso v3 fica com
+    # 0.9 GiB (< limiar de 1 GiB) -> 2º arquivo transborda para v4.
+    assert copy_a.volume_path == str(v3)
+    assert copy_b.volume_path == str(v4)
+
+
 def test_rebalance_verifies_sha256_and_leaves_content_readable(tmp_path, monkeypatch):
     v1 = tmp_path / "v1"; v1.mkdir()
     v2 = tmp_path / "v2"; v2.mkdir()

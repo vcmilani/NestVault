@@ -276,7 +276,8 @@ def rebalance_sources() -> list[Path]:
 
 
 def rebalance_destinations(exclude: set = frozenset()) -> list[Path]:
-    """Volumes saudáveis, fora de `exclude`, com espaço livre acima do limiar."""
+    """Volumes saudáveis, fora de `exclude`, com espaço livre acima do limiar —
+    na ordem de prioridade declarada em storage.dirs (mesma ordem de STORAGE_VOLUMES)."""
     threshold_bytes = STORAGE_FALLBACK_THRESHOLD_GB * 1024 ** 3
     dests = []
     for v in healthy_volumes():
@@ -286,6 +287,17 @@ def rebalance_destinations(exclude: set = frozenset()) -> list[Path]:
         if usage and usage.free > threshold_bytes:
             dests.append(v)
     return dests
+
+
+def _pick_rebalance_dest(destinations: list[str], dest_free: dict[str, int], threshold_bytes: float) -> str | None:
+    """Primeiro destino com espaço acima do limiar, na ordem de prioridade — mesmo
+    critério de pick_volume() para uploads normais: prioridade declarada, não
+    "quem tem mais espaço livre". Preenche o disco 3 até a meta antes de tocar
+    no disco 4, em vez de espalhar entre os dois só porque ambos têm espaço."""
+    for d in destinations:
+        if dest_free[d] >= threshold_bytes:
+            return d
+    return None
 
 
 def _remove_rebalance_source_copy(db, copy, sha256: str, source_volume: str) -> None:
@@ -318,6 +330,11 @@ def rebalance_disks(db, dry_run: bool = False) -> dict:
     """Move o necessário (não necessariamente tudo) dos volumes abaixo do
     limiar de espaço livre para volumes com espaço sobrando, até cada origem
     atingir STORAGE_FALLBACK_THRESHOLD_GB * REBALANCE_TARGET_FACTOR de folga.
+
+    Destinos são preenchidos em ordem de prioridade (storage.dirs), igual a
+    pick_volume(): o próximo destino só recebe arquivos depois que o anterior
+    na ordem de prioridade fica sem espaço acima do limiar — nunca "quem tem
+    mais espaço livre agora".
 
     dry_run=True calcula o mesmo plano sem copiar/apagar nada — usado pelo preview.
     """
@@ -368,8 +385,8 @@ def rebalance_disks(db, dry_run: bool = False) -> dict:
             )
 
             if not existing_dest:
-                best_dest = max(dest_free, key=lambda d: dest_free[d])
-                if dest_free[best_dest] < threshold_bytes:
+                best_dest = _pick_rebalance_dest(dest_strs, dest_free, threshold_bytes)
+                if best_dest is None:
                     src_skipped += 1
                     continue
                 src_path = Path(copy.stored_at)
