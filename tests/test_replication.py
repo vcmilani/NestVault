@@ -1,4 +1,5 @@
 import base64
+from collections import namedtuple
 
 import database as db_mod
 import main as m
@@ -7,6 +8,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+
+DiskUsage = namedtuple("DiskUsage", ["total", "used", "free"])
 
 
 # -- Helpers ------------------------------------------------------------------
@@ -136,8 +139,17 @@ def test_upload_skips_degraded_volume(tmp_path, monkeypatch):
     v1 = tmp_path / "v1"; v1.mkdir()
     v2 = tmp_path / "v2"; v2.mkdir()
 
+    def fake_usage(path):
+        # v1 "morto" de verdade — só assim safe_disk_usage() o mantém degraded;
+        # marcar direto em _degraded_volumes não basta, pois qualquer chamada de
+        # disk_usage bem-sucedida em v1 (ex: um refresh de stats em background)
+        # o "cura" de volta antes do upload rodar.
+        if path == v1:
+            raise OSError("disco morto")
+        return DiskUsage(total=200_000_000_000, used=100_000_000_000, free=100_000_000_000)
+
     for c in _mk_client(monkeypatch, [v1, v2], replication_factor=2):
-        m._degraded_volumes.add(v1)
+        monkeypatch.setattr(storage_mod.shutil, "disk_usage", fake_usage)
         c.post("/backups", json={"label": "b1"})
         c.post("/backups/b1/versions", json={"version_key": "v1"})
         r = _upload(c, "b1", "v1", "/file.txt", b"only healthy")

@@ -264,14 +264,19 @@ def test_storage_info_skips_degraded_volume(tmp_path, monkeypatch):
 
 def test_upload_continues_when_one_volume_degraded(tmp_path, monkeypatch):
     """Upload deve funcionar no volume saudável quando o outro está degraded."""
-    import main as m
     v1 = tmp_path / "v1"; v1.mkdir()
     v2 = tmp_path / "v2"; v2.mkdir()
 
-    for c in _client_ctx(monkeypatch, [v1, v2]):
-        # Marca v1 como degraded sem passar pelo disk_usage (simula disco já morto)
-        m._degraded_volumes.add(v1)
+    def fake_usage(path):
+        # v1 "morto" de verdade — só assim safe_disk_usage() o mantém degraded;
+        # marcar direto em _degraded_volumes não basta, pois qualquer chamada de
+        # disk_usage bem-sucedida em v1 (ex: um refresh de stats em background)
+        # o "cura" de volta antes do upload rodar.
+        if path == v1:
+            raise OSError("disco morto")
+        return DiskUsage(total=200_000_000_000, used=100_000_000_000, free=100_000_000_000)
 
+    for c in _client_ctx(monkeypatch, [v1, v2], fake_usage):
         c.post("/backups", json={"label": "b1"})
         c.post("/backups/b1/versions", json={"version_key": "v1"})
         r = upload(c, "b1", "v1", "/a.txt", b"hello from healthy disk")

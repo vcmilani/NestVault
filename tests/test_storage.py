@@ -37,6 +37,11 @@ def _make_client(monkeypatch, volumes, disk_usage_fn):
     # storage.py lê os globais do próprio módulo — propaga os patches para lá.
     monkeypatch.setattr(storage_mod, "STORAGE_VOLUMES", volumes)
     monkeypatch.setattr(storage_mod, "STORAGE_DIR", volumes[0])
+    # Background tasks (_bg_*, _refresh_stats_async no lifespan) abrem sua própria
+    # sessão via SessionLocal() em vez de Depends(get_db) — sem isto elas operam
+    # sobre o banco real (./backup.db) e poluem caches de módulo (ex: reclaimable)
+    # com dados de fora do teste.
+    monkeypatch.setattr(m, "SessionLocal", Session)
 
     def override_get_db():
         db = Session()
@@ -119,13 +124,18 @@ def test_storage_info_reclaimable(tmp_path, monkeypatch):
             "X-Backup-Label": "b1", "X-Version-Key": "v1",
             "X-Original-Path": enc("/f1.txt"), "X-Mtime": "1.0",
         })
-        c.post("/backups/b1/versions/v1", json={"status": "done"})
+        c.patch("/backups/b1/versions/v1", json={"status": "done"})
 
         c.post("/upload", content=b"only in v2", headers={
             "X-Backup-Label": "b1", "X-Version-Key": "v2",
             "X-Original-Path": enc("/f2.txt"), "X-Mtime": "2.0",
         })
         c.patch("/backups/b1/versions/v2", json={"status": "done"})
+
+        # _get_reclaimable_bytes tem cache de 60s (_RECLAIMABLE_TTL), aquecido a
+        # cada boot do lifespan (_refresh_stats_async) antes das versões acima
+        # existirem — força um recálculo para refletir o estado atual do teste.
+        m._reclaimable_cache.update({"value": 0, "ts": 0.0})
 
         r = c.get("/storage/info")
         # v2 é a keeper; conteúdo de v1 é reclaimable
