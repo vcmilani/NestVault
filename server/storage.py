@@ -384,7 +384,9 @@ def rebalance_disks(db, dry_run: bool = False) -> dict:
                 .first()
             )
 
-            if not existing_dest:
+            if existing_dest:
+                resolved_dest = existing_dest.volume_path
+            else:
                 best_dest = _pick_rebalance_dest(dest_strs, dest_free, threshold_bytes)
                 if best_dest is None:
                     src_skipped += 1
@@ -407,8 +409,12 @@ def rebalance_disks(db, dry_run: bool = False) -> dict:
                         src_skipped += 1
                         continue
                 dest_free[best_dest] -= size
+                resolved_dest = best_dest
 
             if not dry_run:
+                detail = " (já replicado no destino — apenas liberando a origem)" if existing_dest else ""
+                log.info(f"[rebalance] {copy.stored_at} ({fmt_bytes(size)}, sha256={sha256[:8]}…) "
+                         f"{source_str} → {resolved_dest}{detail}")
                 _remove_rebalance_source_copy(db, copy, sha256, source_str)
                 src_moved += 1
                 if src_moved % _REBALANCE_BATCH == 0:
