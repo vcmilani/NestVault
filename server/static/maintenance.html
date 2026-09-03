@@ -478,6 +478,25 @@
       </div>
     </div>
 
+    <!-- Rebalancear Discos -->
+    <div class="op-card risk-medium" style="animation-delay:.42s">
+      <div class="op-header">
+        <div class="op-title-wrap">
+          <span class="op-icon">⇌</span>
+          <div>
+            <div class="op-name">Rebalancear Discos</div>
+            <div class="op-endpoint">POST /maintenance/rebalance-disks</div>
+          </div>
+        </div>
+        <span class="risk-badge medium">Médio risco</span>
+      </div>
+      <div class="op-desc">Move só o necessário — não o disco inteiro — dos discos abaixo do limiar de espaço livre (Configurações → Storage) para discos com espaço sobrando. Pode rodar automaticamente (toggle em Configurações) ou sob demanda por este botão. Copia e verifica SHA-256 antes de remover a cópia original.</div>
+      <div class="op-footer">
+        <button class="run-btn" id="btn-rebalance" onclick="runRebalance()">▶ Verificar e Rebalancear</button>
+        <div class="op-result" id="result-rebalance"></div>
+      </div>
+    </div>
+
     <!-- Validação de Integridade -->
     <div class="op-card risk-medium" style="animation-delay:.45s">
       <div class="op-header">
@@ -721,6 +740,61 @@ async function runOp(key) {
     showError(key, 'Erro de conexão: ' + e.message);
   }
   setRunning(key, false);
+}
+
+// -- Rebalancear Discos --------------------------------------------------------
+async function runRebalance() {
+  setRunning('rebalance', true, '▶ Verificar e Rebalancear');
+  let preview;
+  try {
+    const r = await fetch('/maintenance/rebalance-disks/preview', {headers: H()});
+    if (r.status === 401) { showLogin('API Key inválida.'); setRunning('rebalance', false); return; }
+    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); setRunning('rebalance', false); return; }
+    if (!r.ok) {
+      let detail = `HTTP ${r.status}`;
+      try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}
+      showError('rebalance', detail);
+      setRunning('rebalance', false);
+      return;
+    }
+    preview = await r.json();
+  } catch(e) {
+    showError('rebalance', 'Erro de conexão: ' + e.message);
+    setRunning('rebalance', false);
+    return;
+  }
+
+  if (!preview.can_proceed) {
+    showSuccess('rebalance', 'Nenhum disco está abaixo do limiar de espaço livre — nada a fazer.');
+    setRunning('rebalance', false);
+    return;
+  }
+
+  const srcLines = preview.sources.map(s =>
+    `${s.path}: ${fmtBytes(s.free_before)} livres → ~${fmtBytes(s.free_after_estimate)} após mover ${s.files_moved} arquivo(s)`
+  ).join('\n');
+  const destLines = preview.destinations.map(d => `${d.path}: ${fmtBytes(d.free_bytes)} livres`).join('\n');
+  const msg = `${preview.files_to_move} arquivo(s) (${fmtBytes(preview.bytes_to_move)}) serão movidos.\n\n`
+    + `Origem:\n${srcLines}\n\nDestino:\n${destLines}`;
+
+  const ok = await nvConfirm('Confirmar rebalanceamento', msg, null);
+  if (!ok) { setRunning('rebalance', false); return; }
+
+  try {
+    const r = await apiCall('POST', '/maintenance/rebalance-disks');
+    if (r.status === 401) { showLogin('API Key inválida.'); setRunning('rebalance', false); return; }
+    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); setRunning('rebalance', false); return; }
+    if (!r.ok) {
+      let detail = `HTTP ${r.status}`;
+      try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}
+      showError('rebalance', detail);
+    } else {
+      showSuccess('rebalance', fmtResult('rebalance', await r.json()));
+    }
+  } catch(e) {
+    showError('rebalance', 'Erro de conexão: ' + e.message);
+  }
+  setRunning('rebalance', false, '▶ Verificar e Rebalancear');
 }
 
 // -- Limpar Versões Antigas ---------------------------------------------------

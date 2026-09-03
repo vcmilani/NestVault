@@ -3,6 +3,7 @@ import logging
 import os
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 log = logging.getLogger("backup-server")
 
@@ -89,6 +90,28 @@ def schedule_db_backup() -> None:
         misfire_grace_time=3600,
     )
     log.info(f"[scheduler] Backup do banco agendado para {DB_BACKUP_HOUR:02d}:{DB_BACKUP_MINUTE:02d} (hora local)")
+
+
+def schedule_disk_rebalance_check() -> None:
+    """Agenda (ou remove) a checagem periódica de rebalanceamento entre discos.
+    Controlada por storage.auto_rebalance_enabled / storage.rebalance_check_interval_minutes,
+    reagendada a quente por config.apply_runtime() sempre que esses campos mudam."""
+    from main import _process_rebalance_check
+    import config
+    if not config.get("storage.auto_rebalance_enabled"):
+        if scheduler.get_job("disk_rebalance_check"):
+            scheduler.remove_job("disk_rebalance_check")
+        log.info("[scheduler] Rebalanceamento automático de discos desabilitado")
+        return
+    minutes = config.get("storage.rebalance_check_interval_minutes")
+    scheduler.add_job(
+        _process_rebalance_check,
+        IntervalTrigger(minutes=minutes),
+        id="disk_rebalance_check",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    log.info(f"[scheduler] Checagem de rebalanceamento de discos agendada a cada {minutes} min")
 
 
 def reload_rclone_jobs_from_db() -> None:

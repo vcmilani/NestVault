@@ -98,6 +98,13 @@ SCHEMA: list[Field] = [
           "Limiar de espaço livre (GB)",
           "Piso de espaço livre por disco; abaixo disso o volume é considerado esgotado para escrita.",
           min=0),
+    Field("storage.auto_rebalance_enabled", "STORAGE_AUTO_REBALANCE_ENABLED", "bool", False,
+          "Rebalanceamento automático",
+          "Move arquivos de discos abaixo do limiar de espaço livre para discos com espaço sobrando, periodicamente."),
+    Field("storage.rebalance_check_interval_minutes", "STORAGE_REBALANCE_CHECK_INTERVAL_MINUTES", "int", 15,
+          "Intervalo do rebalanceamento (min)",
+          "Frequência da checagem automática de rebalanceamento entre discos.",
+          min=5),
     Field("storage.encryption_enabled", "ENCRYPTION_ENABLED", "bool", False,
           "Criptografia em repouso",
           "Cifra os arquivos com AES-256-GCM. Alterar depois de gravar dados torna o conteúdo existente ilegível.",
@@ -470,6 +477,8 @@ def apply_runtime() -> None:
     storage.REPLICATION_FACTOR = get("storage.replication_factor")
     storage.STORAGE_FALLBACK_THRESHOLD_GB = get("storage.fallback_threshold_gb")
     storage.SSD_CACHE_MAX_GB = get("ssd_cache.max_gb")
+    storage.AUTO_REBALANCE_ENABLED = get("storage.auto_rebalance_enabled")
+    storage.REBALANCE_CHECK_INTERVAL_MINUTES = get("storage.rebalance_check_interval_minutes")
 
     db_backup.DB_BACKUP_ENABLED = get("db_backup.enabled")
     db_backup.DB_BACKUP_RETENTION = get("db_backup.retention")
@@ -489,6 +498,7 @@ def apply_runtime() -> None:
         if sched.scheduler.running:
             sched.schedule_daily_digest()
             sched.schedule_db_backup()
+            sched.schedule_disk_rebalance_check()
     except Exception as e:  # pragma: no cover - reagendamento é best-effort
         log.warning(f"[config] falha ao reagendar jobs: {e}")
 
