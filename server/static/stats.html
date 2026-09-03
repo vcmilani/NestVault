@@ -81,6 +81,15 @@
   .trend-legend span{display:flex;align-items:center;gap:5px}
   .trend-dot{width:10px;height:10px;border-radius:2px;flex-shrink:0}
 
+  /* Disk history (line chart) */
+  .diskhist-wrap{border:1px solid var(--border);background:var(--bg2);padding:16px 20px;margin-bottom:28px}
+  .diskhist-svg{width:100%;height:140px;display:block;overflow:visible}
+  .diskhist-line{fill:none;stroke:var(--chart-1,#3987e5);stroke-width:1.5}
+  .diskhist-point{fill:var(--chart-1,#3987e5);cursor:default}
+  .diskhist-point:hover{fill:var(--amber)}
+  .diskhist-labels{display:flex;margin-top:6px}
+  .diskhist-label{flex:1;min-width:0;font-size:8px;color:var(--text-mute);text-align:center;overflow:hidden;white-space:nowrap}
+
   /* Changes chart (stacked) */
   .changes-chart{display:flex;align-items:flex-end;gap:3px;height:72px;border-bottom:1px solid var(--border);margin-bottom:4px;overflow:hidden}
   .changes-col{display:flex;flex-direction:column;justify-content:flex-end;flex:1;min-width:0;height:100%;cursor:default}
@@ -221,6 +230,15 @@
     <div class="section-title">Armazenamento</div>
   </div>
   <div id="storageSection" style="margin-bottom:28px">
+    <div class="loading">Carregando</div>
+  </div>
+
+  <!-- 2b. Ocupação de disco ao longo do tempo -->
+  <div class="section-head" style="margin-bottom:10px">
+    <div class="section-title">Ocupação de disco — histórico diário</div>
+    <span class="section-sub">% de uso total do armazenamento por dia (até 90 dias)</span>
+  </div>
+  <div id="diskHistorySection" style="margin-bottom:28px">
     <div class="loading">Carregando</div>
   </div>
 
@@ -386,6 +404,7 @@
   function render(data) {
     renderSummary(data);
     renderStorage(data);
+    renderDiskHistory(data.disk_usage_days || []);
     renderReclaimableByLabel(data.reclaimable_by_label || []);
     renderTrend(data.trend_days);
     renderChanges(data.changes_days);
@@ -481,6 +500,54 @@
           <div class="snum"><div class="snum-label">Usado</div><div class="snum-value blue">${esc(fmtSize(d.storage_used_bytes))}</div></div>
           <div class="snum"><div class="snum-label">Liberável</div><div class="snum-value amber">${esc(fmtSize(d.storage_reclaimable_bytes))}</div><div class="snum-sub">versões antigas</div></div>
           <div class="snum"><div class="snum-label">Livre</div><div class="snum-value green">${esc(fmtSize(d.storage_free_bytes))}</div></div>
+        </div>
+      </div>`;
+  }
+
+  function renderDiskHistory(days) {
+    const el = document.getElementById('diskHistorySection');
+    if (!days || days.length < 2) {
+      el.innerHTML = '<div class="empty-state">Sem histórico suficiente ainda — o histórico é registrado uma vez por dia</div>';
+      return;
+    }
+
+    const W = 800, H = 120, PAD_X = 10, PAD_Y = 6;
+    const pcts = days.map(d => d.used_pct);
+    const minP = Math.min(...pcts), maxP = Math.max(...pcts);
+    const range = (maxP - minP) || 1;
+    const step = (W - PAD_X * 2) / (days.length - 1);
+    const plotH = H - PAD_Y * 2;
+
+    const coords = days.map((d, i) => ({
+      x: PAD_X + i * step,
+      y: PAD_Y + plotH - ((d.used_pct - minP) / range) * plotH,
+      d,
+    }));
+
+    const points = coords.map(c => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(' ');
+    const labelEvery = Math.max(1, Math.ceil(days.length / 16));
+    const dots = coords.map((c, i) => {
+      const dd = c.d.date.slice(8, 10), mm = c.d.date.slice(5, 7);
+      const tooltip = `${dd}/${mm}: ${c.d.used_pct.toFixed(1)}% (${fmtSize(c.d.used_bytes)} / ${fmtSize(c.d.total_bytes)})`;
+      return `<circle class="diskhist-point" cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="2.2"><title>${esc(tooltip)}</title></circle>`;
+    }).join('');
+    const labels = days.map((d, i) => {
+      const txt = i % labelEvery === 0 || i === days.length - 1 ? `${d.date.slice(8, 10)}/${d.date.slice(5, 7)}` : '';
+      return `<div class="diskhist-label">${txt}</div>`;
+    }).join('');
+
+    const last = days[days.length - 1];
+
+    el.innerHTML = `
+      <div class="diskhist-wrap">
+        <svg class="diskhist-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+          <polyline class="diskhist-line" points="${points}"/>
+          ${dots}
+        </svg>
+        <div class="diskhist-labels">${labels}</div>
+        <div class="trend-legend">
+          <span><div class="trend-dot" style="background:var(--chart-1,#3987e5)"></div>% de uso total do armazenamento</span>
+          <span>Mín ${minP.toFixed(1)}% · Máx ${maxP.toFixed(1)}% · Atual ${last.used_pct.toFixed(1)}%</span>
         </div>
       </div>`;
   }

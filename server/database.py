@@ -220,6 +220,20 @@ class DiskSnapshot(Base):
     sampled_at  = Column(DateTime, nullable=False, default=_utcnow)
 
 
+class DiskUsageDaily(Base):
+    """Uma amostra por dia do uso total agregado de armazenamento (soma de todos os volumes),
+    usada no gráfico de flutuação de disco ocupado da página de Estatísticas. Retenção de
+    90 dias, podada pelo próprio job diário que grava a amostra (ver disk_history.py)."""
+    __tablename__ = "disk_usage_daily"
+
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    date        = Column(String, nullable=False, unique=True)  # "YYYY-MM-DD"
+    used_bytes  = Column(BigInteger, nullable=False)
+    total_bytes = Column(BigInteger, nullable=False)
+    used_pct    = Column(Float, nullable=False)
+    recorded_at = Column(DateTime, nullable=False, default=_utcnow)
+
+
 def init_db():
     import logging as _initlog
     _log_init = _initlog.getLogger("backup-server")
