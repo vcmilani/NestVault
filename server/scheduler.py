@@ -42,6 +42,22 @@ def schedule_nightly_cleanup() -> None:
     log.info("[scheduler] Nightly cleanup agendado para 00:00 (hora local)")
 
 
+def schedule_disk_history_snapshot() -> None:
+    """Agenda o registro diário do uso total de disco (histórico para o gráfico de Estatísticas),
+    às 23:55 (horário local)."""
+    from disk_history import record_disk_usage_snapshot
+    from datetime import datetime as _dt
+    local_tz = _dt.now().astimezone().tzinfo
+    scheduler.add_job(
+        record_disk_usage_snapshot,
+        CronTrigger(hour=23, minute=55, timezone=local_tz),
+        id="disk_history_snapshot",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    log.info("[scheduler] Registro de histórico de uso de disco agendado para 23:55 (hora local)")
+
+
 def add_or_update_rclone_job(job_id: int, cron_expr: str) -> None:
     """Adiciona ou substitui o agendamento de um rclone job."""
     from cloud.rclone_runner import run_rclone_backup_job

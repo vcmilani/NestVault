@@ -1,5 +1,5 @@
 """
-NestVault  v8.1.0
+NestVault  v8.2.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -163,7 +163,7 @@ from sqlalchemy.exc import IntegrityError
 from database import (
     init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy,
     VersionFile, MaintenanceJob, SsdCachePendingMove, RcloneBackupJob, DiskSnapshot,
-    User, hash_api_key, bootstrap_admin_user,
+    DiskUsageDaily, User, hash_api_key, bootstrap_admin_user,
 )
 import config
 import crypto
@@ -485,6 +485,7 @@ async def lifespan(_: FastAPI):
     sched.schedule_nightly_cleanup()
     sched.schedule_db_backup()
     sched.schedule_disk_rebalance_check()
+    sched.schedule_disk_history_snapshot()
     # Aquece o cache de stats fora do request, para que o primeiro acesso à página
     # depois do boot já encontre os dados prontos.
     _refresh_stats_async()
@@ -504,7 +505,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="8.1.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="8.2.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
@@ -938,6 +939,12 @@ class ReclaimableLabelEntry(BaseModel):
     old_version_count: int
     old_versions_size_bytes: int
 
+class DiskUsageDay(BaseModel):
+    date: str
+    used_pct: float
+    used_bytes: int
+    total_bytes: int
+
 class StatsResponse(BaseModel):
     total_backups: int
     total_versions_done: int
@@ -967,6 +974,7 @@ class StatsResponse(BaseModel):
     bytes_freed_by_cleanup: int
     backups_activity: list[BackupActivityEntry]
     reclaimable_by_label: list[ReclaimableLabelEntry]
+    disk_usage_days: list[DiskUsageDay]
     server_time: str
 
 
@@ -2091,6 +2099,12 @@ def _build_stats_data(db: Session) -> StatsResponse:
             if row.old_versions_size_bytes > 0
         ]
 
+    # --- Q9: histórico diário de uso de disco (gráfico de flutuação) ---
+    disk_usage_days = [
+        DiskUsageDay(date=r.date, used_pct=r.used_pct, used_bytes=r.used_bytes, total_bytes=r.total_bytes)
+        for r in db.query(DiskUsageDaily).order_by(DiskUsageDaily.date.asc()).all()
+    ]
+
     return StatsResponse(
         total_backups=total_backups,
         total_versions_done=total_done,
@@ -2120,6 +2134,7 @@ def _build_stats_data(db: Session) -> StatsResponse:
         bytes_freed_by_cleanup=bytes_freed_by_cleanup,
         backups_activity=backups_activity,
         reclaimable_by_label=reclaimable_by_label,
+        disk_usage_days=disk_usage_days,
         server_time=datetime.now().isoformat(),
     )
 
