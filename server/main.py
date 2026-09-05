@@ -282,6 +282,25 @@ def _pick_volume() -> Path:
         raise HTTPException(503, str(e))
 
 
+def _should_process_ssd_moves(db: Session) -> bool:
+    """Decide se a movimentação SSD → HDD pode rodar agora.
+
+    Nunca roda com outro backup ativo (concorreria pelo barramento de disco).
+    Uma vez ocioso: se o cache está cheio, os novos arquivos já vão direto pro
+    HDD, então não há motivo para esperar — move assim que possível. Se ainda
+    sobra espaço, espera alguns minutos ociosos antes de mover, para não competir
+    com o próximo backup de uma sequência.
+    """
+    if db.query(BackupVersion).filter(BackupVersion.status == "running").first():
+        return False
+    if storage.ssd_cache_write_dir(db) is None:
+        return True
+    last_finished = db.query(func.max(BackupVersion.finished_at)).scalar()
+    if last_finished is None:
+        return True
+    return (datetime.now() - last_finished).total_seconds() >= storage.SSD_CACHE_IDLE_DELAY_MINUTES * 60
+
+
 def _cleanup_stale_running_states():
     """Reseta estados 'running' órfãos deixados por um reinício do servidor."""
     db = SessionLocal()
@@ -452,7 +471,7 @@ async def _ssd_space_monitor():
             continue
         db = SessionLocal()
         try:
-            if db.query(SsdCachePendingMove).count() > 0 and storage.ssd_cache_write_dir(db) is None:
+            if db.query(SsdCachePendingMove).count() > 0 and _should_process_ssd_moves(db):
                 asyncio.get_running_loop().run_in_executor(None, _bg_process_ssd_pending_moves)
         finally:
             db.close()
@@ -3039,7 +3058,9 @@ def finish_version(label: str, version_key: str, req: VersionFinish, background_
     log.info(f"[versao] {label}/{version_key} → {req.status}")
     if req.status == "done":
         background_tasks.add_task(_bg_auto_cleanup)
-        background_tasks.add_task(_bg_process_ssd_pending_moves)
+        if _should_process_ssd_moves(db):
+            background_tasks.add_task(_bg_process_ssd_pending_moves)
+        # Caso contrário, o _ssd_space_monitor dispara quando ficar ocioso.
     return _version_stats(v, db)
 
 
