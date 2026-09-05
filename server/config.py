@@ -127,6 +127,10 @@ SCHEMA: list[Field] = [
           "Teto do SSD cache (GB)",
           "Tamanho máximo da fila pendente no SSD.",
           min=0),
+    Field("ssd_cache.idle_delay_minutes", "SSD_CACHE_IDLE_DELAY_MINUTES", "float", 5.0,
+          "Atraso antes de mover com espaço sobrando (min)",
+          "Se o SSD cache tem espaço livre, espera esse tempo sem nenhum backup ativo antes de mover para os HDs.",
+          min=0),
 
     # -- database --
     Field("database.url", "DATABASE_URL", "str", "",
@@ -477,6 +481,7 @@ def apply_runtime() -> None:
     storage.REPLICATION_FACTOR = get("storage.replication_factor")
     storage.STORAGE_FALLBACK_THRESHOLD_GB = get("storage.fallback_threshold_gb")
     storage.SSD_CACHE_MAX_GB = get("ssd_cache.max_gb")
+    storage.SSD_CACHE_IDLE_DELAY_MINUTES = get("ssd_cache.idle_delay_minutes")
     storage.AUTO_REBALANCE_ENABLED = get("storage.auto_rebalance_enabled")
     storage.REBALANCE_CHECK_INTERVAL_MINUTES = get("storage.rebalance_check_interval_minutes")
 

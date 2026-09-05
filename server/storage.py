@@ -41,6 +41,7 @@ REBALANCE_TARGET_FACTOR = 1.2
 # -- SSD cache config ---------------------------------------------------------
 SSD_CACHE_ENABLED = config.get("ssd_cache.enabled")
 SSD_CACHE_MAX_GB  = config.get("ssd_cache.max_gb")
+SSD_CACHE_IDLE_DELAY_MINUTES = config.get("ssd_cache.idle_delay_minutes")
 _ssd_cache_raw    = config.get("ssd_cache.dir")
 SSD_CACHE_DIR: Path | None = Path(_ssd_cache_raw) if _ssd_cache_raw else None
 if SSD_CACHE_DIR:
