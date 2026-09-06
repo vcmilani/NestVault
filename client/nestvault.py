@@ -50,7 +50,7 @@ Changelog (cliente — histórico completo do sistema no README):
         reconciliação de replicação (reconcile-replication).
 """
 
-VERSION = "v8.3.0"
+VERSION = "v8.4.0"
 
 import os, sys, hashlib, argparse, base64, json, socket, threading, time
 from pathlib import Path
