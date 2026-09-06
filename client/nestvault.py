@@ -1213,53 +1213,64 @@ def restore(destination, label, version_key, server=DEFAULT_SERVER,
         to_process.append((file_id, relative, dest_file, sha256, size))
 
     # Fase 2 (paralela, mesmo padrão do backup): hash de existentes + download.
-    with _make_transfer_progress() as progress:
+    with _make_progress() as progress:
+        overall = progress.add_task("Restaurando", total=len(to_process))
+
+        def _update_bar():
+            with lock:
+                desc = (f"[{GREEN}]✓ {stats['restored']}[/{GREEN}]  "
+                        f"[{DIM}]⭆ {stats['skipped']}[/{DIM}]  "
+                        f"[{RED}]✗ {stats['errors']}[/{RED}]")
+            progress.update(overall, advance=1, description=desc)
+
         def _restore_one(item):
             file_id, relative, dest_file, sha256, size = item
-
-            if dest_file.exists() and not overwrite:
-                match = sha256_file(dest_file) == sha256
-                label_str = "[identico]" if match else "[modificado — use --overwrite]"
-                _dim(f"{'SKIP' if match else 'DIFF'}  {relative}  {label_str}")
-                with lock:
-                    stats["skipped"] += 1
-                return
-
-            if dry_run:
-                _dim(f"DOWN  {relative}  ({fmt_size(size)})  [dry-run]")
-                return
-
             try:
-                r = _session.get(f"{server}/files/{file_id}/download",
-                                 headers=build_headers(), stream=True, timeout=120)
-                r.raise_for_status()
-                dest_file.parent.mkdir(parents=True, exist_ok=True)
-                total_bytes = int(r.headers.get("Content-Length", size))
-                task_id = progress.add_task(
-                    Path(relative).name[:40],
-                    total=total_bytes / (1024 * 1024),
-                )
-                try:
-                    with open(dest_file, "wb") as f:
-                        for chunk in r.iter_content(chunk_size=65536):
-                            f.write(chunk)
-                            progress.update(task_id, advance=len(chunk) / (1024 * 1024))
-                finally:
-                    progress.remove_task(task_id)
+                if dest_file.exists() and not overwrite:
+                    match = sha256_file(dest_file) == sha256
+                    label_str = "[identico]" if match else "[modificado — use --overwrite]"
+                    _dim(f"{'SKIP' if match else 'DIFF'}  {relative}  {label_str}")
+                    with lock:
+                        stats["skipped"] += 1
+                    return
 
-                if sha256_file(dest_file) != sha256:
-                    _err(f"Integridade falhou — {relative} removido")
-                    dest_file.unlink()
+                if dry_run:
+                    _dim(f"DOWN  {relative}  ({fmt_size(size)})  [dry-run]")
+                    return
+
+                try:
+                    r = _session.get(f"{server}/files/{file_id}/download",
+                                     headers=build_headers(), stream=True, timeout=120)
+                    r.raise_for_status()
+                    dest_file.parent.mkdir(parents=True, exist_ok=True)
+                    total_bytes = int(r.headers.get("Content-Length", size))
+                    task_id = progress.add_task(
+                        Path(relative).name[:40],
+                        total=total_bytes / (1024 * 1024),
+                    )
+                    try:
+                        with open(dest_file, "wb") as f:
+                            for chunk in r.iter_content(chunk_size=65536):
+                                f.write(chunk)
+                                progress.update(task_id, advance=len(chunk) / (1024 * 1024))
+                    finally:
+                        progress.remove_task(task_id)
+
+                    if sha256_file(dest_file) != sha256:
+                        _err(f"Integridade falhou — {relative} removido")
+                        dest_file.unlink()
+                        with lock:
+                            stats["errors"] += 1
+                        return
+                    with lock:
+                        stats["restored"] += 1
+
+                except requests.RequestException as e:
+                    _err(f"{relative}: {e}")
                     with lock:
                         stats["errors"] += 1
-                    return
-                with lock:
-                    stats["restored"] += 1
-
-            except requests.RequestException as e:
-                _err(f"{relative}: {e}")
-                with lock:
-                    stats["errors"] += 1
+            finally:
+                _update_bar()
 
         if to_process:
             with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
