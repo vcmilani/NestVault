@@ -64,7 +64,7 @@ from rich.table import Table, Column
 from rich.panel import Panel
 from rich.progress import (
     Progress, SpinnerColumn, BarColumn, MofNCompleteColumn,
-    TextColumn, TransferSpeedColumn, TimeRemainingColumn,
+    TextColumn, TimeRemainingColumn,
 )
 from rich import box
 
@@ -117,17 +117,6 @@ def _make_progress() -> Progress:
         TimeRemainingColumn(table_column=Column(style=DIM)),
         console=console,
         transient=False,
-    )
-
-
-def _make_transfer_progress() -> Progress:
-    return Progress(
-        TextColumn(f"  [{DIM}]{{task.description}}"),
-        BarColumn(bar_width=40, style=DIM, complete_style=AMBER, finished_style=GREEN),
-        TextColumn(f"[{TEXT}]{{task.completed:.1f}} MB"),
-        TransferSpeedColumn(),
-        console=console,
-        transient=True,
     )
 
 

@@ -156,7 +156,7 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from urllib.parse import quote
 
-from sqlalchemy import func, select, insert, literal, case, delete, exists, and_
+from sqlalchemy import func, select, insert, literal, case, exists, and_
 from sqlalchemy.orm import Session, aliased
 from sqlalchemy.exc import IntegrityError
 
@@ -1534,7 +1534,7 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
                         dest_free[best_dest] = max(0, dest_free[best_dest] - fc.size)
 
                     copied += 1
-                except (OSError, Exception) as e:
+                except Exception as e:
                     log.warning(f"[migrate-disk] falha ao copiar {sha256[:8]}…: {e}")
                     dest_path.unlink(missing_ok=True)
                     skipped += 1
@@ -1567,10 +1567,13 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
             except OSError as e:
                 log.warning(f"[migrate-disk] falha ao remover {src_path}: {e}")
 
-        # Atualiza FileContent.stored_at que ainda apontam para o volume de origem
+        # Atualiza FileContent.stored_at que ainda apontam para o volume de origem.
+        # startswith() (não like(f"{source}%")) escapa % e _ do path automaticamente —
+        # sem isso, um volume cujo path contém esses caracteres (comuns em nomes de
+        # disco, ex: "disk_1") batia como coringa de LIKE contra outros paths.
         stale_fcs = (
             db.query(FileContent)
-            .filter(FileContent.stored_at.like(f"{source}%"))
+            .filter(FileContent.stored_at.startswith(source))
             .all()
         )
         for fc in stale_fcs:
@@ -3365,11 +3368,13 @@ def _store_new_content(
     version_key: str,
     original_path: str,
     db: Session,
-) -> FileContent:
+) -> tuple[FileContent, Optional[Path]]:
     """Move o tmp para o destino final, cifra/verifica e registra no banco.
     Bloqueante (I/O + criptografia) — deve rodar via asyncio.to_thread para
-    não travar o event loop. Retorna o FileContent vencedor (o criado aqui
-    ou o de um upload concorrente que chegou primeiro)."""
+    não travar o event loop. Retorna (FileContent vencedor, replica_source):
+    o FileContent é o criado aqui ou o de um upload concorrente que chegou
+    primeiro; replica_source é o path a partir do qual criar réplicas (None
+    se usou SSD cache ou se um upload concorrente já venceu)."""
     use_ssd = ssd_dir is not None
     dest = _ssd_content_path(sha256) if use_ssd else _content_path(sha256, volume)
     shutil.move(str(tmp_path), str(dest))

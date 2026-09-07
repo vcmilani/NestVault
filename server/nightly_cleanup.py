@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from database import SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob, SsdCachePendingMove, engine
-from sqlalchemy import func, select, text, delete, exists
+from sqlalchemy import func, select, delete, exists
 from cache_state import invalidate_activity
 
 log = logging.getLogger("backup-server")

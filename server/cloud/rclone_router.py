@@ -13,7 +13,7 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from auth import require_admin
-from database import RcloneBackupJob, SessionLocal, get_db
+from database import RcloneBackupJob, get_db
 import scheduler as sched
 
 log = logging.getLogger("backup-server")

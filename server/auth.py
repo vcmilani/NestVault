@@ -1,4 +1,3 @@
-import secrets
 from fastapi import Header, HTTPException, Depends
 from typing import Optional
 from sqlalchemy.orm import Session
@@ -11,10 +10,13 @@ def get_current_user(x_api_key: Optional[str] = Header(None),
     if not x_api_key:
         raise HTTPException(401, "API key ausente")
     key_hash = hash_api_key(x_api_key)
+    # A comparação é a própria query: o WHERE já exige igualdade exata do hash, então
+    # um `user` retornado tem, por definição, api_key_hash == key_hash — um
+    # secrets.compare_digest() aqui comparava dois valores já garantidos iguais.
     user = (db.query(User)
             .filter(User.api_key_hash == key_hash, User.is_active == True)  # noqa: E712
             .first())
-    if not user or not secrets.compare_digest(user.api_key_hash, key_hash):
+    if not user:
         raise HTTPException(401, "API key invalida")
     return user
 

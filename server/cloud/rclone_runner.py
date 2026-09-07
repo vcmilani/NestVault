@@ -39,7 +39,7 @@ import os
 import tempfile
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 import shutil
@@ -600,7 +600,6 @@ async def _consumer(
     version_id: int,
     enc_key: bytes | None,
     errors: list,
-    abort: asyncio.Event,
 ) -> tuple[int, int, int]:
     processed = 0
     skipped   = 0
@@ -1196,7 +1195,7 @@ async def _run_fast_strategy(job: RcloneBackupJob, db) -> None:
         t_start = time.monotonic()
         _, (processed, skipped, bytes_dl) = await asyncio.gather(
             _producer(queue, all_files, prev_files, job.remote_name, job.remote_path, errors, abort),
-            _consumer(queue, version.id, enc_key, errors, abort),
+            _consumer(queue, version.id, enc_key, errors),
         )
         elapsed = time.monotonic() - t_start
 

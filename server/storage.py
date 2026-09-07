@@ -113,7 +113,7 @@ def pick_volume_last_resort() -> Path:
     hvols_set = set(healthy_volumes())
     if not hvols_set:
         raise RuntimeError("Nenhum volume de storage disponível")
-    vol = max(hvols_set, key=lambda v: (safe_disk_usage(v) or type("_", (), {"free": 0})()).free)
+    vol = max(hvols_set, key=lambda v: getattr(safe_disk_usage(v), "free", 0))
     usage = safe_disk_usage(vol)
     free_gb = usage.free / 1024**3 if usage else 0
     log.critical(
