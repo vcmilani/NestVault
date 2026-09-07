@@ -12,7 +12,8 @@ já que a engine é criada no import deste módulo.
 
 from sqlalchemy import (
     create_engine, Column, Integer, BigInteger, String, Float, Boolean,
-    DateTime, ForeignKey, UniqueConstraint, Index, event, text, Text
+    DateTime, ForeignKey, UniqueConstraint, Index, event, text, Text, inspect,
+    bindparam
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
@@ -176,6 +177,10 @@ class MaintenanceJob(Base):
     started_at  = Column(DateTime, default=_utcnow)
     finished_at = Column(DateTime, nullable=True)
     summary     = Column(String, nullable=True)
+    # Bytes efetivamente liberados pelo job (limpezas). Alimenta o total acumulado e
+    # o gráfico "Espaço liberado por dia" da página de Estatísticas. Zero para jobs
+    # que não liberam espaço (replicação, cifragem, backup do banco...).
+    bytes_freed = Column(BigInteger, nullable=False, default=0, server_default="0")
 
 
 class SsdCachePendingMove(Base):
@@ -232,6 +237,50 @@ class DiskUsageDaily(Base):
     total_bytes = Column(BigInteger, nullable=False)
     used_pct    = Column(Float, nullable=False)
     recorded_at = Column(DateTime, nullable=False, default=_utcnow)
+
+
+# Tipos de job cujo resumo pode citar bytes liberados. Restringir por tipo é
+# essencial: o resumo de "ssd-cache-move" também traz "(N MB)", mas mover SSD →
+# HDD não libera espaço algum.
+_BYTES_FREED_JOB_TYPES = (
+    "nightly-cleanup", "cleanup-by-date", "cleanup-orphans",
+    "cleanup-versions", "auto-cleanup",
+)
+
+# Formatos escritos historicamente: "... liberado(s) (12.3 MB)" e "... 12.3 MB liberados".
+# findall (e não search) porque a limpeza noturna cita dois valores no mesmo resumo:
+# os órfãos e os temporários.
+_RE_SUMMARY_MB = r'\(([\d.]+)\s*MB\)|([\d.]+)\s*MB liberados'
+
+
+def _backfill_bytes_freed(conn, log) -> None:
+    """Popula bytes_freed dos jobs antigos a partir do texto de summary.
+
+    Chamado uma única vez, logo após a coluna ser criada. É aproximado por
+    natureza (os resumos arredondam para 0,1 MB); jobs novos gravam o inteiro exato.
+    """
+    import re
+
+    rows = conn.execute(text(
+        "SELECT id, summary FROM maintenance_jobs "
+        "WHERE status = 'done' AND summary IS NOT NULL AND job_type IN :types"
+    ).bindparams(bindparam("types", expanding=True)), {"types": list(_BYTES_FREED_JOB_TYPES)}).fetchall()
+
+    updates = []
+    for job_id, summary in rows:
+        mb = 0.0
+        for paren, suffix in re.findall(_RE_SUMMARY_MB, summary):
+            try:
+                mb += float(paren or suffix)
+            except ValueError:
+                continue
+        if mb > 0:
+            updates.append({"id": job_id, "b": int(mb * 1024 * 1024)})
+
+    if updates:
+        conn.execute(text("UPDATE maintenance_jobs SET bytes_freed = :b WHERE id = :id"), updates)
+        conn.commit()
+    log.info(f"[db-migrate] bytes_freed retroalimentado em {len(updates)} job(s) de limpeza")
 
 
 def init_db():
@@ -292,6 +341,20 @@ def init_db():
         except Exception as e:
             if "duplicate column" not in str(e).lower():
                 raise
+
+    # Idem para maintenance_jobs.bytes_freed (gráfico de espaço liberado por dia).
+    # Só a criação da coluna dispara o backfill dos resumos antigos — por isso o
+    # inspect antes do ALTER, e não um try/except: no Postgres o ADD COLUMN IF NOT
+    # EXISTS não falha quando a coluna já existe, e o backfill rodaria a cada boot.
+    with engine.connect() as conn:
+        _mj_cols = {c["name"] for c in inspect(conn).get_columns("maintenance_jobs")}
+        if "bytes_freed" not in _mj_cols:
+            conn.execute(text(
+                "ALTER TABLE maintenance_jobs ADD COLUMN bytes_freed BIGINT NOT NULL DEFAULT 0"
+            ))
+            conn.commit()
+            _log_init.info("[db-migrate] Coluna maintenance_jobs.bytes_freed adicionada")
+            _backfill_bytes_freed(conn, _log_init)
 
     # Demais migrações manuais apenas para SQLite — no PostgreSQL o schema é
     # criado via create_all (bancos novos) ou migração externa.
