@@ -1,5 +1,5 @@
 """
-NestVault  v7.14.0
+NestVault  v9.0.0
 Cada execucao de backup cria uma nova versao dentro do label.
 Conteudo identico e armazenado uma unica vez no servidor (deduplicacao por sha256).
 
