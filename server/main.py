@@ -3146,12 +3146,26 @@ def _content_visible_to_user(db: Session, user: User, sha256s: set[str]) -> set[
     """
     if not sha256s or user.role == "admin":
         return set(sha256s)
-    rows = (
-        db.query(VersionFile.sha256)
+    # Semi-join dirigido pela lista de hashes, não DISTINCT sobre o join. A forma
+    # anterior obrigava o banco a materializar TODA linha de version_files casada
+    # com os (até 500) hashes do lote antes de reduzir ao conjunto distinto — e num
+    # servidor de dedup com versionamento o fan-out é enorme: um arquivo presente em
+    # 100 versões são 100 linhas por hash. Aqui a varredura parte de file_contents
+    # (500 buscas por primary key — todos os chamadores já confirmaram presença lá,
+    # e a FK version_files.sha256 → file_contents garante que o que não está lá não
+    # pode estar em version_files) e o EXISTS correlacionado para na PRIMEIRA
+    # ocorrência de cada hash, em vez de coletar as 100 e deduplicar.
+    owned = (
+        db.query(VersionFile.id)
         .join(BackupVersion, BackupVersion.id == VersionFile.version_id)
         .join(BackupID, BackupID.label == BackupVersion.backup_label)
-        .filter(VersionFile.sha256.in_(sha256s), BackupID.owner_user_id == user.id)
-        .distinct()
+        .filter(VersionFile.sha256 == FileContent.sha256,
+                BackupID.owner_user_id == user.id)
+        .exists()
+    )
+    rows = (
+        db.query(FileContent.sha256)
+        .filter(FileContent.sha256.in_(sha256s), owned)
         .all()
     )
     return {r.sha256 for r in rows}

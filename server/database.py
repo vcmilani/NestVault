@@ -157,7 +157,11 @@ class VersionFile(Base):
     __tablename__ = "version_files"
     __table_args__ = (
         UniqueConstraint("version_id", "original_path", name="uq_version_path"),
-        Index("idx_sha256", "sha256"),
+        # Composto (sha256, version_id): cobre tanto as buscas só por sha256 — sha256
+        # é a coluna principal, então substitui o antigo idx_sha256 — quanto o EXISTS
+        # de posse em _content_visible_to_user, que precisa do version_id logo em
+        # seguida. Com as duas colunas no índice a sondagem não toca a heap.
+        Index("idx_vf_sha_version", "sha256", "version_id"),
     )
 
     id            = Column(Integer, primary_key=True)
@@ -412,6 +416,13 @@ def init_db():
             # Remove índice redundante com a unique constraint (version_id, original_path)
             ("DROP INDEX IF EXISTS version_files_original_path_index",
              "Removendo índice redundante: version_files.original_path"),
+            # Cria o composto (sha256, version_id) ANTES de dropar o idx_sha256 que
+            # ele substitui — nessa ordem nenhuma busca por sha256 fica sem índice
+            # no meio da migração, que num banco grande leva tempo.
+            ("CREATE INDEX IF NOT EXISTS idx_vf_sha_version ON version_files (sha256, version_id)",
+             "Criando índice composto otimizado: idx_vf_sha_version"),
+            ("DROP INDEX IF EXISTS idx_sha256",
+             "Removendo índice redundante: version_files.sha256 (coberto pelo composto)"),
         ]
         for stmt, msg in _index_migrations:
             conn.execute(text(stmt))
