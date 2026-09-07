@@ -3163,6 +3163,33 @@ def delete_version(label: str, version_key: str, background_tasks: BackgroundTas
 
 
 # -- Check --------------------------------------------------------------------
+def _content_visible_to_user(db: Session, user: User, sha256s: set[str]) -> set[str]:
+    """Subconjunto de `sha256s` (já confirmados presentes em FileContent pelo chamador)
+    que este usuário pode legitimamente enxergar como "existente" — presentes em algum
+    VersionFile de um backup PRÓPRIO (atual ou passado). Admin enxerga tudo.
+
+    Sem essa checagem, o modo "só registrar" (/upload sem corpo, /register/batch) e o
+    /check*/content_exists funcionavam como oráculo de existência entre usuários e
+    permitiam "adotar" conteúdo alheio só citando o sha256, sem nunca ter enviado os
+    bytes — o download subsequente escopa por posse do VersionFile resultante, não do
+    FileContent em si, então a adoção bastava para ler o conteúdo de outra conta.
+    Upload com corpo real não é afetado por esta checagem: o servidor calcula o sha256
+    a partir dos bytes efetivamente recebidos, então quem envia já provou posse por
+    definição — só o atalho "cite o hash e pule o envio" precisa de posse prévia.
+    """
+    if not sha256s or user.role == "admin":
+        return set(sha256s)
+    rows = (
+        db.query(VersionFile.sha256)
+        .join(BackupVersion, BackupVersion.id == VersionFile.version_id)
+        .join(BackupID, BackupID.label == BackupVersion.backup_label)
+        .filter(VersionFile.sha256.in_(sha256s), BackupID.owner_user_id == user.id)
+        .distinct()
+        .all()
+    )
+    return {r.sha256 for r in rows}
+
+
 @app.post("/check", response_model=CheckResponse)
 def check_file(req: CheckRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Apenas duas queries no caso comum — tudo indexado."""
@@ -3178,10 +3205,12 @@ def check_file(req: CheckRequest, db: Session = Depends(get_db), user: User = De
         return CheckResponse(needs_upload=False, content_exists=True,
                              reason="Ja registrado nesta versao", file_id=vf[0])
 
-    # Conteudo ja existe? — primary key, lookup O(1)
-    content_exists = db.query(FileContent.sha256).filter(
-        FileContent.sha256 == req.sha256
-    ).first() is not None
+    # Conteudo ja existe no storage E o usuário já provou possuí-lo antes (ou é admin)?
+    # As duas mensagens de resultado (não existe / existe mas não é seu) são idênticas
+    # de propósito — não expor a segunda evita o oráculo entre usuários.
+    content_exists = False
+    if db.query(FileContent.sha256).filter(FileContent.sha256 == req.sha256).first() is not None:
+        content_exists = bool(_content_visible_to_user(db, user, {req.sha256}))
 
     return CheckResponse(
         needs_upload=True,
@@ -3208,11 +3237,12 @@ def check_batch(req: CheckBatchRequest, db: Session = Depends(get_db), user: Use
             .all()
         )
     }
-    # FileContents que já existem no storage
-    existing_contents: set[str] = {
+    # FileContents que já existem no storage E o usuário já provou possuir (ou é admin)
+    existing_in_storage: set[str] = {
         row.sha256
         for row in db.query(FileContent.sha256).filter(FileContent.sha256.in_(sha256s)).all()
     }
+    existing_contents = _content_visible_to_user(db, user, existing_in_storage)
 
     results: list[CheckBatchResultItem] = []
     for item in req.files:
@@ -3252,20 +3282,22 @@ def register_batch(req: RegisterBatchRequest, background_tasks: BackgroundTasks,
     """
     Versão em lote do modo "só registrar" do /upload (X-Content-Sha256 sem body):
     registra N arquivos com duas queries IN + um único commit, em vez de N
-    requests com um commit cada. Itens cujo sha256 não existe no storage voltam
-    registered=False (o cliente escala para upload) sem abortar o lote.
-    Disponível a partir do servidor 7.8.
+    requests com um commit cada. Itens cujo sha256 não existe no storage — ou existe
+    mas o usuário nunca provou possuí-lo antes (ver _content_visible_to_user) — voltam
+    registered=False com a mesma mensagem (o cliente escala para upload) sem abortar
+    o lote. Disponível a partir do servidor 7.8.
     """
     v = _get_version_or_404(req.backup_label, req.version_key, db, user)
     if v.status != "running":
         raise HTTPException(409, f"Versão está '{v.status}' — register só permitido em versões running")
 
-    # Conteúdos presentes no storage — uma query IN
+    # Conteúdos presentes no storage E visíveis ao usuário (posse prévia, ou admin) — duas queries IN
     sha256s = {i.sha256 for i in req.files}
-    existing: set[str] = {
+    in_storage: set[str] = {
         row.sha256
         for row in db.query(FileContent.sha256).filter(FileContent.sha256.in_(sha256s)).all()
     }
+    existing: set[str] = _content_visible_to_user(db, user, in_storage)
 
     # VersionFiles já registrados nesta versão para estas paths — uma query IN
     paths = [i.original_path for i in req.files]
@@ -3381,11 +3413,14 @@ def _store_new_content(
     return fc, (dest if not use_ssd else None)
 
 
-def _register_existing_content_sync(sha256: str, db: Session) -> None:
-    """Modo "só registrar": valida que o conteúdo existe e garante réplicas.
+def _register_existing_content_sync(sha256: str, user: User, db: Session) -> None:
+    """Modo "só registrar": valida que o conteúdo existe E que o usuário já provou
+    possuí-lo antes (ou é admin) — ver _content_visible_to_user — e garante réplicas.
+    Mensagem de erro igual para "não existe" e "existe mas não é seu": não expõe se o
+    hash está presente no storage de outra conta.
     Bloqueante (queries + I/O de réplica) — roda via asyncio.to_thread."""
     fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
-    if not fc:
+    if not fc or not _content_visible_to_user(db, user, {sha256}):
         raise HTTPException(400, f"Conteudo sha256={sha256} nao encontrado no storage")
     first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).first()
     if first_copy:
@@ -3492,6 +3527,14 @@ async def upload_file(
     serializaria o event loop inteiro.
     """
     v = await asyncio.to_thread(_get_version_or_404, backup_label, version_key, db, user)
+    if v.status in ("done", "failed"):
+        # "incomplete" continua gravável de propósito: é o estado automático de uma
+        # versão superada por uma nova no mesmo label (create_version), não um estado
+        # terminal — diferente de "done"/"failed", que são a baseline de retenção e de
+        # skip-por-mtime (rclone/cliente). Escrever numa versão done/failed já finalizada
+        # invalidaria esses cálculos; um retry atrasado do cliente após finish_version
+        # bastava para cair nisso antes desta checagem.
+        raise HTTPException(409, f"Versão está '{v.status}' — upload não permitido após finalização")
     version_id = v.id
 
     try:
@@ -3504,7 +3547,7 @@ async def upload_file(
     # Modo "so registrar" — conteudo ja existe no storage
     if content_sha256:
         sha256 = content_sha256
-        await asyncio.to_thread(_register_existing_content_sync, sha256, db)
+        await asyncio.to_thread(_register_existing_content_sync, sha256, user, db)
         log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — registrada sha256={sha256[:8]}…")
     else:
         # Escolhe volume HDD de destino final; decide se usa SSD como staging.
@@ -3888,23 +3931,42 @@ def _bg_encrypt_existing(job_id: int) -> None:
             size_mb = fc.size / 1024 / 1024
             log.info(f"[encrypt-existing] [{i}/{total}] {fc.sha256[:8]}… ({size_mb:.2f} MB) — {len(copies)} cópia(s)")
 
+            # Cifra cada cópia para um temporário e VERIFICA (decifra + confere sha256)
+            # antes de promover qualquer uma. Só depois que todas as cópias passaram é
+            # que os temporários substituem os originais — se qualquer cópia falhar no
+            # meio (I/O, disco cheio, volume que caiu), nenhum original é tocado. Antes,
+            # a cópia cifrada com sucesso já tinha substituído o original quando uma
+            # cópia seguinte falhava, deixando fc.encrypted=False com ciphertext no disco
+            # (download servia lixo; a checagem de tamanho do dedup purgava tudo).
+            staged: list[tuple] = []  # (copy, p, tmp_enc) já cifrados e verificados
             success = True
-            for copy in copies:
-                p = Path(copy.stored_at)
-                if not p.exists():
-                    log.warning(f"[encrypt-existing] [{i}/{total}] arquivo físico não encontrado em {copy.volume_path} — pulando cópia")
-                    continue
-                log.info(f"[encrypt-existing] [{i}/{total}] cifrando cópia em {copy.volume_path}")
-                tmp_enc = p.parent / f"_enc_{os.urandom(4).hex()}"
-                try:
-                    crypto.encrypt_stream(p, tmp_enc, storage.encryption_key)
+            try:
+                for copy in copies:
+                    p = Path(copy.stored_at)
+                    if not p.exists():
+                        log.warning(f"[encrypt-existing] [{i}/{total}] arquivo físico não encontrado em {copy.volume_path} — pulando cópia")
+                        continue
+                    log.info(f"[encrypt-existing] [{i}/{total}] cifrando cópia em {copy.volume_path}")
+                    tmp_enc = p.parent / f"_enc_{os.urandom(4).hex()}"
+                    try:
+                        crypto.encrypt_stream(p, tmp_enc, storage.encryption_key)
+                        _verify_stored_file(fc.sha256, tmp_enc, encrypted=True)
+                    except Exception:
+                        tmp_enc.unlink(missing_ok=True)
+                        raise
+                    staged.append((copy, p, tmp_enc))
+            except Exception as e:
+                log.warning(
+                    f"[encrypt-existing] [{i}/{total}] erro ao cifrar {fc.sha256[:8]}…: {e} "
+                    f"— nenhuma cópia original foi alterada"
+                )
+                success = False
+                for _copy, _p, tmp_enc in staged:
+                    tmp_enc.unlink(missing_ok=True)
+            else:
+                for copy, p, tmp_enc in staged:
                     shutil.move(str(tmp_enc), str(p))
                     log.info(f"[encrypt-existing] [{i}/{total}] cópia em {copy.volume_path} cifrada com sucesso")
-                except Exception as e:
-                    log.warning(f"[encrypt-existing] [{i}/{total}] erro em {p}: {e}")
-                    tmp_enc.unlink(missing_ok=True)
-                    success = False
-                    break
 
             if success:
                 fc.encrypted = True

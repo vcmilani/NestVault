@@ -916,15 +916,15 @@ async function loadLabels() {
     const opts = '<option value="">— selecione —</option>' +
       backups.map(b => {
         const ver = b.version_count === 1 ? '1 versão' : `${b.version_count} versões`;
-        return `<option value="${b.label}">${b.label} (${ver})</option>`;
+        return `<option value="${esc(b.label)}">${esc(b.label)} (${ver})</option>`;
       }).join('');
     ids.forEach(id => { const s = document.getElementById(id); s.disabled = false; s.innerHTML = opts; });
     ownerSel.disabled = false;
     ownerSel.innerHTML = '<option value="">— selecione —</option>' +
-      backups.map(b => `<option value="${b.label}">${b.label} (dono atual: ${b.owner_username || '—'})</option>`).join('');
+      backups.map(b => `<option value="${esc(b.label)}">${esc(b.label)} (dono atual: ${esc(b.owner_username || '—')})</option>`).join('');
     cdl.disabled = false;
     cdl.innerHTML = '<option value="">Todos os labels</option>' +
-      backups.map(b => `<option value="${b.label}">${b.label}</option>`).join('');
+      backups.map(b => `<option value="${esc(b.label)}">${esc(b.label)}</option>`).join('');
   } catch(e) {
     ids.forEach(id => { const s = document.getElementById(id); s.disabled = false; s.innerHTML = '<option value="">Erro ao carregar</option>'; });
     ownerSel.disabled = false;
