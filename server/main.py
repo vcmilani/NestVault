@@ -1,5 +1,5 @@
 """
-NestVault  v8.4.0
+NestVault  v8.5.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -524,7 +524,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="8.4.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="8.5.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
@@ -964,6 +964,10 @@ class DiskUsageDay(BaseModel):
     used_bytes: int
     total_bytes: int
 
+class FreedDay(BaseModel):
+    date: str
+    bytes_freed: int
+
 class StatsResponse(BaseModel):
     total_backups: int
     total_versions_done: int
@@ -994,6 +998,7 @@ class StatsResponse(BaseModel):
     backups_activity: list[BackupActivityEntry]
     reclaimable_by_label: list[ReclaimableLabelEntry]
     disk_usage_days: list[DiskUsageDay]
+    freed_days: list[FreedDay]
     server_time: str
 
 
@@ -1178,8 +1183,8 @@ def _backup_info(b: BackupID, db: Session) -> BackupInfo:
     )
 
 
-def _auto_cleanup_if_needed(db: Session, exclude_version_id: Optional[int] = None) -> str | None:
-    """Retorna resumo do que foi limpo, ou None se nenhuma limpeza foi necessária.
+def _auto_cleanup_if_needed(db: Session, exclude_version_id: Optional[int] = None) -> tuple[str | None, int]:
+    """Retorna (resumo, bytes_liberados) — resumo é None se nenhuma limpeza foi necessária.
 
     exclude_version_id: versão que o chamador está ativamente escrevendo agora —
     nunca pode ser removida, mesmo que esteja incomplete/failed, senão o upload em
@@ -1188,7 +1193,7 @@ def _auto_cleanup_if_needed(db: Session, exclude_version_id: Optional[int] = Non
     factor = _target_replicas()
     ok = _volumes_with_free_space()
     if ok >= factor:
-        return None
+        return None, 0
 
     log.warning(
         f"[auto-cleanup] Apenas {ok}/{len(_healthy_volumes())} volume(s) com ≥{storage.STORAGE_FALLBACK_THRESHOLD_GB:.0f} GB livre "
@@ -1196,6 +1201,7 @@ def _auto_cleanup_if_needed(db: Session, exclude_version_id: Optional[int] = Non
     )
 
     total_removed = 0
+    bytes_total = 0
 
     # 1ª prioridade: versões incomplete e failed — sempre deletáveis
     stale_query = db.query(BackupVersion).filter(BackupVersion.status.in_(["incomplete", "failed"]))
@@ -1208,13 +1214,14 @@ def _auto_cleanup_if_needed(db: Session, exclude_version_id: Optional[int] = Non
         for v in stale:
             db.delete(v)
         db.commit()
-        _cleanup_orphan_contents(db)
+        _, freed = _cleanup_orphan_contents(db)
+        bytes_total += freed
         ok = _volumes_with_free_space()
         total_removed += len(stale)
         log.info(f"[auto-cleanup] {len(stale)} versão(ões) incomplete/failed removida(s) — volumes com espaço: {ok}/{len(_healthy_volumes())}")
         if ok >= factor:
             log.info(f"[auto-cleanup] Replicação pode ser mantida ({ok} volume(s) ok), encerrando.")
-            return f"{total_removed} versão(ões) removida(s) (incompletas/falhas)"
+            return f"{total_removed} versão(ões) removida(s) (incompletas/falhas)", bytes_total
 
     # 2ª prioridade: versões done antigas (mantém sempre a mais recente por label)
     labels_with_versions = (
@@ -1244,17 +1251,18 @@ def _auto_cleanup_if_needed(db: Session, exclude_version_id: Optional[int] = Non
         label, key = v.backup_label, v.version_key
         db.query(VersionFile).filter(VersionFile.version_id == v.id).delete(synchronize_session=False)
         db.delete(v)
-        removed, _ = _cleanup_orphan_contents_no_commit(db)
+        removed, freed = _cleanup_orphan_contents_no_commit(db)
         db.commit()
+        bytes_total += freed
         ok = _volumes_with_free_space()
         total_removed += 1
         log.info(f"[auto-cleanup] Removida {label}/{key} — {removed} arquivo(s) — volumes com espaço: {ok}/{len(_healthy_volumes())}")
         if ok >= factor:
             log.info(f"[auto-cleanup] Replicação pode ser mantida ({ok} volume(s) ok), encerrando.")
-            return f"{total_removed} versão(ões) removida(s)"
+            return f"{total_removed} versão(ões) removida(s)", bytes_total
 
     log.info(f"[auto-cleanup] Concluído — todas as labels com 1 versão. Volumes com espaço: {ok}/{len(_healthy_volumes())}.")
-    return f"{total_removed} versão(ões) removida(s)"
+    return f"{total_removed} versão(ões) removida(s)", bytes_total
 
 
 def _cleanup_orphan_contents(db: Session) -> tuple[int, int]:
@@ -1321,6 +1329,7 @@ def _bg_cleanup_orphan_contents(job_id: int | None = None) -> None:
             mj.status = "done"
             mj.finished_at = datetime.now()
             mj.summary = summary
+            mj.bytes_freed = bytes_total
             db.commit()
     except Exception as e:
         log.exception("[bg-cleanup] erro inesperado")
@@ -1340,13 +1349,14 @@ def _bg_auto_cleanup() -> None:
     db = SessionLocal()
     try:
         log.info("[bg-auto-cleanup] verificando necessidade de limpeza automática")
-        summary = _auto_cleanup_if_needed(db)
+        summary, bytes_freed = _auto_cleanup_if_needed(db)
         if summary:
             mj = MaintenanceJob(
                 job_type="auto-cleanup",
                 status="done",
                 finished_at=datetime.now(),
                 summary=summary,
+                bytes_freed=bytes_freed,
             )
             db.add(mj)
             db.commit()
@@ -1413,6 +1423,7 @@ def _bg_cleanup_by_date(version_ids: list[int], scope: str) -> None:
             mj.status = "done"
             mj.finished_at = datetime.now()
             mj.summary = f"{total} versão(ões) removidas, {orphan_total} arquivo(s) liberados ({round(bytes_total/1024/1024, 1)} MB)"
+            mj.bytes_freed = bytes_total
             db.commit()
             invalidate_activity()
         except Exception:
@@ -2017,18 +2028,46 @@ def _build_stats_data(db: Session) -> StatsResponse:
     ).all()
 
     _re_ver = re.compile(r'(\d+) versão\(ões\) removidas')
-    _re_mb  = re.compile(r'\(([\d.]+) MB\)')
     versions_cleaned_total = 0
-    bytes_freed_by_cleanup = 0
     for (summary,) in cleanup_summaries:
         if not summary:
             continue
         m = _re_ver.search(summary)
         if m:
             versions_cleaned_total += int(m.group(1))
-        m2 = _re_mb.search(summary)
-        if m2:
-            bytes_freed_by_cleanup += int(float(m2.group(1)) * 1024 * 1024)
+
+    # Total acumulado de espaço liberado — coluna dedicada (jobs antigos foram
+    # retroalimentados a partir do texto do summary na migração, ver database.py).
+    bytes_freed_by_cleanup = int(
+        db.query(func.coalesce(func.sum(MaintenanceJob.bytes_freed), 0)).scalar() or 0
+    )
+
+    # --- Q9b: espaço liberado por dia (últimos 30 dias) ---
+    # Sem filtro por job_type: a coluna só é preenchida por quem de fato libera espaço.
+    _freed_ts = func.coalesce(MaintenanceJob.finished_at, MaintenanceJob.started_at)
+    if _is_sqlite:
+        _freed_day = func.strftime("%Y-%m-%d", _freed_ts)
+    else:
+        _freed_day = func.to_char(_freed_ts, "YYYY-MM-DD")
+
+    _first_day = (datetime.now() - timedelta(days=29)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    _freed_rows = db.query(
+        _freed_day.label("day"),
+        func.sum(MaintenanceJob.bytes_freed).label("total"),
+    ).filter(
+        MaintenanceJob.bytes_freed > 0,
+        _freed_ts >= _first_day,
+    ).group_by(_freed_day).all()
+    _freed_by_day = {r.day: int(r.total or 0) for r in _freed_rows}
+
+    # Preenche o calendário completo: dias sem limpeza valem zero, senão o gráfico
+    # fica com barras faltando em vez de lacunas (limpeza não roda todo dia).
+    freed_days = [
+        FreedDay(date=_d, bytes_freed=_freed_by_day.get(_d, 0))
+        for _d in ((_first_day + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(30))
+    ]
 
     # --- Q10: atividade por backup (tabelas stale + versões) ---
     _activity_rows = (
@@ -2154,6 +2193,7 @@ def _build_stats_data(db: Session) -> StatsResponse:
         backups_activity=backups_activity,
         reclaimable_by_label=reclaimable_by_label,
         disk_usage_days=disk_usage_days,
+        freed_days=freed_days,
         server_time=datetime.now().isoformat(),
     )
 
@@ -3479,7 +3519,20 @@ async def upload_file(
                 f"{_exc}\n\n"
                 f"Iniciando limpeza automática de versões antigas..."
             )
-            await asyncio.to_thread(_auto_cleanup_if_needed, db, version_id)
+            _cl_summary, _cl_bytes = await asyncio.to_thread(_auto_cleanup_if_needed, db, version_id)
+            if _cl_summary:
+                # Registra o job para que a limpeza por pressão de disco apareça na
+                # Atividade e conte no gráfico de espaço liberado — antes ela era
+                # totalmente invisível.
+                db.add(MaintenanceJob(
+                    job_type="auto-cleanup",
+                    status="done",
+                    finished_at=datetime.now(),
+                    summary=_cl_summary,
+                    bytes_freed=_cl_bytes,
+                ))
+                db.commit()
+                invalidate_activity()
             try:
                 volume = _pick_volume()
             except storage.StorageThresholdExceeded:
@@ -3935,13 +3988,14 @@ def cleanup_versions(label: str, req: CleanupRequest, db: Session = Depends(get_
         synchronize_session=False
     )
     db.commit()
-    orphans_removed, _ = _cleanup_orphan_contents(db)
+    orphans_removed, bytes_freed = _cleanup_orphan_contents(db)
     log.info(f"[cleanup] {label}: {orphans_removed} arquivo(s) de storage removidos")
     mj = MaintenanceJob(
         job_type="cleanup-versions",
         status="done",
         finished_at=datetime.now(),
         summary=f"{label}: {len(keys_removed)} versão(ões) removida(s), {orphans_removed} arquivo(s) de storage liberado(s)",
+        bytes_freed=bytes_freed,
     )
     db.add(mj)
     db.commit()

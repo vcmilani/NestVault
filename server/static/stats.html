@@ -105,6 +105,17 @@
   .changes-legend span{display:flex;align-items:center;gap:5px}
   .changes-dot{width:10px;height:10px;border-radius:2px;flex-shrink:0}
 
+  /* Freed space chart */
+  .freed-chart{display:flex;align-items:flex-end;gap:3px;height:72px;border-bottom:1px solid var(--border);margin-bottom:4px;overflow:hidden}
+  .freed-col{display:flex;flex-direction:column;justify-content:flex-end;flex:1;min-width:0;height:100%;cursor:default}
+  .freed-bar{width:100%;background:var(--chart-3,#199e70);border-radius:1px;transition:height .4s}
+  .freed-col:hover .freed-bar{filter:brightness(1.15)}
+  .freed-labels{display:flex;gap:3px;overflow:hidden}
+  .freed-label{flex:1;min-width:0;font-size:8px;color:var(--text-mute);text-align:center;overflow:hidden;white-space:nowrap}
+  .freed-legend{display:flex;gap:16px;margin-top:10px;font-size:10px;color:var(--text-dim);flex-wrap:wrap}
+  .freed-legend span{display:flex;align-items:center;gap:5px}
+  .freed-dot{width:10px;height:10px;border-radius:2px;flex-shrink:0}
+
   /* Dedup numbers */
   .dedup-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:1px;border:1px solid var(--border);background:var(--border);margin-bottom:28px}
   .dedup-num{background:var(--bg2);padding:16px 20px}
@@ -275,6 +286,15 @@
     <div class="loading">Carregando</div>
   </div>
 
+  <!-- 4c. Espaço liberado por dia -->
+  <div class="section-head" style="margin-bottom:10px">
+    <div class="section-title">Espaço liberado por dia — últimos 30 dias</div>
+    <span class="section-sub">bytes recuperados por limpezas de versões e arquivos órfãos</span>
+  </div>
+  <div id="freedSection" style="margin-bottom:28px">
+    <div class="loading">Carregando</div>
+  </div>
+
   <!-- 4. Top Backups -->
   <div class="section-head" style="margin-bottom:10px">
     <div class="section-title">Top Backups por Tamanho</div>
@@ -408,6 +428,7 @@
     renderReclaimableByLabel(data.reclaimable_by_label || []);
     renderTrend(data.trend_days);
     renderChanges(data.changes_days);
+    renderFreed(data.freed_days || []);
     renderTopBackups(data.top_backups);
     renderDedup(data);
     renderMaintenance(data);
@@ -636,6 +657,40 @@
           <span><div class="changes-dot" style="background:var(--chart-1,#3987e5)"></div>Adicionados</span>
           <span><div class="changes-dot" style="background:var(--chart-2,#d95926)"></div>Modificados</span>
           <span><div class="changes-dot" style="background:var(--chart-3,#199e70)"></div>Removidos</span>
+        </div>
+      </div>`;
+  }
+
+  function renderFreed(days) {
+    const el = document.getElementById('freedSection');
+    const total = (days || []).reduce((a, d) => a + d.bytes_freed, 0);
+    if (!days || !days.length || total === 0) {
+      el.innerHTML = '<div class="empty-state">Nenhuma limpeza liberou espaço nos últimos 30 dias</div>';
+      return;
+    }
+    const maxBytes = Math.max(...days.map(d => d.bytes_freed));
+    const labelEvery = Math.max(1, Math.ceil(days.length / 16));
+
+    const cols = days.map(d => {
+      const heightPct = d.bytes_freed > 0 ? Math.max(2, Math.round(d.bytes_freed / maxBytes * 100)) : 0;
+      const dm = d.date.slice(8,10) + '/' + d.date.slice(5,7);
+      const tooltip = `${dm}: ${d.bytes_freed > 0 ? fmtSize(d.bytes_freed) : 'nada liberado'}`;
+      const bar = heightPct > 0 ? `<div class="freed-bar" style="height:${heightPct}%"></div>` : '';
+      return `<div class="freed-col" title="${esc(tooltip)}">${bar}</div>`;
+    }).join('');
+
+    const labelRow = days.map((d, i) =>
+      `<div class="freed-label">${i % labelEvery === 0 ? esc(d.date.slice(8,10) + '/' + d.date.slice(5,7)) : ''}</div>`
+    ).join('');
+
+    el.innerHTML = `
+      <div class="trend-wrap">
+        <div class="freed-chart">${cols}</div>
+        <div class="freed-labels">${labelRow}</div>
+        <div class="freed-legend">
+          <span><div class="freed-dot" style="background:var(--chart-3,#199e70)"></div>Espaço liberado</span>
+          <span>Total no período: ${esc(fmtSize(total))}</span>
+          <span>Pico em um dia: ${esc(fmtSize(maxBytes))}</span>
         </div>
       </div>`;
   }

@@ -557,6 +557,7 @@ def run_nightly_cleanup() -> None:
             mj.status = "done"
             mj.finished_at = datetime.now()
             mj.summary = summary
+            mj.bytes_freed = bytes_freed + tmp_bytes
             db.commit()
         invalidate_activity()
 
