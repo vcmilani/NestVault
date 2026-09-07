@@ -88,20 +88,32 @@ def pick_volume() -> Path:
     if not hvols_set:
         raise RuntimeError("Nenhum volume de storage disponível")
 
+    # Memoiza a leitura de espaço: no máximo um statvfs por volume por chamada.
+    # O caminho feliz continua barato (para no primeiro volume com folga, um
+    # statvfs só); o que muda é o caminho de disco cheio, onde a mensagem de erro
+    # relia cada volume mais 1–2 vezes — e ele é justamente o mais quente, porque
+    # todo upload passa por aqui quando o storage aperta.
+    _usage_cache: dict[Path, object] = {}
+
+    def _usage(v: Path):
+        if v not in _usage_cache:
+            _usage_cache[v] = safe_disk_usage(v)
+        return _usage_cache[v]
+
     # Percorre em ordem de declaração (prioridade decrescente).
     # Usa o primeiro volume que ainda tem espaço acima do limiar de esgotamento.
     for vol in STORAGE_VOLUMES:
         if vol not in hvols_set:
             continue
-        usage = safe_disk_usage(vol)
+        usage = _usage(vol)
         if usage and usage.free > STORAGE_FALLBACK_THRESHOLD_GB * 1024 ** 3:
             return vol
 
     # Todos os volumes abaixo do limiar — sinaliza para o call site tentar cleanup primeiro.
     free_info = ", ".join(
-        f"{v.name}: {safe_disk_usage(v).free / 1024**3:.1f} GB"
+        f"{v.name}: {_usage(v).free / 1024**3:.1f} GB"
         for v in sorted(hvols_set)
-        if safe_disk_usage(v)
+        if _usage(v)
     )
     raise StorageThresholdExceeded(
         f"Todos os volumes abaixo de {STORAGE_FALLBACK_THRESHOLD_GB:.0f} GB ({free_info})"
@@ -301,13 +313,13 @@ def _pick_rebalance_dest(destinations: list[str], dest_free: dict[str, int], thr
     return None
 
 
-def _remove_rebalance_source_copy(db, copy, sha256: str, source_volume: str) -> None:
+def _remove_rebalance_source_copy(db, copy_id: int, stored_at: str, sha256: str, source_volume: str) -> None:
     """Apaga a cópia de origem já liberada (copiada para um destino, ou já
     replicada lá) e realinha FileContent.stored_at se ele apontava para ela."""
     from database import FileContent, FileContentCopy
-    path = Path(copy.stored_at)
-    stale_stored_at = copy.stored_at
-    db.delete(copy)
+    path = Path(stored_at)
+    stale_stored_at = stored_at
+    db.query(FileContentCopy).filter(FileContentCopy.id == copy_id).delete(synchronize_session=False)
     try:
         path.unlink(missing_ok=True)
     except OSError as e:
@@ -340,6 +352,7 @@ def rebalance_disks(db, dry_run: bool = False) -> dict:
     dry_run=True calcula o mesmo plano sem copiar/apagar nada — usado pelo preview.
     """
     from database import FileContent, FileContentCopy
+    from sqlalchemy import and_, or_
 
     threshold_bytes = STORAGE_FALLBACK_THRESHOLD_GB * 1024 ** 3
     target_bytes = threshold_bytes * REBALANCE_TARGET_FACTOR
@@ -363,17 +376,36 @@ def rebalance_disks(db, dry_run: bool = False) -> dict:
         usage = safe_disk_usage(source)
         free = usage.free if usage else 0
 
-        candidates = (
-            db.query(FileContentCopy, FileContent.size)
-            .join(FileContent, FileContent.sha256 == FileContentCopy.sha256)
-            .filter(FileContentCopy.volume_path == source_str)
-            .order_by(FileContent.size.desc())
-            .all()
-        )
+        # Candidatos em páginas keyset por (size DESC, id), não .all(): o volume de
+        # origem pode ter centenas de milhares de cópias, e o loop quase sempre para
+        # nas primeiras (o break sai assim que a origem atinge a folga alvo). A chave
+        # composta preserva exatamente a ordem "maiores primeiro" do comportamento
+        # anterior — paginar só por id moveria os maiores DE CADA PÁGINA.
+        def _candidate_pages():
+            last = None   # (size, id) do último candidato já visto
+            while True:
+                q = (
+                    db.query(FileContentCopy.id, FileContentCopy.sha256,
+                             FileContentCopy.stored_at, FileContent.size)
+                    .join(FileContent, FileContent.sha256 == FileContentCopy.sha256)
+                    .filter(FileContentCopy.volume_path == source_str)
+                )
+                if last is not None:
+                    last_size, last_id = last
+                    q = q.filter(or_(FileContent.size < last_size,
+                                     and_(FileContent.size == last_size,
+                                          FileContentCopy.id > last_id)))
+                page = (q.order_by(FileContent.size.desc(), FileContentCopy.id)
+                         .limit(_REBALANCE_BATCH).all())
+                if not page:
+                    return
+                last = (page[-1].size, page[-1].id)
+                yield page
 
         src_moved = src_bytes = src_skipped = 0
 
-        for copy, size in candidates:
+        for copy in (c for page in _candidate_pages() for c in page):
+            size = copy.size
             if free >= target_bytes or not dest_strs:
                 break
             sha256 = copy.sha256
@@ -416,7 +448,7 @@ def rebalance_disks(db, dry_run: bool = False) -> dict:
                 detail = " (já replicado no destino — apenas liberando a origem)" if existing_dest else ""
                 log.info(f"[rebalance] {copy.stored_at} ({fmt_bytes(size)}, sha256={sha256[:8]}…) "
                          f"{source_str} → {resolved_dest}{detail}")
-                _remove_rebalance_source_copy(db, copy, sha256, source_str)
+                _remove_rebalance_source_copy(db, copy.id, copy.stored_at, sha256, source_str)
                 src_moved += 1
                 if src_moved % _REBALANCE_BATCH == 0:
                     db.commit()

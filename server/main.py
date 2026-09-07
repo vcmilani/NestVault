@@ -169,13 +169,15 @@ import config
 import crypto
 import storage
 import sysmetrics
+import version_diff
 # Implementação canônica do cleanup de órfãos (era duplicada aqui). O nome antigo
 # é mantido: cada sha256 é commitado individualmente, sem commit final agregado.
 from nightly_cleanup import _cleanup_orphan_contents as _cleanup_orphan_contents_no_commit
+from nightly_cleanup import orphan_filter as _orphan_filter
 from auth import get_current_user, require_admin, require_owner_or_admin
 from cloud.rclone_router import router as rclone_router
 import scheduler as sched
-from cache_state import _activity_wake, invalidate_activity
+from cache_state import _activity_wake, activity_generation, invalidate_activity
 
 logging.basicConfig(
     level=logging.INFO,
@@ -216,7 +218,7 @@ _rebalance_lock = threading.Lock()
 # bloquearia no join do executor por até _HISTORICAL_FALLBACK_TTL.
 _activity_loop_stop = threading.Event()
 
-_reclaimable_cache: dict = {"value": 0, "ts": 0.0}
+_reclaimable_cache: dict = {"value": 0, "ts": 0.0, "gen": -1}
 _RECLAIMABLE_TTL = 60.0
 
 # Cache para dados históricos (recent_versions com diffs, recent_jobs, maintenance_jobs).
@@ -231,7 +233,12 @@ _STATS_TTL = 300.0
 
 def _get_reclaimable_bytes(db: Session) -> int:
     now = time.monotonic()
-    if now - _reclaimable_cache["ts"] < _RECLAIMABLE_TTL:
+    gen = activity_generation()
+    # Só reusa o cache se o TTL não venceu E nenhuma escrita invalidou a atividade
+    # desde o cálculo. Antes o TTL era o único critério, então /storage/info e
+    # /api/activity podiam reportar o valor pré-limpeza por até um minuto depois
+    # dela terminar — exatamente quando o usuário está olhando para o número.
+    if gen == _reclaimable_cache["gen"] and now - _reclaimable_cache["ts"] < _RECLAIMABLE_TTL:
         return _reclaimable_cache["value"]
     latest_ts_sq = (
         db.query(BackupVersion.backup_label, func.max(BackupVersion.created_at).label("latest_ts"))
@@ -271,7 +278,7 @@ def _get_reclaimable_bytes(db: Session) -> int:
         result = max(0, int(total_bytes) - int(kept_bytes))
     else:
         result = db.query(func.coalesce(func.sum(FileContent.size), 0)).scalar() or 0
-    _reclaimable_cache.update({"value": int(result), "ts": now})
+    _reclaimable_cache.update({"value": int(result), "ts": now, "gen": gen})
     return int(result)
 
 
@@ -1282,6 +1289,8 @@ def _cleanup_orphan_contents(db: Session) -> tuple[int, int]:
 
 
 _BG_CLEANUP_BATCH = 500
+# Tamanho da página keyset do _bg_encrypt_existing (ver o loop lá).
+_ENCRYPT_PAGE = 200
 _CLEANUP_BY_DATE_BATCH = 50  # versões por lote para evitar lock prolongado
 
 def _bg_cleanup_orphan_contents(job_id: int | None = None) -> None:
@@ -1301,8 +1310,7 @@ def _bg_cleanup_orphan_contents(job_id: int | None = None) -> None:
             db.refresh(mj)
             job_id = mj.id
 
-        used_shas = db.query(VersionFile.sha256).distinct().subquery()
-        total = db.query(FileContent).filter(~FileContent.sha256.in_(select(used_shas))).count()
+        total = db.query(func.count(FileContent.sha256)).filter(_orphan_filter()).scalar() or 0
 
         log.info(f"[bg-cleanup] iniciando limpeza de conteúdos órfãos ({total} candidato(s))")
         total_removed = 0
@@ -1455,13 +1463,31 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
     try:
         mj = db.get(MaintenanceJob, job_id)
 
-        # Carrega todas as cópias que estão no volume de origem
-        source_copies = (
-            db.query(FileContentCopy)
+        # As cópias do volume de origem são percorridas em páginas keyset por id,
+        # em duas passadas (copiar, depois remover a origem) — nunca materializadas
+        # de uma vez. Só as colunas usadas, como tuplas: além de bem menor que a
+        # entidade ORM, tupla não expira no db.commit() do meio do loop, então
+        # stored_at não dispara um SELECT por linha na segunda passada.
+        def _source_pages():
+            last_id = 0
+            while True:
+                page = (
+                    db.query(FileContentCopy.id, FileContentCopy.sha256, FileContentCopy.stored_at)
+                    .filter(FileContentCopy.volume_path == source, FileContentCopy.id > last_id)
+                    .order_by(FileContentCopy.id)
+                    .limit(_MIGRATE_BATCH)
+                    .all()
+                )
+                if not page:
+                    return
+                last_id = page[-1].id
+                yield page
+
+        total = (
+            db.query(func.count(FileContentCopy.id))
             .filter(FileContentCopy.volume_path == source)
-            .all()
+            .scalar() or 0
         )
-        total = len(source_copies)
         log.info(f"[migrate-disk] {source} → {destinations}: {total} cópia(s) a processar")
 
         dest_set = set(destinations)
@@ -1481,21 +1507,25 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
         failed_sha256s: set[str] = set()
 
         # -- Fase 1: copiar arquivos ausentes nos destinos -----------------------
-        for i, src_copy in enumerate(source_copies):
-            sha256 = src_copy.sha256
+        done = 0
+        for page in _source_pages():
+            for src_copy in page:
+                done += 1
+                sha256 = src_copy.sha256
 
-            # Verifica se já existe cópia em algum destino
-            existing_dest = (
-                db.query(FileContentCopy.volume_path)
-                .filter(
-                    FileContentCopy.sha256 == sha256,
-                    FileContentCopy.volume_path.in_(list(dest_set)),
+                # Verifica se já existe cópia em algum destino
+                existing_dest = (
+                    db.query(FileContentCopy.volume_path)
+                    .filter(
+                        FileContentCopy.sha256 == sha256,
+                        FileContentCopy.volume_path.in_(list(dest_set)),
+                    )
+                    .first()
                 )
-                .first()
-            )
-            if existing_dest:
-                already_on_dest += 1
-            else:
+                if existing_dest:
+                    already_on_dest += 1
+                    continue
+
                 # Escolhe destino com mais espaço livre
                 best_dest = max(dest_free, key=lambda d: dest_free[d])
                 if dest_free[best_dest] <= 0:
@@ -1541,31 +1571,38 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
                     failed_sha256s.add(sha256)
                     continue
 
-            # Commit e atualiza progresso a cada lote
-            if (i + 1) % _MIGRATE_BATCH == 0:
+            # Commit e atualiza progresso ao fim de cada página
+            db.commit()
+            pct = round(done / total * 100) if total else 0
+            mj = db.get(MaintenanceJob, job_id)
+            if mj:
+                mj.summary = f"Copiando: {done} / {total} arquivos ({pct}%)"
                 db.commit()
-                done = i + 1
-                pct = round(done / total * 100) if total else 0
-                mj = db.get(MaintenanceJob, job_id)
-                if mj:
-                    mj.summary = f"Copiando: {done} / {total} arquivos ({pct}%)"
-                    db.commit()
-                log.debug(f"[migrate-disk] lote: {done}/{total}")
+            log.debug(f"[migrate-disk] lote: {done}/{total}")
 
         db.commit()
 
         # -- Fase 2: remover cópias do disco de origem -------------------------
+        # Segunda passada sobre as mesmas páginas (a fase 1 não removeu nada), de
+        # novo sem carregar tudo. O DELETE é em lote por id; o unlink continua
+        # arquivo a arquivo porque cada um pode falhar por conta própria.
         removed_physical = 0
-        for src_copy in source_copies:
-            if src_copy.sha256 in failed_sha256s:
-                continue  # Não remove se a cópia de destino falhou
-            src_path = Path(src_copy.stored_at)
-            db.delete(src_copy)
-            try:
-                src_path.unlink(missing_ok=True)
-                removed_physical += 1
-            except OSError as e:
-                log.warning(f"[migrate-disk] falha ao remover {src_path}: {e}")
+        for page in _source_pages():
+            to_delete_ids = []
+            for src_copy in page:
+                if src_copy.sha256 in failed_sha256s:
+                    continue  # Não remove se a cópia de destino falhou
+                to_delete_ids.append(src_copy.id)
+                src_path = Path(src_copy.stored_at)
+                try:
+                    src_path.unlink(missing_ok=True)
+                    removed_physical += 1
+                except OSError as e:
+                    log.warning(f"[migrate-disk] falha ao remover {src_path}: {e}")
+            if to_delete_ids:
+                db.query(FileContentCopy).filter(
+                    FileContentCopy.id.in_(to_delete_ids)
+                ).delete(synchronize_session=False)
 
         # Atualiza FileContent.stored_at que ainda apontam para o volume de origem.
         # startswith() (não like(f"{source}%")) escapa % e _ do path automaticamente —
@@ -1874,76 +1911,24 @@ def _build_stats_data(db: Session) -> StatsResponse:
                   for r in trend_counts]
 
     # --- Q5b: alterações por dia (adicionados/modificados/removidos, últimos 30 dias) ---
-    # Agregado inteiramente no banco, em 3 queries de contagem — nenhuma linha de
-    # version_files chega ao Python. Comparar os arquivos em Python (versão a versão)
-    # custava minutos e travava o servidor num Raspberry Pi; materializar tudo de uma
-    # vez num dict estourava a RAM. As contagens saem destas identidades, com
-    # same_path = arquivos presentes nas duas versões e same_both = presentes e com
-    # o mesmo sha256:
-    #     added    = total_atual    - same_path
-    #     removed  = total_anterior - same_path
-    #     modified = same_path      - same_both
+    # Agregado inteiramente no banco — nenhuma linha de version_files chega ao Python.
+    # Ver version_diff.py para as identidades usadas nas contagens.
     from collections import defaultdict
 
-    # Predecessora de cada versão done do mesmo label (LAG exige SQLite >= 3.25).
-    _vseq = (
-        db.query(
-            BackupVersion.id.label("vid"),
-            BackupVersion.created_at.label("ts"),
-            func.lag(BackupVersion.id).over(
-                partition_by=BackupVersion.backup_label,
-                order_by=BackupVersion.version_key,
-            ).label("prev_id"),
-        )
-        .filter(BackupVersion.status == "done")
-        .subquery()
-    )
+    _vseq = version_diff.done_version_lag_sq(db)
     _win = db.query(_vseq).filter(_vseq.c.ts >= cutoff).subquery()
 
-    window_rows = db.query(_win.c.vid, _win.c.ts, _win.c.prev_id).all()
+    window_rows = db.query(_win.c.vid, _win.c.ts).all()
 
     changes_days: list[ChangeDay] = []
     if window_rows:
-        # Contagem de arquivos por versão (das versões da janela e de suas predecessoras).
-        _ids = {r.vid for r in window_rows} | {r.prev_id for r in window_rows if r.prev_id}
-        total_by_vid = {
-            r.version_id: int(r.n)
-            for r in db.query(VersionFile.version_id, func.count().label("n"))
-            .filter(VersionFile.version_id.in_(_ids))
-            .group_by(VersionFile.version_id)
-            .all()
-        }
-
-        # Interseção por caminho entre cada versão e sua predecessora, num único
-        # join (coberto pelo índice único uq_version_path).
-        _cf, _pf = aliased(VersionFile), aliased(VersionFile)
-        match_rows = (
-            db.query(
-                _win.c.vid.label("vid"),
-                func.count().label("same_path"),
-                func.coalesce(func.sum(case((_cf.sha256 == _pf.sha256, 1), else_=0)), 0).label("same_both"),
-            )
-            .select_from(_win)
-            .join(_cf, _cf.version_id == _win.c.vid)
-            .join(_pf, and_(_pf.version_id == _win.c.prev_id,
-                            _pf.original_path == _cf.original_path))
-            .group_by(_win.c.vid)
-            .all()
-        )
-        match_by_vid = {r.vid: (int(r.same_path), int(r.same_both)) for r in match_rows}
+        diffs = version_diff.diff_counts_by_version(db, _win)
 
         totals_by_day: dict[str, dict[str, int]] = defaultdict(lambda: {"added": 0, "modified": 0, "removed": 0})
         for r in window_rows:
-            cur_total = total_by_vid.get(r.vid, 0)
-            if r.prev_id is None:
-                diff = {"added": cur_total, "modified": 0, "removed": 0}
-            else:
-                same_path, same_both = match_by_vid.get(r.vid, (0, 0))
-                diff = {
-                    "added":    cur_total - same_path,
-                    "removed":  total_by_vid.get(r.prev_id, 0) - same_path,
-                    "modified": same_path - same_both,
-                }
+            diff = diffs.get(r.vid)
+            if not diff:
+                continue
             day = r.ts.strftime("%Y-%m-%d")
             for k in ("added", "modified", "removed"):
                 totals_by_day[day][k] += diff[k]
@@ -2368,7 +2353,6 @@ def _build_historical_data(db: Session) -> tuple:
     Só chamado quando invalidate_activity() acorda o loop histórico.
     Retorna (recent_version_infos, maintenance_job_infos)."""
     from datetime import timedelta
-    from collections import defaultdict
 
     cutoff = datetime.now() - timedelta(hours=24)
 
@@ -2399,47 +2383,17 @@ def _build_historical_data(db: Session) -> tuple:
         ):
             rstats[row.version_id] = (row.fc, int(row.sz))
 
+    # Diffs contados no banco. Antes isto montava um dict {path: sha256} com os
+    # version_files INTEIROS de até 60 versões (as 30 recentes + suas predecessoras)
+    # só para comparar em Python — centenas de MB num banco de verdade, a cada
+    # invalidação de atividade. Ver version_diff.py.
     done_vs = [v for v in recent_vs if v.status == "done"]
-    prev_id_map: dict[int, Optional[int]] = {}
+    diff_map: dict[int, dict] = {}
     if done_vs:
         done_labels = {v.backup_label for v in done_vs}
-        all_done_rows = (
-            db.query(BackupVersion.id, BackupVersion.backup_label, BackupVersion.version_key)
-            .filter(BackupVersion.backup_label.in_(done_labels), BackupVersion.status == "done")
-            .order_by(BackupVersion.backup_label, BackupVersion.version_key)
-            .all()
-        )
-        by_label: dict[str, list] = defaultdict(list)
-        for row in all_done_rows:
-            by_label[row.backup_label].append(row)
-        for v in done_vs:
-            rows = by_label.get(v.backup_label, [])
-            idx = next((i for i, r in enumerate(rows) if r.id == v.id), None)
-            prev_id_map[v.id] = rows[idx - 1].id if idx is not None and idx > 0 else None
-
-    all_diff_ids = set(prev_id_map.keys()) | {pid for pid in prev_id_map.values() if pid}
-    files_by_vid: dict[int, dict[str, str]] = {}
-    if all_diff_ids:
-        for row in (
-            db.query(VersionFile.version_id, VersionFile.original_path, VersionFile.sha256)
-            .filter(VersionFile.version_id.in_(all_diff_ids))
-            .all()
-        ):
-            files_by_vid.setdefault(row.version_id, {})[row.original_path] = row.sha256
-
-    diff_map: dict[int, dict] = {}
-    for v in done_vs:
-        cur = files_by_vid.get(v.id, {})
-        prev_id = prev_id_map.get(v.id)
-        if prev_id is None:
-            diff_map[v.id] = {"added": len(cur), "modified": 0, "removed": 0}
-        else:
-            prv = files_by_vid.get(prev_id, {})
-            diff_map[v.id] = {
-                "added":    sum(1 for p in cur if p not in prv),
-                "modified": sum(1 for p, h in cur.items() if p in prv and prv[p] != h),
-                "removed":  sum(1 for p in prv if p not in cur),
-            }
+        _vseq = version_diff.done_version_lag_sq(db, labels=done_labels)
+        _win = db.query(_vseq).filter(_vseq.c.vid.in_([v.id for v in done_vs])).subquery()
+        diff_map = version_diff.diff_counts_by_version(db, _win)
 
     recent_version_infos = []
     for v in recent_vs:
@@ -3158,7 +3112,12 @@ def absorb_version(label: str, version_key: str, req: AbsorbRequest, db: Session
 def delete_version(label: str, version_key: str, background_tasks: BackgroundTasks,
                     db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     v = _get_version_or_404(label, version_key, db, user)
-    db.delete(v)
+    # Bulk delete em vez de db.delete(v): o cascade delete-orphan de
+    # BackupVersion.files carregaria e deletaria cada VersionFile individualmente
+    # — uma versão com 100k arquivos vira 100k DELETEs. Mesmo par de queries que
+    # delete_backup já usa.
+    db.query(VersionFile).filter(VersionFile.version_id == v.id).delete(synchronize_session=False)
+    db.query(BackupVersion).filter(BackupVersion.id == v.id).delete(synchronize_session=False)
     db.commit()
     invalidate_activity()
     log.info(f"[delete] Versão {label}/{version_key} excluída — limpeza em background")
@@ -3908,8 +3867,9 @@ def _bg_encrypt_existing(job_id: int) -> None:
     db = SessionLocal()
     try:
         degraded_strs = [str(v) for v in _degraded_volumes]
-        pending       = db.query(FileContent).filter(FileContent.encrypted == False).all()  # noqa: E712
-        total         = len(pending)
+        total = db.query(func.count(FileContent.sha256)).filter(
+            FileContent.encrypted == False  # noqa: E712
+        ).scalar() or 0
         log.info(f"[encrypt-existing] {total} arquivo(s) pendente(s) de cifragem")
 
         mj = db.get(MaintenanceJob, job_id)
@@ -3918,81 +3878,102 @@ def _bg_encrypt_existing(job_id: int) -> None:
             db.commit()
             invalidate_activity()
 
-        pending_shas = [fc.sha256 for fc in pending]
-        copies_q = db.query(FileContentCopy).filter(FileContentCopy.sha256.in_(pending_shas))
-        if degraded_strs:
-            copies_q = copies_q.filter(~FileContentCopy.volume_path.in_(degraded_strs))
-        encrypt_copies_by_sha: dict[str, list] = {}
-        for c in copies_q.all():
-            encrypt_copies_by_sha.setdefault(c.sha256, []).append(c)
-
         files_encrypted = 0
         bytes_processed = 0
         skipped         = 0
 
-        for i, fc in enumerate(pending, 1):
-            copies = encrypt_copies_by_sha.get(fc.sha256, [])
+        # Paginação keyset por sha256, não .all() da tabela inteira nem OFFSET.
+        # As linhas viram encrypted=True durante o loop e as que falham continuam
+        # False: um OFFSET puliria linhas conforme o conjunto encolhe, e "pegue os
+        # N primeiros não cifrados" entraria em loop infinito no primeiro erro.
+        # Avançar sempre pelo maior sha256 já visto termina em qualquer cenário.
+        i = 0
+        last_sha = ""
+        while True:
+            page = (
+                db.query(FileContent)
+                .filter(FileContent.encrypted == False,  # noqa: E712
+                        FileContent.sha256 > last_sha)
+                .order_by(FileContent.sha256)
+                .limit(_ENCRYPT_PAGE)
+                .all()
+            )
+            if not page:
+                break
+            last_sha = page[-1].sha256
 
-            if not copies:
-                log.warning(f"[encrypt-existing] [{i}/{total}] {fc.sha256[:8]}… sem cópia acessível — pulando")
-                skipped += 1
-                continue
+            page_shas = [fc.sha256 for fc in page]
+            copies_q = db.query(FileContentCopy).filter(FileContentCopy.sha256.in_(page_shas))
+            if degraded_strs:
+                copies_q = copies_q.filter(~FileContentCopy.volume_path.in_(degraded_strs))
+            encrypt_copies_by_sha: dict[str, list] = {}
+            for c in copies_q.all():
+                encrypt_copies_by_sha.setdefault(c.sha256, []).append(c)
 
-            size_mb = fc.size / 1024 / 1024
-            log.info(f"[encrypt-existing] [{i}/{total}] {fc.sha256[:8]}… ({size_mb:.2f} MB) — {len(copies)} cópia(s)")
+            for fc in page:
+                i += 1
+                copies = encrypt_copies_by_sha.get(fc.sha256, [])
 
-            # Cifra cada cópia para um temporário e VERIFICA (decifra + confere sha256)
-            # antes de promover qualquer uma. Só depois que todas as cópias passaram é
-            # que os temporários substituem os originais — se qualquer cópia falhar no
-            # meio (I/O, disco cheio, volume que caiu), nenhum original é tocado. Antes,
-            # a cópia cifrada com sucesso já tinha substituído o original quando uma
-            # cópia seguinte falhava, deixando fc.encrypted=False com ciphertext no disco
-            # (download servia lixo; a checagem de tamanho do dedup purgava tudo).
-            staged: list[tuple] = []  # (copy, p, tmp_enc) já cifrados e verificados
-            success = True
-            try:
-                for copy in copies:
-                    p = Path(copy.stored_at)
-                    if not p.exists():
-                        log.warning(f"[encrypt-existing] [{i}/{total}] arquivo físico não encontrado em {copy.volume_path} — pulando cópia")
-                        continue
-                    log.info(f"[encrypt-existing] [{i}/{total}] cifrando cópia em {copy.volume_path}")
-                    tmp_enc = p.parent / f"_enc_{os.urandom(4).hex()}"
-                    try:
-                        crypto.encrypt_stream(p, tmp_enc, storage.encryption_key)
-                        _verify_stored_file(fc.sha256, tmp_enc, encrypted=True)
-                    except Exception:
+                if not copies:
+                    log.warning(f"[encrypt-existing] [{i}/{total}] {fc.sha256[:8]}… sem cópia acessível — pulando")
+                    skipped += 1
+                    continue
+
+                size_mb = fc.size / 1024 / 1024
+                log.info(f"[encrypt-existing] [{i}/{total}] {fc.sha256[:8]}… ({size_mb:.2f} MB) — {len(copies)} cópia(s)")
+
+                # Cifra cada cópia para um temporário e VERIFICA (decifra + confere sha256)
+                # antes de promover qualquer uma. Só depois que todas as cópias passaram é
+                # que os temporários substituem os originais — se qualquer cópia falhar no
+                # meio (I/O, disco cheio, volume que caiu), nenhum original é tocado. Antes,
+                # a cópia cifrada com sucesso já tinha substituído o original quando uma
+                # cópia seguinte falhava, deixando fc.encrypted=False com ciphertext no disco
+                # (download servia lixo; a checagem de tamanho do dedup purgava tudo).
+                staged: list[tuple] = []  # (copy, p, tmp_enc) já cifrados e verificados
+                success = True
+                try:
+                    for copy in copies:
+                        p = Path(copy.stored_at)
+                        if not p.exists():
+                            log.warning(f"[encrypt-existing] [{i}/{total}] arquivo físico não encontrado em {copy.volume_path} — pulando cópia")
+                            continue
+                        log.info(f"[encrypt-existing] [{i}/{total}] cifrando cópia em {copy.volume_path}")
+                        tmp_enc = p.parent / f"_enc_{os.urandom(4).hex()}"
+                        try:
+                            crypto.encrypt_stream(p, tmp_enc, storage.encryption_key)
+                            _verify_stored_file(fc.sha256, tmp_enc, encrypted=True)
+                        except Exception:
+                            tmp_enc.unlink(missing_ok=True)
+                            raise
+                        staged.append((copy, p, tmp_enc))
+                except Exception as e:
+                    log.warning(
+                        f"[encrypt-existing] [{i}/{total}] erro ao cifrar {fc.sha256[:8]}…: {e} "
+                        f"— nenhuma cópia original foi alterada"
+                    )
+                    success = False
+                    for _copy, _p, tmp_enc in staged:
                         tmp_enc.unlink(missing_ok=True)
-                        raise
-                    staged.append((copy, p, tmp_enc))
-            except Exception as e:
-                log.warning(
-                    f"[encrypt-existing] [{i}/{total}] erro ao cifrar {fc.sha256[:8]}…: {e} "
-                    f"— nenhuma cópia original foi alterada"
-                )
-                success = False
-                for _copy, _p, tmp_enc in staged:
-                    tmp_enc.unlink(missing_ok=True)
-            else:
-                for copy, p, tmp_enc in staged:
-                    shutil.move(str(tmp_enc), str(p))
-                    log.info(f"[encrypt-existing] [{i}/{total}] cópia em {copy.volume_path} cifrada com sucesso")
+                else:
+                    for copy, p, tmp_enc in staged:
+                        shutil.move(str(tmp_enc), str(p))
+                        log.info(f"[encrypt-existing] [{i}/{total}] cópia em {copy.volume_path} cifrada com sucesso")
 
-            if success:
-                fc.encrypted = True
-                files_encrypted += 1
-                bytes_processed += fc.size
-                db.commit()
-                log.info(f"[encrypt-existing] [{i}/{total}] {fc.sha256[:8]}… concluído")
-            else:
-                skipped += 1
+                if success:
+                    fc.encrypted = True
+                    files_encrypted += 1
+                    bytes_processed += fc.size
+                    db.commit()
+                    log.info(f"[encrypt-existing] [{i}/{total}] {fc.sha256[:8]}… concluído")
+                else:
+                    skipped += 1
 
-            pct = round(i / total * 100) if total else 100
-            mj = db.get(MaintenanceJob, job_id)
-            if mj:
-                mj.summary = f"Cifrando: {i} / {total} arquivo(s) ({pct}%)"
-                db.commit()
-                invalidate_activity()
+                pct = round(i / total * 100) if total else 100
+                mj = db.get(MaintenanceJob, job_id)
+                if mj:
+                    mj.summary = f"Cifrando: {i} / {total} arquivo(s) ({pct}%)"
+                    db.commit()
+                    invalidate_activity()
 
         log.info(f"[encrypt-existing] concluído — {files_encrypted} cifrado(s), {skipped} pulado(s), {bytes_processed / 1024 / 1024:.2f} MB processados")
         mj = db.get(MaintenanceJob, job_id)

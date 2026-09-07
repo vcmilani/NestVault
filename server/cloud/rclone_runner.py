@@ -71,6 +71,10 @@ _BATCH_MAX_BYTES = 3 * 1024 ** 3   # 3 GB
 # rclone por diretório pequeno.
 _BATCH_IDLE_FLUSH   = 5.0    # segundos sem novo item na fila -> baixa o lote parcial
 _CHECKPOINT_INTERVAL = 300.0  # segundos entre saves de checkpoint (era por contagem de itens)
+# Teto da fila lister → batcher. Folga grande sobre _BATCH_MAX_FILES para o
+# batcher nunca esperar o lister no meio de um lote, mas ainda limitado: sem
+# teto, um remote com milhões de arquivos era enfileirado inteiro em memória.
+_WALK_QUEUE_SIZE    = 2000
 
 # Backends que exigem o walk incremental (não conseguem listagem recursiva
 # eficiente). Critério atual: serviço de fotos do iCloud (iclouddrive/photos).
@@ -841,8 +845,14 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
         remote_path = job.remote_path
         version_id  = version.id
 
-        file_queue: asyncio.Queue = asyncio.Queue()
-        process_queue: asyncio.Queue = asyncio.Queue()
+        # Filas limitadas: sem maxsize o lister enfileirava o remote inteiro em
+        # memória enquanto o consumer (que grava no banco) não vazava. O pipeline
+        # é linear — lister → batcher → consumer, sem ciclo —, então bloquear no
+        # put() só aplica backpressure; e como tudo roda sob o TaskGroup abaixo,
+        # uma falha em qualquer etapa cancela os put() pendentes em vez de travar.
+        # process_queue recebe do _download_batch, igual à fila do caminho rápido.
+        file_queue: asyncio.Queue = asyncio.Queue(maxsize=_WALK_QUEUE_SIZE)
+        process_queue: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_SIZE)
         dir_total: dict[str, int] = {}        # arquivos esperados por diretório
         dir_done_count: dict[str, int] = {}   # arquivos já registrados com sucesso
         file_to_dir: dict[str, str] = {}      # entry.path -> rel_dir (rastreio pro consumer)

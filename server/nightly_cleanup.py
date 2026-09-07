@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from database import SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob, SsdCachePendingMove, engine
-from sqlalchemy import func, select, delete, exists
+from sqlalchemy import func, delete, exists
 from cache_state import invalidate_activity
 
 log = logging.getLogger("backup-server")
@@ -34,6 +34,18 @@ def _delete_versions(db, version_ids: list[int]) -> None:
         db.commit()
 
 
+def orphan_filter():
+    """Predicado "este FileContent não é referenciado por nenhuma versão".
+
+    NOT EXISTS correlacionado, não `NOT IN (SELECT DISTINCT sha256 ...)`: o
+    segundo materializa o DISTINCT inteiro de version_files e o compara contra
+    cada linha de file_contents — o mesmo anti-join que o CHANGELOG v7.12
+    descreve como catastrófico no SQLite. Aqui cada linha faz uma sondagem
+    pontual no índice idx_sha256 e para no primeiro acerto.
+    """
+    return ~exists().where(VersionFile.sha256 == FileContent.sha256)
+
+
 def _cleanup_orphan_contents(db, limit: int | None = None) -> tuple[int, int]:
     """Remove FileContents sem referência e seus arquivos físicos. Retorna (removidos, bytes_liberados).
 
@@ -45,8 +57,7 @@ def _cleanup_orphan_contents(db, limit: int | None = None) -> tuple[int, int]:
     re-verifica no momento da deleção se o sha256 ainda está sem referência, protegendo
     arquivos que foram re-referenciados por uploads concorrentes após o snapshot inicial.
     """
-    used_shas = db.query(VersionFile.sha256).distinct().subquery()
-    q = db.query(FileContent).filter(~FileContent.sha256.in_(select(used_shas)))
+    q = db.query(FileContent).filter(orphan_filter())
     if limit is not None:
         q = q.limit(limit)
     candidates = q.all()
