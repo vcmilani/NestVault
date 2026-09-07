@@ -678,7 +678,7 @@ def recover_stuck_ssd_files(db) -> int:
         # Sem cópia HDD — criar move pendente
         try:
             dest_volume = pick_volume()
-        except RuntimeError:
+        except (RuntimeError, StorageThresholdExceeded):
             log.error(f"[ssd-cache] recover: {sha256[:8]}… nenhum volume HDD disponível")
             continue
         dest_path = content_path(sha256, dest_volume)

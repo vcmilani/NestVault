@@ -64,6 +64,11 @@ def add_or_update_rclone_job(job_id: int, cron_expr: str) -> None:
     parts = cron_expr.strip().split()
     if len(parts) != 5:
         raise ValueError(f"cron_expr inválido: '{cron_expr}' — esperado 5 campos (min hr day month dow)")
+    # Sem `timezone=` explícito, CronTrigger resolve para tzlocal.get_localzone() (fuso
+    # IANA da máquina, com DST) — já é hora local, igual às outras funções deste módulo,
+    # e mais correto que elas: local_tz = datetime.now().astimezone().tzinfo (usado por
+    # schedule_daily_digest/nightly_cleanup/db_backup/disk_history) é um offset fixo,
+    # congelado no momento da chamada, sem se ajustar em mudança de DST.
     trigger = CronTrigger(
         minute=parts[0], hour=parts[1], day=parts[2],
         month=parts[3], day_of_week=parts[4],

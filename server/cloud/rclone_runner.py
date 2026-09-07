@@ -1075,8 +1075,17 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
             # UPDATE explícito: o checkpoint foi gravado por outra Session, então
             # na Session `db` o progress_json ainda parece None — uma atribuição
             # ORM não geraria UPDATE e o checkpoint sobreviveria no banco.
+            # errors não-vazio aqui só ocorreria se algum erro escapasse do
+            # rastreio por diretório acima (defensivo — nunca "done" com erro
+            # pendente, pelo mesmo motivo do caminho rápido logo abaixo).
+            if not errors:
+                _final_status = "done"
+            elif processed_total == 0:
+                _final_status = "failed"
+            else:
+                _final_status = "incomplete"
             db.query(BackupVersion).filter(BackupVersion.id == version_id).update({
-                "status": "failed" if (processed_total == 0 and errors) else "done",
+                "status": _final_status,
                 "progress_json": None,   # walk concluído — limpa o checkpoint
                 "finished_at": datetime.now().astimezone().replace(tzinfo=None),
             }, synchronize_session=False)
@@ -1191,7 +1200,19 @@ async def _run_fast_strategy(job: RcloneBackupJob, db) -> None:
         )
         elapsed = time.monotonic() - t_start
 
-        version.status      = "failed" if (processed == 0 and errors) else "done"
+        # "incomplete" (não "done") quando há erros mas algum progresso: uma versão
+        # done vira baseline de retenção e de skip-por-mtime do próximo run — com
+        # milhares de erros e um único arquivo processado, o run anterior marcava
+        # "done" mesmo assim, então o próximo run pulava (por mtime) justamente os
+        # arquivos que nunca chegaram a ser baixados. "incomplete" já é reconhecida
+        # pelo bloco de resume acima (prev_incomplete), que soma seus arquivos à
+        # baseline de skip sem tratá-la como versão íntegra.
+        if not errors:
+            version.status = "done"
+        elif processed == 0:
+            version.status = "failed"
+        else:
+            version.status = "incomplete"
         version.finished_at = datetime.now().astimezone().replace(tzinfo=None)
         db.commit()
 

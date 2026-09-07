@@ -14,6 +14,7 @@ from cache_state import invalidate_activity
 log = logging.getLogger("backup-server")
 
 _SIX_HOURS  = timedelta(hours=6)
+_ONE_WEEK   = timedelta(days=7)
 _ONE_DAY    = timedelta(hours=24)
 _ONE_MONTH  = timedelta(days=30)
 _SIX_MONTHS = timedelta(days=180)
@@ -135,21 +136,26 @@ def _cleanup_stale_tmp_files(volumes: list[Path], max_age_hours: float = 24.0) -
     removed = 0
     bytes_freed = 0
     for vol in volumes:
+        # "_enc_*" (cifragem de upload/encrypt-existing/rclone) é criado dentro de
+        # _content/<2-hex>/, não na raiz do volume — glob(f"{prefix}*") sozinho nunca via
+        # esses arquivos, então um crash durante a cifragem deixava lixo permanente ali.
+        candidates = list(vol.glob("_content/*/_enc_*"))
         for prefix in _TMP_PREFIXES:
-            for f in vol.glob(f"{prefix}*"):
-                if not f.is_file():
-                    continue
-                try:
-                    st = f.stat()
-                    if st.st_mtime < cutoff:
-                        bytes_freed += st.st_size
-                        f.unlink()
-                        removed += 1
-                        log.info(f"[cleanup-tmp] removido {f.name} ({st.st_size} bytes)")
-                except FileNotFoundError:
-                    pass
-                except OSError as e:
-                    log.warning(f"[cleanup-tmp] não foi possível remover {f}: {e}")
+            candidates += list(vol.glob(f"{prefix}*"))
+        for f in candidates:
+            if not f.is_file():
+                continue
+            try:
+                st = f.stat()
+                if st.st_mtime < cutoff:
+                    bytes_freed += st.st_size
+                    f.unlink()
+                    removed += 1
+                    log.info(f"[cleanup-tmp] removido {f.name} ({st.st_size} bytes)")
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                log.warning(f"[cleanup-tmp] não foi possível remover {f}: {e}")
         # Diretórios de staging órfãos (e o arquivo-sidecar .files de mesmo prefixo).
         for prefix in _TMP_DIR_PREFIXES:
             for d in vol.glob(f"{prefix}*"):
@@ -433,10 +439,15 @@ def run_nightly_cleanup() -> None:
             # Conjunto de datas das versões done para comparação
             done_dates = {v.created_at for v in done_versions}
 
-            # 1. Limpar stale (failed/incomplete) com mais de 1 semana que tenham done mais recente
+            # 1. Limpar stale (failed/incomplete) com mais de 1 semana que tenham done mais
+            # recente. A checagem de idade documentada desde a v5.2.0 nunca foi aplicada no
+            # código — sem ela, uma versão que falhou há minutos já sumia assim que qualquer
+            # backup seguinte no mesmo label concluía, o que atrapalha investigar falhas
+            # recentes (a versão failed é justamente o que se quer inspecionar logo depois).
+            _cutoff_stale = now - _ONE_WEEK
             stale_to_delete: list[int] = []
             for v in stale_versions:
-                if any(d > v.created_at for d in done_dates):
+                if v.created_at < _cutoff_stale and any(d > v.created_at for d in done_dates):
                     stale_to_delete.append(v.id)
 
             if stale_to_delete:

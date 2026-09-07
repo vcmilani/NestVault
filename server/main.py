@@ -344,14 +344,19 @@ def _cleanup_stale_running_states():
     import shutil as _shutil
     from nightly_cleanup import _TMP_PREFIXES, _TMP_DIR_PREFIXES
     for vol in storage.STORAGE_VOLUMES:
+        # "_enc_*" (cifragem de upload/encrypt-existing/rclone) é criado dentro de
+        # _content/<2-hex>/, não na raiz do volume — sem isso um crash durante a
+        # cifragem deixava lixo permanente ali, nunca varrido no startup.
+        tmp_candidates = list(vol.glob("_content/*/_enc_*"))
         for prefix in _TMP_PREFIXES:
-            for f in vol.glob(f"{prefix}*"):
-                if f.is_file():
-                    try:
-                        f.unlink()
-                        log.info(f"[startup] arquivo temporário órfão removido: {f.name}")
-                    except OSError as e:
-                        log.warning(f"[startup] não foi possível remover {f}: {e}")
+            tmp_candidates += list(vol.glob(f"{prefix}*"))
+        for f in tmp_candidates:
+            if f.is_file():
+                try:
+                    f.unlink()
+                    log.info(f"[startup] arquivo temporário órfão removido: {f.name}")
+                except OSError as e:
+                    log.warning(f"[startup] não foi possível remover {f}: {e}")
         for prefix in _TMP_DIR_PREFIXES:
             for d in vol.glob(f"{prefix}*"):
                 try:
@@ -4080,11 +4085,18 @@ def _latest_done_subquery(db: Session):
     )
 
 
+def _parse_before_date(before: str) -> datetime:
+    try:
+        return datetime.fromisoformat(before)
+    except ValueError:
+        raise HTTPException(400, f"'before' inválido — esperado ISO 8601 (ex: 2026-01-01T00:00:00): {before!r}")
+
+
 @app.get("/maintenance/cleanup-by-date/preview", dependencies=[Depends(require_admin)])
 def cleanup_by_date_preview(before: str, label: Optional[str] = None, db: Session = Depends(get_db)):
     scope = f"label={label}" if label else "todos os labels"
     log.info(f"[cleanup-by-date/preview] consultando antes de {before}, escopo={scope}")
-    cutoff = datetime.fromisoformat(before)
+    cutoff = _parse_before_date(before)
     latest_done = _latest_done_subquery(db)
     q = (
         db.query(BackupVersion.backup_label, func.count(BackupVersion.id))
@@ -4110,7 +4122,7 @@ def cleanup_by_date(
 ):
     scope = f"label={label}" if label else "todos os labels"
     log.info(f"[cleanup-by-date] agendando exclusão antes de {before}, escopo={scope}")
-    cutoff = datetime.fromisoformat(before)
+    cutoff = _parse_before_date(before)
     latest_done = _latest_done_subquery(db)
     q = (
         db.query(BackupVersion.id, BackupVersion.backup_label)

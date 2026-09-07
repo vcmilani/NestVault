@@ -217,6 +217,15 @@ class _AuthSession(requests.Session):
             _prompt_api_key()
             if 'headers' in kwargs and API_KEY:
                 kwargs['headers']['X-API-Key'] = API_KEY
+            data = kwargs.get('data')
+            if data is not None and hasattr(data, 'seek'):
+                # O corpo (ex: _ProgressReader de upload_file) já foi consumido pela
+                # tentativa anterior — sem rebobinar, a retentativa reenviava um body
+                # vazio/truncado e o servidor gravava o arquivo incompleto.
+                try:
+                    data.seek(0)
+                except (OSError, ValueError):
+                    pass
             r = super().request(method, url, **kwargs)
         if r.status_code == 403:
             # Chave valida mas sem posse deste backup — retentar nao ajuda
@@ -365,6 +374,13 @@ class _ProgressReader:
         if chunk:
             self._advance(len(chunk))
         return chunk
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        # Permite ao retry de 401 (_AuthSession.request) reenviar o arquivo do início
+        # — sem isso, um upload cujo body já tinha sido parcial/totalmente consumido
+        # (o reader chegou perto do EOF) reenviava um body vazio ou truncado na
+        # retentativa, e o servidor gravava um arquivo incompleto sob o sha256 certo.
+        return self._f.seek(offset, whence)
 
     def close(self):
         self._f.close()
@@ -1238,37 +1254,43 @@ def restore(destination, label, version_key, server=DEFAULT_SERVER,
                     _dim(f"DOWN  {relative}  ({fmt_size(size)})  [dry-run]")
                     return
 
+                r = _session.get(f"{server}/files/{file_id}/download",
+                                 headers=build_headers(), stream=True, timeout=120)
+                r.raise_for_status()
+                dest_file.parent.mkdir(parents=True, exist_ok=True)
+                total_bytes = int(r.headers.get("Content-Length", size))
+                task_id = progress.add_task(
+                    Path(relative).name[:40],
+                    total=total_bytes / (1024 * 1024),
+                )
                 try:
-                    r = _session.get(f"{server}/files/{file_id}/download",
-                                     headers=build_headers(), stream=True, timeout=120)
-                    r.raise_for_status()
-                    dest_file.parent.mkdir(parents=True, exist_ok=True)
-                    total_bytes = int(r.headers.get("Content-Length", size))
-                    task_id = progress.add_task(
-                        Path(relative).name[:40],
-                        total=total_bytes / (1024 * 1024),
-                    )
-                    try:
-                        with open(dest_file, "wb") as f:
-                            for chunk in r.iter_content(chunk_size=65536):
-                                f.write(chunk)
-                                progress.update(task_id, advance=len(chunk) / (1024 * 1024))
-                    finally:
-                        progress.remove_task(task_id)
+                    with open(dest_file, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=65536):
+                            f.write(chunk)
+                            progress.update(task_id, advance=len(chunk) / (1024 * 1024))
+                finally:
+                    progress.remove_task(task_id)
 
-                    if sha256_file(dest_file) != sha256:
-                        _err(f"Integridade falhou — {relative} removido")
-                        dest_file.unlink()
-                        with lock:
-                            stats["errors"] += 1
-                        return
-                    with lock:
-                        stats["restored"] += 1
-
-                except requests.RequestException as e:
-                    _err(f"{relative}: {e}")
+                if sha256_file(dest_file) != sha256:
+                    _err(f"Integridade falhou — {relative} removido")
+                    dest_file.unlink()
                     with lock:
                         stats["errors"] += 1
+                    return
+                with lock:
+                    stats["restored"] += 1
+
+            except requests.RequestException as e:
+                _err(f"{relative}: {e}")
+                with lock:
+                    stats["errors"] += 1
+            except OSError as e:
+                # Permissão, disco cheio, etc. — sem isso, o erro subia por
+                # list(pool.map(...)) e abortava o restore inteiro no meio,
+                # em vez de contar como erro deste arquivo e seguir os demais.
+                _err(f"{relative}: erro de E/S — {e.strerror or e}")
+                with lock:
+                    stats["errors"] += 1
             finally:
                 _update_bar()
 
