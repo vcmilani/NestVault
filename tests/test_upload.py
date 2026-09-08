@@ -1,7 +1,7 @@
 import hashlib
 import base64
 from pathlib import Path
-from conftest import make_backup, make_version
+from conftest import make_backup, make_version, finish_version
 
 
 def _headers(label, version_key, path="/file.txt", mtime=1000.0, sha256=None):
@@ -139,3 +139,35 @@ def test_upload_version_not_found(client):
     make_backup(client, "b1")
     r = client.post("/upload", content=b"data", headers=_headers("b1", "nonexistent"))
     assert r.status_code == 404
+
+
+# -- upload em versão já finalizada -------------------------------------------
+
+def test_upload_rejected_after_version_done(client):
+    """Regressão (A1): um retry atrasado do cliente depois do finish_version não pode
+    mais inserir VersionFile numa versão done — ela é baseline de retenção e de
+    skip-por-mtime, escrever nela depois do fato invalida esses cálculos."""
+    make_backup(client, "b1")
+    make_version(client, "b1", "v1")
+    finish_version(client, "b1", "v1")
+    r = client.post("/upload", content=b"tarde demais", headers=_headers("b1", "v1"))
+    assert r.status_code == 409
+
+
+def test_upload_rejected_after_version_failed(client):
+    make_backup(client, "b1")
+    make_version(client, "b1", "v1")
+    finish_version(client, "b1", "v1", status="failed")
+    r = client.post("/upload", content=b"tarde demais", headers=_headers("b1", "v1"))
+    assert r.status_code == 409
+
+
+def test_upload_still_allowed_into_incomplete_version(client):
+    """'incomplete' não é terminal — é o estado automático de uma versão superada por
+    uma nova no mesmo label (create_version); continua gravável de propósito, já que
+    vários fluxos (comparação, register/batch de fixtures) escrevem nela."""
+    make_backup(client, "b1")
+    make_version(client, "b1", "v1")
+    make_version(client, "b1", "v2")  # v1 vira "incomplete" automaticamente
+    r = client.post("/upload", content=b"ainda ok", headers=_headers("b1", "v1"))
+    assert r.status_code == 200

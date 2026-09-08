@@ -351,12 +351,6 @@ def get(key: str) -> Any:
     return _data[f.group][f.name]
 
 
-def as_dict() -> dict[str, dict[str, Any]]:
-    if not _data:
-        load()
-    return {g: dict(v) for g, v in _data.items()}
-
-
 def path() -> str:
     return str(_path or config_path())
 

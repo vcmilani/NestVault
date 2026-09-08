@@ -8,12 +8,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from database import SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob, SsdCachePendingMove, engine
-from sqlalchemy import func, select, text, delete, exists
+from sqlalchemy import func, delete, exists
 from cache_state import invalidate_activity
 
 log = logging.getLogger("backup-server")
 
 _SIX_HOURS  = timedelta(hours=6)
+_ONE_WEEK   = timedelta(days=7)
 _ONE_DAY    = timedelta(hours=24)
 _ONE_MONTH  = timedelta(days=30)
 _SIX_MONTHS = timedelta(days=180)
@@ -33,6 +34,18 @@ def _delete_versions(db, version_ids: list[int]) -> None:
         db.commit()
 
 
+def orphan_filter():
+    """Predicado "este FileContent não é referenciado por nenhuma versão".
+
+    NOT EXISTS correlacionado, não `NOT IN (SELECT DISTINCT sha256 ...)`: o
+    segundo materializa o DISTINCT inteiro de version_files e o compara contra
+    cada linha de file_contents — o mesmo anti-join que o CHANGELOG v7.12
+    descreve como catastrófico no SQLite. Aqui cada linha faz uma sondagem
+    pontual no índice idx_sha256 e para no primeiro acerto.
+    """
+    return ~exists().where(VersionFile.sha256 == FileContent.sha256)
+
+
 def _cleanup_orphan_contents(db, limit: int | None = None) -> tuple[int, int]:
     """Remove FileContents sem referência e seus arquivos físicos. Retorna (removidos, bytes_liberados).
 
@@ -44,8 +57,7 @@ def _cleanup_orphan_contents(db, limit: int | None = None) -> tuple[int, int]:
     re-verifica no momento da deleção se o sha256 ainda está sem referência, protegendo
     arquivos que foram re-referenciados por uploads concorrentes após o snapshot inicial.
     """
-    used_shas = db.query(VersionFile.sha256).distinct().subquery()
-    q = db.query(FileContent).filter(~FileContent.sha256.in_(select(used_shas)))
+    q = db.query(FileContent).filter(orphan_filter())
     if limit is not None:
         q = q.limit(limit)
     candidates = q.all()
@@ -135,21 +147,26 @@ def _cleanup_stale_tmp_files(volumes: list[Path], max_age_hours: float = 24.0) -
     removed = 0
     bytes_freed = 0
     for vol in volumes:
+        # "_enc_*" (cifragem de upload/encrypt-existing/rclone) é criado dentro de
+        # _content/<2-hex>/, não na raiz do volume — glob(f"{prefix}*") sozinho nunca via
+        # esses arquivos, então um crash durante a cifragem deixava lixo permanente ali.
+        candidates = list(vol.glob("_content/*/_enc_*"))
         for prefix in _TMP_PREFIXES:
-            for f in vol.glob(f"{prefix}*"):
-                if not f.is_file():
-                    continue
-                try:
-                    st = f.stat()
-                    if st.st_mtime < cutoff:
-                        bytes_freed += st.st_size
-                        f.unlink()
-                        removed += 1
-                        log.info(f"[cleanup-tmp] removido {f.name} ({st.st_size} bytes)")
-                except FileNotFoundError:
-                    pass
-                except OSError as e:
-                    log.warning(f"[cleanup-tmp] não foi possível remover {f}: {e}")
+            candidates += list(vol.glob(f"{prefix}*"))
+        for f in candidates:
+            if not f.is_file():
+                continue
+            try:
+                st = f.stat()
+                if st.st_mtime < cutoff:
+                    bytes_freed += st.st_size
+                    f.unlink()
+                    removed += 1
+                    log.info(f"[cleanup-tmp] removido {f.name} ({st.st_size} bytes)")
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                log.warning(f"[cleanup-tmp] não foi possível remover {f}: {e}")
         # Diretórios de staging órfãos (e o arquivo-sidecar .files de mesmo prefixo).
         for prefix in _TMP_DIR_PREFIXES:
             for d in vol.glob(f"{prefix}*"):
@@ -433,10 +450,15 @@ def run_nightly_cleanup() -> None:
             # Conjunto de datas das versões done para comparação
             done_dates = {v.created_at for v in done_versions}
 
-            # 1. Limpar stale (failed/incomplete) com mais de 1 semana que tenham done mais recente
+            # 1. Limpar stale (failed/incomplete) com mais de 1 semana que tenham done mais
+            # recente. A checagem de idade documentada desde a v5.2.0 nunca foi aplicada no
+            # código — sem ela, uma versão que falhou há minutos já sumia assim que qualquer
+            # backup seguinte no mesmo label concluía, o que atrapalha investigar falhas
+            # recentes (a versão failed é justamente o que se quer inspecionar logo depois).
+            _cutoff_stale = now - _ONE_WEEK
             stale_to_delete: list[int] = []
             for v in stale_versions:
-                if any(d > v.created_at for d in done_dates):
+                if v.created_at < _cutoff_stale and any(d > v.created_at for d in done_dates):
                     stale_to_delete.append(v.id)
 
             if stale_to_delete:
@@ -496,8 +518,8 @@ def run_nightly_cleanup() -> None:
             mj.summary = "Limpando arquivos temporários órfãos..."
             db.commit()
             invalidate_activity()
-        from storage import STORAGE_VOLUMES
-        tmp_removed, tmp_bytes = _cleanup_stale_tmp_files(STORAGE_VOLUMES, max_age_hours=24.0)
+        from storage import tmp_sweep_dirs
+        tmp_removed, tmp_bytes = _cleanup_stale_tmp_files(tmp_sweep_dirs(), max_age_hours=24.0)
 
         # Validação de integridade das últimas versões done
         mj = db.get(MaintenanceJob, mj_id)

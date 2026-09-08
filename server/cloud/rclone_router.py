@@ -13,7 +13,7 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from auth import require_admin
-from database import RcloneBackupJob, SessionLocal, get_db
+from database import RcloneBackupJob, get_db
 import scheduler as sched
 
 log = logging.getLogger("backup-server")
@@ -196,15 +196,21 @@ def create_job(req: RcloneJobCreate, db: Session = Depends(get_db)):
         strategy=req.strategy,
     )
     db.add(job)
-    db.commit()
-    db.refresh(job)
+    db.flush()  # atribui job.id sem commitar — precisa dele para agendar antes de persistir
 
+    # Agenda ANTES do commit: cron_expr já passou pela validação sintática do Pydantic
+    # (_parse_cron), mas scheduler.add_job pode falhar por outro motivo — sem isso, um
+    # erro aqui deixava o job salvo no banco enquanto a API respondia 400, como se a
+    # criação tivesse falhado por completo.
     if job.enabled and job.cron_expr:
         try:
             sched.add_or_update_rclone_job(job.id, job.cron_expr)
         except ValueError as e:
+            db.rollback()
             raise HTTPException(400, str(e))
 
+    db.commit()
+    db.refresh(job)
     log.info(f"[rclone] Job {job.id} criado: {job.remote_name}:{job.remote_path} → {job.target_label}")
     return _job_out(job)
 
@@ -231,14 +237,18 @@ def update_job(job_id: int, req: RcloneJobUpdate, db: Session = Depends(get_db))
     if req.strategy is not None:
         job.strategy = req.strategy
 
-    db.commit()
-
+    # Agenda ANTES do commit (mesmo motivo do create_job): se scheduler.add_job falhar,
+    # db.rollback() desfaz as mutações acima e a API responde 400 sem deixar o job
+    # persistido com um cron_expr que não pôde ser agendado.
     if job.enabled and job.cron_expr:
         try:
             sched.add_or_update_rclone_job(job.id, job.cron_expr)
         except ValueError as e:
+            db.rollback()
             raise HTTPException(400, str(e))
+        db.commit()
     else:
+        db.commit()
         sched.remove_rclone_job(job.id)
 
     return _job_out(job)
