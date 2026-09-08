@@ -280,3 +280,74 @@ def test_run_nightly_cleanup_combines_retention_and_prune_in_same_run(client, mo
         assert remaining == {"k2", "k4"}
     finally:
         db.close()
+
+
+# -- Retenção de versões stale (failed/incomplete) por idade (N1) -------------
+# CHANGELOG v5.2.0 documenta "failed/incomplete com mais de 1 semana são removidas
+# se houver versão done mais recente" — o código nunca aplicou a checagem de idade,
+# só a de "tem done mais recente". Uma versão failed de minutos atrás já sumia assim
+# que qualquer backup seguinte no mesmo label concluía, atrapalhando quem quer
+# investigar a falha logo depois dela acontecer.
+
+def test_stale_version_kept_when_recent_even_with_newer_done(client, monkeypatch):
+    import main as m
+    import nightly_cleanup as nc
+
+    # run_nightly_cleanup() abre sua própria sessão via nightly_cleanup.SessionLocal —
+    # só main.SessionLocal é patchado pelo fixture `client`, então sem isso a limpeza
+    # rodaria contra o banco de produção em vez do banco in-memory do teste.
+    monkeypatch.setattr(nc, "SessionLocal", m.SessionLocal)
+    monkeypatch.setattr(nc, "engine", m.SessionLocal.kw["bind"])
+
+    make_backup(client, "lbl")
+    Session = m.SessionLocal
+    db = Session()
+    try:
+        now = datetime.now()
+        failed = _mkver(db, "lbl", "kfail", now - timedelta(hours=1), status="failed")
+        _mkver(db, "lbl", "kdone", now, status="done")
+    finally:
+        db.close()
+
+    run_nightly_cleanup()
+
+    db = Session()
+    try:
+        remaining = {
+            v.version_key
+            for v in db.query(BackupVersion).filter(BackupVersion.backup_label == "lbl").all()
+        }
+        assert "kfail" in remaining, "versão failed recente não deveria ser removida ainda"
+    finally:
+        db.close()
+
+
+def test_stale_version_removed_after_one_week_with_newer_done(client, monkeypatch):
+    import main as m
+    import nightly_cleanup as nc
+
+    monkeypatch.setattr(nc, "SessionLocal", m.SessionLocal)
+    monkeypatch.setattr(nc, "engine", m.SessionLocal.kw["bind"])
+
+    make_backup(client, "lbl")
+    Session = m.SessionLocal
+    db = Session()
+    try:
+        now = datetime.now()
+        failed = _mkver(db, "lbl", "kfail", now - timedelta(days=8), status="failed")
+        _mkver(db, "lbl", "kdone", now, status="done")
+    finally:
+        db.close()
+
+    run_nightly_cleanup()
+
+    db = Session()
+    try:
+        remaining = {
+            v.version_key
+            for v in db.query(BackupVersion).filter(BackupVersion.backup_label == "lbl").all()
+        }
+        assert "kfail" not in remaining, "versão failed com mais de 1 semana deveria ser removida"
+        assert "kdone" in remaining
+    finally:
+        db.close()

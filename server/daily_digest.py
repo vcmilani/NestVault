@@ -17,11 +17,11 @@ import httpx
 from sqlalchemy import func
 
 import config
+import version_diff
 
 from database import (
     FileContent,
     BackupVersion,
-    VersionFile,
     SessionLocal,
 )
 from storage import fmt_bytes as _fmt_bytes
@@ -48,49 +48,22 @@ def _today_local_range() -> tuple[datetime, datetime, str]:
 def _version_diff(db, version: BackupVersion) -> dict:
     """Compara a versão com a anterior done do mesmo label (adicionados/modificados/removidos).
 
-    Carrega os arquivos de cada versão em queries separadas — adequado para o digest,
-    que processa poucas versões de uma só vez e roda raramente.
-    Para o endpoint de atividade (polling frequente com até 30 versões), veja a lógica
-    bulk em get_activity() em main.py, que usa uma única query IN para todos os arquivos.
+    As contagens saem do banco (version_diff.py), não de dicts em memória: o digest
+    roda uma vez por versão done do dia e antes carregava os version_files inteiros
+    das duas versões só para comparar.
     """
-    prev = (
-        db.query(BackupVersion)
-        .filter(
-            BackupVersion.backup_label == version.backup_label,
-            BackupVersion.version_key < version.version_key,
-            BackupVersion.status == "done",
-        )
-        .order_by(BackupVersion.version_key.desc())
-        .first()
-    )
+    _vseq = version_diff.done_version_lag_sq(db, labels=[version.backup_label])
+    win_sq = db.query(_vseq).filter(_vseq.c.vid == version.id).subquery()
 
-    current_files = {
-        r.original_path: r.sha256
-        for r in db.query(VersionFile.original_path, VersionFile.sha256)
-        .filter(VersionFile.version_id == version.id)
-        .all()
-    }
+    counts = version_diff.diff_counts_by_version(db, win_sq).get(version.id)
+    total = version_diff.file_counts_by_version(db, [version.id]).get(version.id, 0)
 
-    if prev is None:
-        return {"added": len(current_files), "modified": 0, "removed": 0, "total": len(current_files)}
+    if counts is None:
+        # A versão não está 'done' (o digest só chama para versões done, mas o
+        # helper filtra por status): sem predecessora, tudo conta como adicionado.
+        return {"added": total, "modified": 0, "removed": 0, "total": total}
 
-    prev_files = {
-        r.original_path: r.sha256
-        for r in db.query(VersionFile.original_path, VersionFile.sha256)
-        .filter(VersionFile.version_id == prev.id)
-        .all()
-    }
-
-    added    = sum(1 for p in current_files if p not in prev_files)
-    modified = sum(1 for p, h in current_files.items() if p in prev_files and prev_files[p] != h)
-    removed  = sum(1 for p in prev_files if p not in current_files)
-
-    return {
-        "added": added,
-        "modified": modified,
-        "removed": removed,
-        "total": len(current_files),
-    }
+    return {**counts, "total": total}
 
 
 def _collect_stats() -> dict:

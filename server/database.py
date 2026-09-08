@@ -18,12 +18,15 @@ from sqlalchemy import (
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.pool import NullPool
-from datetime import datetime, timezone
+from datetime import datetime
 import os
 
 import config
 
-def _utcnow():
+def _now():
+    """Timestamp local naive — mesma convenção usada em todo o resto do servidor
+    (main.py, nightly_cleanup.py, ...). Nome antigo (_utcnow) era enganoso: nunca
+    usou UTC, sempre foi datetime.now() em hora local."""
     return datetime.now()
 
 DATABASE_URL = config.get("database.url") or None
@@ -78,7 +81,7 @@ class User(Base):
     api_key_hash = Column(String(64), nullable=False, unique=True, index=True)
     role         = Column(String, nullable=False, default="user")  # "admin" | "user"
     is_active    = Column(Boolean, nullable=False, default=True)
-    created_at   = Column(DateTime, default=_utcnow)
+    created_at   = Column(DateTime, default=_now)
 
 
 class BackupID(Base):
@@ -88,7 +91,7 @@ class BackupID(Base):
     label         = Column(String, nullable=False, unique=True, index=True)
     client_name   = Column(String, nullable=True, index=True)
     prefix        = Column(String, nullable=True)
-    created_at    = Column(DateTime, default=_utcnow)
+    created_at    = Column(DateTime, default=_now)
     status        = Column(String, default="active")
     # Dono do backup — nullable durante a migração (ver bootstrap_admin_user /
     # backfill_backup_owners); usuário comum só enxerga/restaura labels onde
@@ -112,7 +115,7 @@ class BackupVersion(Base):
     id             = Column(Integer, primary_key=True)
     backup_label   = Column(String, ForeignKey("backup_ids.label"), nullable=False)
     version_key    = Column(String, nullable=False)
-    created_at     = Column(DateTime, default=_utcnow)
+    created_at     = Column(DateTime, default=_now)
     finished_at    = Column(DateTime, nullable=True)
     status         = Column(String, default="running")
     absorbed_count = Column(Integer, nullable=False, default=0, server_default="0")
@@ -132,7 +135,7 @@ class FileContent(Base):
     stored_at  = Column(String, nullable=False)
     size       = Column(BigInteger, nullable=False)
     encrypted  = Column(Boolean, nullable=False, default=False, server_default="0")
-    created_at = Column(DateTime, default=_utcnow)
+    created_at = Column(DateTime, default=_now)
 
     refs = relationship("VersionFile", back_populates="content", lazy="dynamic")
 
@@ -154,7 +157,11 @@ class VersionFile(Base):
     __tablename__ = "version_files"
     __table_args__ = (
         UniqueConstraint("version_id", "original_path", name="uq_version_path"),
-        Index("idx_sha256", "sha256"),
+        # Composto (sha256, version_id): cobre tanto as buscas só por sha256 — sha256
+        # é a coluna principal, então substitui o antigo idx_sha256 — quanto o EXISTS
+        # de posse em _content_visible_to_user, que precisa do version_id logo em
+        # seguida. Com as duas colunas no índice a sondagem não toca a heap.
+        Index("idx_vf_sha_version", "sha256", "version_id"),
     )
 
     id            = Column(Integer, primary_key=True)
@@ -162,7 +169,7 @@ class VersionFile(Base):
     original_path = Column(String, nullable=False)
     sha256        = Column(String(64), ForeignKey("file_contents.sha256"), nullable=False)
     mtime         = Column(Float, nullable=False)
-    created_at    = Column(DateTime, default=_utcnow)
+    created_at    = Column(DateTime, default=_now)
 
     version = relationship("BackupVersion", back_populates="files")
     content = relationship("FileContent", back_populates="refs")
@@ -174,7 +181,7 @@ class MaintenanceJob(Base):
     id          = Column(Integer, primary_key=True)
     job_type    = Column(String, nullable=False)
     status      = Column(String, nullable=False, default="running")
-    started_at  = Column(DateTime, default=_utcnow)
+    started_at  = Column(DateTime, default=_now)
     finished_at = Column(DateTime, nullable=True)
     summary     = Column(String, nullable=True)
     # Bytes efetivamente liberados pelo job (limpezas). Alimenta o total acumulado e
@@ -190,7 +197,7 @@ class SsdCachePendingMove(Base):
     ssd_path    = Column(String, nullable=False)
     dest_volume = Column(String, nullable=False)
     dest_path   = Column(String, nullable=False)
-    created_at  = Column(DateTime, default=_utcnow)
+    created_at  = Column(DateTime, default=_now)
     retry_count = Column(Integer, nullable=False, default=0)
 
 
@@ -210,7 +217,7 @@ class RcloneBackupJob(Base):
     last_run_at      = Column(DateTime, nullable=True)
     last_run_status  = Column(String, nullable=True)
     last_run_message = Column(String, nullable=True)
-    created_at       = Column(DateTime, default=_utcnow)
+    created_at       = Column(DateTime, default=_now)
 
 
 class DiskSnapshot(Base):
@@ -222,7 +229,7 @@ class DiskSnapshot(Base):
     id          = Column(Integer, primary_key=True, autoincrement=True)
     volume_path = Column(String, nullable=False)
     used_pct    = Column(Float, nullable=False)
-    sampled_at  = Column(DateTime, nullable=False, default=_utcnow)
+    sampled_at  = Column(DateTime, nullable=False, default=_now)
 
 
 class DiskUsageDaily(Base):
@@ -236,7 +243,7 @@ class DiskUsageDaily(Base):
     used_bytes  = Column(BigInteger, nullable=False)
     total_bytes = Column(BigInteger, nullable=False)
     used_pct    = Column(Float, nullable=False)
-    recorded_at = Column(DateTime, nullable=False, default=_utcnow)
+    recorded_at = Column(DateTime, nullable=False, default=_now)
 
 
 # Tipos de job cujo resumo pode citar bytes liberados. Restringir por tipo é
@@ -409,6 +416,13 @@ def init_db():
             # Remove índice redundante com a unique constraint (version_id, original_path)
             ("DROP INDEX IF EXISTS version_files_original_path_index",
              "Removendo índice redundante: version_files.original_path"),
+            # Cria o composto (sha256, version_id) ANTES de dropar o idx_sha256 que
+            # ele substitui — nessa ordem nenhuma busca por sha256 fica sem índice
+            # no meio da migração, que num banco grande leva tempo.
+            ("CREATE INDEX IF NOT EXISTS idx_vf_sha_version ON version_files (sha256, version_id)",
+             "Criando índice composto otimizado: idx_vf_sha_version"),
+            ("DROP INDEX IF EXISTS idx_sha256",
+             "Removendo índice redundante: version_files.sha256 (coberto pelo composto)"),
         ]
         for stmt, msg in _index_migrations:
             conn.execute(text(stmt))

@@ -70,7 +70,7 @@ def reset_degraded_volumes():
 
 def _reset_module_caches():
     """Zera caches/sinais de módulo que persistem entre testes (isolamento)."""
-    m._reclaimable_cache.update({"value": 0, "ts": 0.0})
+    m._reclaimable_cache.update({"value": 0, "ts": 0.0, "gen": -1})
     m._stats_cache.update({"data": None, "ts": 0.0})
     m._historical_cache.update({"data": None, "ts": 0.0})
     m._activity_wake.clear()

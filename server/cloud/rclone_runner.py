@@ -39,7 +39,7 @@ import os
 import tempfile
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 import shutil
@@ -47,7 +47,7 @@ import shutil
 import config
 import crypto
 import storage
-from cache_state import invalidate_activity
+from cache_state import invalidate_activity, mark_backup_activity
 from database import (
     BackupID, BackupVersion, FileContent, FileContentCopy,
     RcloneBackupJob, SessionLocal, VersionFile,
@@ -71,6 +71,10 @@ _BATCH_MAX_BYTES = 3 * 1024 ** 3   # 3 GB
 # rclone por diretório pequeno.
 _BATCH_IDLE_FLUSH   = 5.0    # segundos sem novo item na fila -> baixa o lote parcial
 _CHECKPOINT_INTERVAL = 300.0  # segundos entre saves de checkpoint (era por contagem de itens)
+# Teto da fila lister → batcher. Folga grande sobre _BATCH_MAX_FILES para o
+# batcher nunca esperar o lister no meio de um lote, mas ainda limitado: sem
+# teto, um remote com milhões de arquivos era enfileirado inteiro em memória.
+_WALK_QUEUE_SIZE    = 2000
 
 # Backends que exigem o walk incremental (não conseguem listagem recursiva
 # eficiente). Critério atual: serviço de fotos do iCloud (iclouddrive/photos).
@@ -376,6 +380,9 @@ def _process_file_sync(
     """Dedup, store, encrypt, replicate e registro no banco de um arquivo baixado.
     Bloqueante (I/O + criptografia) — roda via asyncio.to_thread com Session
     própria (ver _register_version_file_sync)."""
+    # Job rclone também é atividade de backup: mantém o gate de ociosidade do SSD
+    # cache ciente do tráfego de disco que ele gera (ver _should_process_ssd_moves).
+    mark_backup_activity()
     db = SessionLocal()
     try:
         fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
@@ -600,7 +607,6 @@ async def _consumer(
     version_id: int,
     enc_key: bytes | None,
     errors: list,
-    abort: asyncio.Event,
 ) -> tuple[int, int, int]:
     processed = 0
     skipped   = 0
@@ -842,8 +848,14 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
         remote_path = job.remote_path
         version_id  = version.id
 
-        file_queue: asyncio.Queue = asyncio.Queue()
-        process_queue: asyncio.Queue = asyncio.Queue()
+        # Filas limitadas: sem maxsize o lister enfileirava o remote inteiro em
+        # memória enquanto o consumer (que grava no banco) não vazava. O pipeline
+        # é linear — lister → batcher → consumer, sem ciclo —, então bloquear no
+        # put() só aplica backpressure; e como tudo roda sob o TaskGroup abaixo,
+        # uma falha em qualquer etapa cancela os put() pendentes em vez de travar.
+        # process_queue recebe do _download_batch, igual à fila do caminho rápido.
+        file_queue: asyncio.Queue = asyncio.Queue(maxsize=_WALK_QUEUE_SIZE)
+        process_queue: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_SIZE)
         dir_total: dict[str, int] = {}        # arquivos esperados por diretório
         dir_done_count: dict[str, int] = {}   # arquivos já registrados com sucesso
         file_to_dir: dict[str, str] = {}      # entry.path -> rel_dir (rastreio pro consumer)
@@ -1075,8 +1087,17 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
             # UPDATE explícito: o checkpoint foi gravado por outra Session, então
             # na Session `db` o progress_json ainda parece None — uma atribuição
             # ORM não geraria UPDATE e o checkpoint sobreviveria no banco.
+            # errors não-vazio aqui só ocorreria se algum erro escapasse do
+            # rastreio por diretório acima (defensivo — nunca "done" com erro
+            # pendente, pelo mesmo motivo do caminho rápido logo abaixo).
+            if not errors:
+                _final_status = "done"
+            elif processed_total == 0:
+                _final_status = "failed"
+            else:
+                _final_status = "incomplete"
             db.query(BackupVersion).filter(BackupVersion.id == version_id).update({
-                "status": "failed" if (processed_total == 0 and errors) else "done",
+                "status": _final_status,
                 "progress_json": None,   # walk concluído — limpa o checkpoint
                 "finished_at": datetime.now().astimezone().replace(tzinfo=None),
             }, synchronize_session=False)
@@ -1187,11 +1208,23 @@ async def _run_fast_strategy(job: RcloneBackupJob, db) -> None:
         t_start = time.monotonic()
         _, (processed, skipped, bytes_dl) = await asyncio.gather(
             _producer(queue, all_files, prev_files, job.remote_name, job.remote_path, errors, abort),
-            _consumer(queue, version.id, enc_key, errors, abort),
+            _consumer(queue, version.id, enc_key, errors),
         )
         elapsed = time.monotonic() - t_start
 
-        version.status      = "failed" if (processed == 0 and errors) else "done"
+        # "incomplete" (não "done") quando há erros mas algum progresso: uma versão
+        # done vira baseline de retenção e de skip-por-mtime do próximo run — com
+        # milhares de erros e um único arquivo processado, o run anterior marcava
+        # "done" mesmo assim, então o próximo run pulava (por mtime) justamente os
+        # arquivos que nunca chegaram a ser baixados. "incomplete" já é reconhecida
+        # pelo bloco de resume acima (prev_incomplete), que soma seus arquivos à
+        # baseline de skip sem tratá-la como versão íntegra.
+        if not errors:
+            version.status = "done"
+        elif processed == 0:
+            version.status = "failed"
+        else:
+            version.status = "incomplete"
         version.finished_at = datetime.now().astimezone().replace(tzinfo=None)
         db.commit()
 
