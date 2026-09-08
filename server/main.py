@@ -177,7 +177,8 @@ from nightly_cleanup import orphan_filter as _orphan_filter
 from auth import get_current_user, require_admin, require_owner_or_admin
 from cloud.rclone_router import router as rclone_router
 import scheduler as sched
-from cache_state import _activity_wake, activity_generation, invalidate_activity
+from cache_state import (_activity_wake, activity_generation, invalidate_activity,
+                          mark_backup_activity, seconds_since_backup_activity)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -229,6 +230,10 @@ _HISTORICAL_FALLBACK_TTL = 300.0
 
 _stats_cache: dict = {"data": None, "ts": 0.0}
 _STATS_TTL = 300.0
+
+# Idade a partir da qual uma versão 'running' sem arquivos novos é considerada
+# abandonada. Mesmo critério da limpeza noturna (nightly_cleanup._SIX_HOURS).
+_STALE_RUNNING_VERSION = timedelta(hours=6)
 
 
 def _get_reclaimable_bytes(db: Session) -> int:
@@ -289,6 +294,42 @@ def _pick_volume() -> Path:
         raise HTTPException(503, str(e))
 
 
+def _has_active_backup(db: Session) -> bool:
+    """True se existe backup de fato em andamento.
+
+    Uma versão fica 'running' até o cliente chamar finish_version — se ele morre
+    no meio (Ctrl+C, rede caiu, máquina desligada), a linha continua 'running'
+    indefinidamente. Como este gate é global, uma única versão nessas condições
+    bloqueava a movimentação SSD → HDD de *todos* os labels até a limpeza noturna
+    (00:00) marcá-la como 'incomplete'. Aqui aplicamos o mesmo critério de
+    obsolescência que a limpeza noturna usa (6h sem nenhum arquivo novo), só que
+    a cada checagem: versão parada há mais de 6h não bloqueia mais nada.
+
+    A subquery de atividade por versão só é executada para versões criadas há
+    mais de 6h — nas outras o próprio created_at já prova que são recentes.
+    """
+    running = (
+        db.query(BackupVersion.id, BackupVersion.created_at)
+        .filter(BackupVersion.status == "running")
+        .all()
+    )
+    if not running:
+        return False
+    cutoff = datetime.now() - _STALE_RUNNING_VERSION
+    for version_id, created_at in running:
+        if created_at is None or created_at >= cutoff:
+            return True
+        last_file_at = (
+            db.query(func.max(VersionFile.created_at))
+            .filter(VersionFile.version_id == version_id)
+            .scalar()
+        )
+        if last_file_at is not None and last_file_at >= cutoff:
+            return True
+        log.debug(f"[ssd-cache] versão running {version_id} parada há 6h+ — ignorada no gate de ociosidade")
+    return False
+
+
 def _should_process_ssd_moves(db: Session) -> bool:
     """Decide se a movimentação SSD → HDD pode rodar agora.
 
@@ -297,15 +338,21 @@ def _should_process_ssd_moves(db: Session) -> bool:
     HDD, então não há motivo para esperar — move assim que possível. Se ainda
     sobra espaço, espera alguns minutos ociosos antes de mover, para não competir
     com o próximo backup de uma sequência.
+
+    A ociosidade é medida pela marca em memória de cache_state (último arquivo
+    recebido/registrado ou versão finalizada), não por max(finished_at): aquele
+    valor era global e só andava quando uma versão *terminava*, então em um
+    servidor com backups frequentes de labels diferentes ele nunca envelhecia o
+    bastante e o cache só era drenado ao bater no teto de ssd_cache.max_gb.
     """
-    if db.query(BackupVersion).filter(BackupVersion.status == "running").first():
+    if _has_active_backup(db):
         return False
     if storage.ssd_cache_write_dir(db) is None:
         return True
-    last_finished = db.query(func.max(BackupVersion.finished_at)).scalar()
-    if last_finished is None:
+    idle_seconds = seconds_since_backup_activity()
+    if idle_seconds is None:
         return True
-    return (datetime.now() - last_finished).total_seconds() >= storage.SSD_CACHE_IDLE_DELAY_MINUTES * 60
+    return idle_seconds >= storage.SSD_CACHE_IDLE_DELAY_MINUTES * 60
 
 
 def _cleanup_stale_running_states():
@@ -350,7 +397,7 @@ def _cleanup_stale_running_states():
 
     import shutil as _shutil
     from nightly_cleanup import _TMP_PREFIXES, _TMP_DIR_PREFIXES
-    for vol in storage.STORAGE_VOLUMES:
+    for vol in storage.tmp_sweep_dirs():
         # "_enc_*" (cifragem de upload/encrypt-existing/rclone) é criado dentro de
         # _content/<2-hex>/, não na raiz do volume — sem isso um crash durante a
         # cifragem deixava lixo permanente ali, nunca varrido no startup.
@@ -477,16 +524,27 @@ def _resume_ssd_pending_moves():
 
 
 async def _ssd_space_monitor():
+    """Único disparador recorrente da movimentação SSD → HDD enquanto o servidor
+    está de pé (com idle_delay > 0, o gatilho de finish_version nunca vale: o
+    finished_at acabou de ser gravado). Por isso o corpo é blindado: antes,
+    qualquer exceção transitória de banco — 'database is locked' no SQLite sob
+    carga, queda de conexão no Postgres — encerrava a task em definitivo e o
+    cache só voltava a ser drenado no próximo reinício do servidor. Pior: a
+    exceção ficava presa na task (referenciada pelo lifespan), então nem chegava
+    ao log."""
     while True:
         await asyncio.sleep(30)
-        if not storage.SSD_CACHE_ENABLED or not storage.SSD_CACHE_DIR:
-            continue
-        db = SessionLocal()
         try:
-            if db.query(SsdCachePendingMove).count() > 0 and _should_process_ssd_moves(db):
-                asyncio.get_running_loop().run_in_executor(None, _bg_process_ssd_pending_moves)
-        finally:
-            db.close()
+            if not storage.SSD_CACHE_ENABLED or not storage.SSD_CACHE_DIR:
+                continue
+            db = SessionLocal()
+            try:
+                if db.query(SsdCachePendingMove).count() > 0 and _should_process_ssd_moves(db):
+                    asyncio.get_running_loop().run_in_executor(None, _bg_process_ssd_pending_moves)
+            finally:
+                db.close()
+        except Exception:
+            log.exception("[ssd-cache] Erro no monitor de espaço — seguindo para o próximo ciclo")
 
 
 async def lifespan(_: FastAPI):
@@ -3057,6 +3115,7 @@ def finish_version(label: str, version_key: str, req: VersionFinish, background_
     v.finished_at = datetime.now()
     db.commit()
     invalidate_activity()
+    mark_backup_activity()
     log.info(f"[versao] {label}/{version_key} → {req.status}")
     if req.status == "done":
         background_tasks.add_task(_bg_auto_cleanup)
@@ -3320,6 +3379,7 @@ def register_batch(req: RegisterBatchRequest, background_tasks: BackgroundTasks,
             for it in pending.values()
         ])
     db.commit()
+    mark_backup_activity()
 
     ok_shas = sorted({i.sha256 for i in req.files if i.sha256 in existing})
     if ok_shas:
@@ -3385,11 +3445,22 @@ def _store_new_content(
         db.flush()
     except IntegrityError:
         # Upload concorrente do mesmo sha256 venceu — usar o registro já criado.
-        # NÃO apagar dest: é o MESMO path content-addressed do vencedor (apagar
-        # aqui deletava a única cópia do conteúdo e o download passava a dar 410).
-        # O arquivo em dest é válido — acabou de ser escrito/cifrado/verificado.
         db.rollback()
         fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+        # dest só é preservado quando é de fato o caminho que o vencedor
+        # registrou — aí apagar deletaria a única cópia do conteúdo e o download
+        # passaria a dar 410. Quando os dois uploads escolheram destinos
+        # diferentes (um caiu no SSD cache e o outro no HDD, ou pick_volume deu
+        # volumes distintos), o arquivo aqui fica sem nenhuma linha no banco:
+        # lixo permanente, porque nenhuma reconciliação varre o filesystem.
+        registered = (
+            db.query(FileContentCopy).filter(FileContentCopy.stored_at == str(dest)).first() is not None
+            or (fc is not None and fc.stored_at == str(dest))
+        )
+        if not registered:
+            dest.unlink(missing_ok=True)
+            log.info(f"[upload] {sha256[:8]}… upload concorrente venceu em outro destino "
+                     f"— cópia não registrada removida ({dest})")
         return fc, None
     # _ensure_replicas é chamado APÓS db.commit() em upload_file para não manter
     # o write lock do SQLite durante as cópias de arquivo para volumes réplica.
@@ -3585,6 +3656,7 @@ async def upload_file(
     if replica_source is not None:
         await asyncio.to_thread(_finish_replicas_sync, sha256, replica_source, db)
 
+    mark_backup_activity()
     return UploadResponse(
         status="registered",
         file_id=vf_id,

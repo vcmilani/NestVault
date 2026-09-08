@@ -518,8 +518,8 @@ def run_nightly_cleanup() -> None:
             mj.summary = "Limpando arquivos temporários órfãos..."
             db.commit()
             invalidate_activity()
-        from storage import STORAGE_VOLUMES
-        tmp_removed, tmp_bytes = _cleanup_stale_tmp_files(STORAGE_VOLUMES, max_age_hours=24.0)
+        from storage import tmp_sweep_dirs
+        tmp_removed, tmp_bytes = _cleanup_stale_tmp_files(tmp_sweep_dirs(), max_age_hours=24.0)
 
         # Validação de integridade das últimas versões done
         mj = db.get(MaintenanceJob, mj_id)

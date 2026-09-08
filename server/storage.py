@@ -576,15 +576,20 @@ def backfill_content_copies() -> None:
 
 
 async def volume_health_monitor() -> None:
+    # Corpo blindado pelo mesmo motivo do _ssd_space_monitor: uma exceção solta
+    # aqui encerrava a task e volume degradado nunca mais era reavaliado.
     while True:
         await asyncio.sleep(60)
-        with _deg_lock:
-            degraded_snapshot = list(_degraded_volumes)
-        for v in degraded_snapshot:
-            usage = safe_disk_usage(v)
-            if usage:
-                log.info(f"[volume] {v} recuperado — iniciando re-replicação")
-                asyncio.get_running_loop().run_in_executor(None, rereplicate_to_volume, v)
+        try:
+            with _deg_lock:
+                degraded_snapshot = list(_degraded_volumes)
+            for v in degraded_snapshot:
+                usage = safe_disk_usage(v)
+                if usage:
+                    log.info(f"[volume] {v} recuperado — iniciando re-replicação")
+                    asyncio.get_running_loop().run_in_executor(None, rereplicate_to_volume, v)
+        except Exception:
+            log.exception("[volume] Erro no monitor de saúde — seguindo para o próximo ciclo")
 
 
 # -- SSD cache helpers --------------------------------------------------------
@@ -620,6 +625,21 @@ def ssd_cache_write_dir(db) -> "Path | None":
         log.debug(f"[ssd-cache] limite de {SSD_CACHE_MAX_GB} GB atingido — fallback para HDD")
         return None
     return SSD_CACHE_DIR
+
+
+def tmp_sweep_dirs() -> list[Path]:
+    """Diretórios varridos em busca de temporários órfãos (_tmp_*, _enc_*, staging
+    do rclone): os volumes de storage MAIS o diretório do SSD cache.
+
+    O SSD cache não faz parte de STORAGE_VOLUMES, então as varreduras — startup e
+    limpeza noturna — nunca olhavam para ele: um crash durante o upload ou a
+    cifragem de um arquivo em staging deixava lixo permanente no SSD, invisível
+    para todas as reconciliações (que partem do banco) e consumindo espaço que o
+    orçamento do cache não enxerga."""
+    dirs = list(STORAGE_VOLUMES)
+    if SSD_CACHE_DIR and SSD_CACHE_DIR not in dirs:
+        dirs.append(SSD_CACHE_DIR)
+    return dirs
 
 
 def fmt_bytes(n: float) -> str:
@@ -677,12 +697,46 @@ def _mark_versions_failed_for_sha256(sha256: str, db) -> None:
         )
 
 
+def _create_pending_move_for_ssd_copy(db, ssd_copy) -> bool:
+    """Cria o SsdCachePendingMove de um arquivo que está apenas no SSD.
+    Devolve True se a pendência foi criada.
+
+    Compartilhado pela recuperação de startup e pela reconciliação: antes, só a
+    primeira sabia consertar esse estado, então um arquivo no SSD sem cópia no
+    HDD e sem pendência ficava parado até o próximo reinício do servidor."""
+    from database import FileContent, SsdCachePendingMove
+    sha256 = ssd_copy.sha256
+    fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+    if fc and fc.stored_at != ssd_copy.stored_at and Path(fc.stored_at).exists():
+        return False  # FileContent já aponta para um arquivo fora do SSD
+    try:
+        dest_volume = pick_volume()
+    except (RuntimeError, StorageThresholdExceeded):
+        log.error(f"[ssd-cache] {sha256[:8]}… nenhum volume HDD disponível para criar o move pendente")
+        return False
+    dest_path = content_path(sha256, dest_volume)
+    db.merge(SsdCachePendingMove(
+        sha256=sha256,
+        ssd_path=str(ssd_copy.stored_at),
+        dest_volume=str(dest_volume),
+        dest_path=str(dest_path),
+    ))
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        log.warning(f"[ssd-cache] {sha256[:8]}… erro ao criar move pendente: {e}")
+        return False
+    log.info(f"[ssd-cache] {sha256[:8]}… move pendente criado → {dest_path}")
+    return True
+
+
 def recover_stuck_ssd_files(db) -> int:
     """Cria SsdCachePendingMove para arquivos presos no SSD sem move pendente e sem cópia HDD.
     Chamado no startup para recuperar de uploads interrompidos."""
     if not SSD_CACHE_DIR:
         return 0
-    from database import FileContent, FileContentCopy, SsdCachePendingMove
+    from database import FileContentCopy, SsdCachePendingMove
     stuck = (
         db.query(FileContentCopy)
         .filter(FileContentCopy.volume_path == str(SSD_CACHE_DIR))
@@ -704,30 +758,9 @@ def recover_stuck_ssd_files(db) -> int:
         )
         if hdd_copy:
             continue
-        fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
-        if fc and fc.stored_at != ssd_copy.stored_at and Path(fc.stored_at).exists():
-            continue  # FileContent já aponta para HDD
         # Sem cópia HDD — criar move pendente
-        try:
-            dest_volume = pick_volume()
-        except (RuntimeError, StorageThresholdExceeded):
-            log.error(f"[ssd-cache] recover: {sha256[:8]}… nenhum volume HDD disponível")
-            continue
-        dest_path = content_path(sha256, dest_volume)
-        db.merge(SsdCachePendingMove(
-            sha256=sha256,
-            ssd_path=str(ssd_copy.stored_at),
-            dest_volume=str(dest_volume),
-            dest_path=str(dest_path),
-        ))
-        try:
-            db.commit()
-        except Exception as e:
-            db.rollback()
-            log.warning(f"[ssd-cache] recover: {sha256[:8]}… erro ao criar move pendente: {e}")
-            continue
-        log.info(f"[ssd-cache] recover: {sha256[:8]}… move pendente criado → {dest_path}")
-        created += 1
+        if _create_pending_move_for_ssd_copy(db, ssd_copy):
+            created += 1
     if created:
         log.info(f"[ssd-cache] recover: {created} arquivo(s) preso(s) no SSD recuperado(s)")
     return created
@@ -768,8 +801,17 @@ def reconcile_orphaned_ssd_copies(db) -> int:
             db.commit()
             log.error(f"[ssd-cache] reconciliação: {sha256[:8]}… FileContentCopy SSD órfã removida (arquivo não existe)")
             fixed += 1
+        elif _create_pending_move_for_ssd_copy(db, ssd_copy):
+            # Arquivo só existe no SSD e não havia ninguém para movê-lo. Antes
+            # isto era apenas um warning e o arquivo ficava no SSD até o próximo
+            # reinício — recover_stuck_ssd_files, que conserta o mesmo estado, só
+            # roda no startup.
+            log.warning(f"[ssd-cache] reconciliação: {sha256[:8]}… arquivo no SSD sem cópia HDD "
+                        f"e sem move pendente — pendência recriada")
+            fixed += 1
         else:
-            log.warning(f"[ssd-cache] reconciliação: {sha256[:8]}… arquivo no SSD sem cópia HDD e sem move pendente")
+            log.error(f"[ssd-cache] reconciliação: {sha256[:8]}… arquivo no SSD sem cópia HDD e sem move "
+                      f"pendente — não foi possível recriar a pendência")
     return fixed
 
 
@@ -787,6 +829,7 @@ def process_ssd_pending_moves(db) -> tuple[int, list[str]]:
         if move is None:
             continue  # processed by concurrent worker
         ssd_path = Path(move.ssd_path)
+        ssd_path_str = move.ssd_path   # capturado antes: `move` expira em rollback
         if not ssd_path.exists():
             log.warning(f"[ssd-cache] {move.sha256[:8]}… arquivo ausente no SSD — removendo registro")
             db.delete(move)
@@ -834,20 +877,75 @@ def process_ssd_pending_moves(db) -> tuple[int, list[str]]:
                 break
             except IntegrityError:
                 db.rollback()
-                dest_path.unlink(missing_ok=True)
-                # Distingue "worker concorrente venceu" (FileContent existe, SsdCachePendingMove
-                # já foi removido pelo vencedor) de "orphan cleanup deletou FileContent"
-                # (FileContent sumiu mas SsdCachePendingMove ainda existe → loop infinito).
+                # dest_path NÃO é removido aqui (era, antes): é o caminho
+                # content-addressed do sha256 e o conteúdo acabou de ser conferido
+                # por hash. Se o conflito veio de um worker concorrente que já
+                # registrou essa mesma cópia, apagar o arquivo destruiria a única
+                # cópia que o banco diz existir — mesmo motivo documentado em
+                # _store_new_content. Só é apagado quando o próprio FileContent
+                # sumiu (abaixo), aí não há registro para proteger.
                 fc_exists = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+                stale = db.query(SsdCachePendingMove).filter(SsdCachePendingMove.sha256 == sha256).first()
                 if fc_exists is None:
-                    stale = db.query(SsdCachePendingMove).filter(SsdCachePendingMove.sha256 == sha256).first()
+                    # Orphan cleanup deletou o FileContent no meio do move.
                     if stale:
                         db.delete(stale)
                         db.commit()
+                    dest_path.unlink(missing_ok=True)
                     ssd_path.unlink(missing_ok=True)
                     log.info(f"[ssd-cache] {sha256[:8]}… FileContent removido pelo orphan cleanup — move cancelado, arquivo SSD removido")
-                else:
+                    break
+                if stale is None:
+                    # Worker concorrente venceu e já removeu a pendência.
                     log.debug(f"[ssd-cache] {sha256[:8]}… já processado por worker concorrente — OK")
+                    break
+                # A pendência sobreviveu ao conflito. Se a cópia do destino já está
+                # registrada, uma tentativa anterior gravou tudo menos a remoção da
+                # linha de move (o commit do `finally` do worker persiste esse
+                # meio-estado quando ensure_replicas levanta exceção). Sem
+                # tratamento, toda tentativa seguinte batia na constraint e saía
+                # por aqui sem contar retry — o arquivo ficava preso no SSD para
+                # sempre e o monitor abria um job de move a cada 30s.
+                hdd_copy = (db.query(FileContentCopy)
+                            .filter(FileContentCopy.sha256 == sha256,
+                                    FileContentCopy.stored_at == str(dest_path))
+                            .first())
+                if hdd_copy is None:
+                    # Conflito em outra linha (réplica) — conta a tentativa para
+                    # não retentar indefinidamente.
+                    stale.retry_count += 1
+                    log.warning(f"[ssd-cache] {sha256[:8]}… conflito de integridade sem cópia registrada "
+                                f"no destino — retry {stale.retry_count}")
+                    if stale.retry_count >= 5:
+                        log.error(f"[ssd-cache] {sha256[:8]}… atingiu 5 retries (conflito de integridade) — abandonando move")
+                        try:
+                            _mark_versions_failed_for_sha256(sha256, db)
+                        except Exception as _ex:
+                            log.error(f"[ssd-cache] erro ao marcar versões como failed: {_ex}")
+                        db.delete(stale)
+                    db.commit()
+                    break
+                # Cópia do destino registrada e verificada: conclui a escrituração
+                # em vez de copiar de novo. ensure_replicas não é chamado aqui de
+                # propósito — foi justamente ele que provavelmente falhou na
+                # tentativa anterior, e uma exceção dentro deste except abortaria
+                # o lote inteiro; réplicas faltantes são responsabilidade do job
+                # reconcile-replication.
+                if fc_exists.stored_at == ssd_path_str:
+                    fc_exists.stored_at = str(dest_path)
+                ssd_copy = (db.query(FileContentCopy)
+                            .filter(FileContentCopy.sha256 == sha256,
+                                    FileContentCopy.stored_at == ssd_path_str)
+                            .first())
+                if ssd_copy:
+                    db.delete(ssd_copy)
+                db.delete(stale)
+                db.commit()
+                ssd_path.unlink(missing_ok=True)
+                completed += 1
+                moved_sha256s.append(sha256)
+                log.info(f"[ssd-cache] {sha256[:8]}… move concluído — cópia no destino já registrada "
+                         f"por tentativa anterior ({dest_path})")
                 break
             except OSError as e:
                 dest_path.unlink(missing_ok=True)

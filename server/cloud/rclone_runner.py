@@ -47,7 +47,7 @@ import shutil
 import config
 import crypto
 import storage
-from cache_state import invalidate_activity
+from cache_state import invalidate_activity, mark_backup_activity
 from database import (
     BackupID, BackupVersion, FileContent, FileContentCopy,
     RcloneBackupJob, SessionLocal, VersionFile,
@@ -380,6 +380,9 @@ def _process_file_sync(
     """Dedup, store, encrypt, replicate e registro no banco de um arquivo baixado.
     Bloqueante (I/O + criptografia) — roda via asyncio.to_thread com Session
     própria (ver _register_version_file_sync)."""
+    # Job rclone também é atividade de backup: mantém o gate de ociosidade do SSD
+    # cache ciente do tráfego de disco que ele gera (ver _should_process_ssd_moves).
+    mark_backup_activity()
     db = SessionLocal()
     try:
         fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
