@@ -36,8 +36,10 @@ import asyncio
 import json
 import logging
 import os
+import re
 import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -94,12 +96,81 @@ _ONEDRIVE_PROTECTED_FOLDERS = {"Personal Vault", "Cofre Pessoal"}
 _ICLOUD_PHOTOS_PROTECTED_FOLDERS = {"Recently Deleted"}
 _IGNORED_SYSTEM_FILES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 
+# Erros em que a sessão do backend precisa ser renovada (iCloud): repetir em 10s
+# não adianta — o backend só volta a responder depois de reautenticar. O 421
+# ("Invalid global session") aparece quando os cookies do rclone.conf foram
+# invalidados; o trust_token do iclouddrive expira a cada 30 dias e aí só
+# `rclone config reconnect` resolve.
+_SESSION_ERROR_MARKERS = (
+    "invalid global session",
+    "invalid session token",
+    "x-apple-webauth-token",
+    "421 misdirected request",
+)
+# Backoff (segundos) por tentativa quando o erro é de sessão, em vez dos 10s fixos.
+_SESSION_RETRY_BACKOFF = (30, 90)
+
+
+def _is_session_error(msg: str) -> bool:
+    """True se a mensagem do rclone indica sessão inválida/expirada no backend."""
+    low = msg.lower()
+    return any(marker in low for marker in _SESSION_ERROR_MARKERS)
+
+
+async def _sleep_before_retry(attempt: int, err_msg: str, what: str) -> None:
+    """Espera antes de retentar, com backoff maior em erro de sessão."""
+    if _is_session_error(err_msg):
+        delay = _SESSION_RETRY_BACKOFF[
+            min(attempt - 1, len(_SESSION_RETRY_BACKOFF) - 1)
+        ]
+        log.warning(
+            f"[rclone] sessão do backend inválida em {what} — aguardando {delay}s "
+            "para o rclone reautenticar"
+        )
+    else:
+        delay = 10
+    await asyncio.sleep(delay)
+
 
 @dataclass
 class RcloneFileEntry:
     path: str    # relativo à raiz do remote_path configurado no job
     size: int
     mtime: float  # unix timestamp
+
+
+# ---------------------------------------------------------------------------
+# Serialização por remote
+# ---------------------------------------------------------------------------
+
+# Um run por remote de cada vez. A exclusão é por remote_name (não por job) e
+# vive aqui, no runner, para cobrir os DOIS disparos: o agendado (scheduler
+# chama run_rclone_backup_job direto) e o manual (POST /rclone/jobs/{id}/run).
+#
+# Por que: backends que guardam sessão no rclone.conf — o iclouddrive regrava
+# cookies e trust_token nele — são invalidados quando dois processos rclone
+# reautenticam em paralelo e um sobrescreve os cookies do outro, o que aparece
+# como "HTTP error 421 (Invalid global session)". Dois jobs distintos apontando
+# para pastas diferentes do mesmo remote bastam para provocar isso.
+#
+# Um set em vez de asyncio.Lock: só precisamos de try-lock (quem chega depois é
+# descartado, não enfileirado), o asyncio é single-thread — não há await entre
+# o teste e a inserção — e o set não fica preso ao event loop em que foi criado.
+_busy_remotes: set[str] = set()
+
+
+def is_remote_busy(remote_name: str) -> bool:
+    """True se já há um job rodando neste remote (agendado ou manual)."""
+    return remote_name in _busy_remotes
+
+
+@contextmanager
+def _remote_slot(remote_name: str):
+    _busy_remotes.add(remote_name)
+    try:
+        yield
+    finally:
+        _busy_remotes.discard(remote_name)
 
 
 # ---------------------------------------------------------------------------
@@ -234,9 +305,9 @@ async def list_dir_one_level(
         if attempt < retries:
             log.warning(
                 f"[rclone] lsjson de {rel_dir or '/'} falhou "
-                f"(tentativa {attempt}/{retries}): {err_msg} — retentando em 10s"
+                f"(tentativa {attempt}/{retries}): {err_msg} — retentando"
             )
-            await asyncio.sleep(10)
+            await _sleep_before_retry(attempt, err_msg, f"lsjson de {rel_dir or '/'}")
         else:
             raise RuntimeError(f"rclone lsjson falhou ({rc}): {err_msg}")
 
@@ -294,9 +365,9 @@ async def list_files_recursive(
         if attempt < retries:
             log.warning(
                 f"[rclone] lsjson falhou (tentativa {attempt}/{retries}): {err_msg} "
-                f"— retentando em 10s"
+                f"— retentando"
             )
-            await asyncio.sleep(10)
+            await _sleep_before_retry(attempt, err_msg, "lsjson recursivo")
         else:
             raise RuntimeError(f"rclone lsjson falhou ({rc}): {err_msg}")
 
@@ -464,6 +535,7 @@ def _save_checkpoint_sync(
 
 async def _bulk_copy(
     remote_name: str, remote_path: str, files_from: Path, staging: Path,
+    *, ignore_size: bool = False,
 ) -> tuple[int, str]:
     """Baixa em lote via `rclone copy --files-from` a partir da raiz do job.
 
@@ -474,6 +546,9 @@ async def _bulk_copy(
     do job usa as entradas devolvidas pelo servidor — o mesmo mecanismo de
     list_files_recursive que funciona — então os caminhos relativos do
     --files-from casam corretamente.
+
+    ignore_size desliga a verificação de tamanho pós-transferência. Só é usado
+    no retry de _download_batch, para packages do iCloud — ver a nota lá.
     """
     src = f"{remote_name}:{remote_path}" if remote_path else f"{remote_name}:"
     proc = await asyncio.create_subprocess_exec(
@@ -486,6 +561,7 @@ async def _bulk_copy(
         "--retries", "3",
         "--timeout", "300s",
         "--contimeout", "60s",
+        *(["--ignore-size"] if ignore_size else []),
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
         env=_rclone_env(),
@@ -493,6 +569,40 @@ async def _bulk_copy(
     stderr_bytes = await proc.stderr.read()
     await proc.wait()
     return proc.returncode, stderr_bytes.decode(errors="replace").strip()
+
+
+# Linhas de erro por arquivo no stderr do rclone:
+#   2026/09/09 00:26:13 ERROR : <path>: <motivo>
+_RCLONE_ERROR_RE = re.compile(
+    r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} ERROR : (?P<path>.+?): (?P<reason>.+)$"
+)
+# Sufixo do arquivo temporário do rclone durante a transferência:
+#   Playgrounds/Gráfico.playgroundbook.f49f2d34.partial
+_RCLONE_PARTIAL_RE = re.compile(r"(?:\.[0-9a-f]{4,16})?\.partial$")
+_MAX_REASON_LEN = 200
+
+
+def _parse_rclone_errors(stderr: str) -> dict[str, str]:
+    """Mapeia path → motivo real a partir do stderr do rclone.
+
+    Sem isto o motivo (sizes differ, 421, permissão) fica só no journald e o
+    usuário vê apenas "não baixado pelo rclone" em last_run_message.
+    """
+    reasons: dict[str, str] = {}
+    for line in stderr.splitlines():
+        m = _RCLONE_ERROR_RE.match(line.strip())
+        if not m:
+            continue
+        path = m.group("path")
+        # "Attempt 2/3 failed with 4 errors and" é um agregado do run, não um arquivo.
+        if path.startswith("Attempt "):
+            continue
+        reason = m.group("reason").strip()
+        if len(reason) > _MAX_REASON_LEN:
+            reason = reason[:_MAX_REASON_LEN] + "…"
+        # A primeira ocorrência é a mais informativa: as seguintes são retries.
+        reasons.setdefault(_RCLONE_PARTIAL_RE.sub("", path), reason)
+    return reasons
 
 
 async def _download_batch(
@@ -519,15 +629,32 @@ async def _download_batch(
             "".join(e.path + "\n" for e in batch), encoding="utf-8"
         )
         rc, err = await _bulk_copy(remote_name, remote_path, ff_path, staging)
+        if rc != 0 and "sizes differ" in err:
+            # Packages do macOS no iCloud (.pages/.numbers/.playgroundbook/
+            # .xcodeproj): a API reporta o tamanho descompactado do bundle, mas
+            # o download entrega o zip — o rclone compara, acha que corrompeu e
+            # descarta o arquivo. Só neste caso relaxamos a verificação; nos
+            # demais backends ela protege contra download truncado.
+            log.warning(
+                "[rclone-runner] tamanho divergente no lote (package iCloud?) "
+                "— repetindo com --ignore-size"
+            )
+            rc, err = await _bulk_copy(
+                remote_name, remote_path, ff_path, staging, ignore_size=True
+            )
         if rc != 0:
             # Falha parcial é possível: o rclone pode ter copiado alguns
             # arquivos antes do erro. Seguimos e tratamos os ausentes abaixo.
             log.warning(f"[rclone-runner] rclone copy do lote retornou {rc}: {err}")
 
+        reasons = _parse_rclone_errors(err) if rc != 0 else {}
         for entry in batch:
             staged = staging / entry.path
             if not staged.is_file():
-                msg = f"{entry.path}: não baixado pelo rclone (verifique permissão/atalho)"
+                reason = reasons.get(entry.path) or (
+                    "não baixado pelo rclone (verifique permissão/atalho)"
+                )
+                msg = f"{entry.path}: {reason}"
                 errors.append(msg)
                 log.error(f"[rclone-runner] {msg}")
                 continue
@@ -669,36 +796,47 @@ async def run_rclone_backup_job(job_id: int) -> None:
             log.error(f"[rclone-runner] Job {job_id} não encontrado")
             return
 
-        log.info(
-            f"[rclone-runner] Iniciando job {job_id}: "
-            f"{job.remote_name}:{job.remote_path} → {job.target_label}"
-        )
-        job.last_run_at      = datetime.now().astimezone().replace(tzinfo=None)
-        job.last_run_status  = "running"
-        job.last_run_message = None
-        db.commit()
-        invalidate_activity()
+        # Descartado (não enfileirado) quando o remote já está ocupado: um run
+        # agendado que espera horas pelo manual dispararia fora da janela e,
+        # pior, em cima do run seguinte. O cron volta no próximo horário.
+        if is_remote_busy(job.remote_name):
+            log.warning(
+                f"[rclone-runner] Job {job_id} ignorado — já há um backup em "
+                f"andamento no remote {job.remote_name!r}"
+            )
+            return
 
-        # Garante que o BackupID (label) existe
-        if not db.query(BackupID).filter(BackupID.label == job.target_label).first():
-            db.add(BackupID(label=job.target_label, client_name="rclone"))
+        with _remote_slot(job.remote_name):
+            log.info(
+                f"[rclone-runner] Iniciando job {job_id}: "
+                f"{job.remote_name}:{job.remote_path} → {job.target_label}"
+            )
+            job.last_run_at      = datetime.now().astimezone().replace(tzinfo=None)
+            job.last_run_status  = "running"
+            job.last_run_message = None
             db.commit()
+            invalidate_activity()
 
-        cfg = await _remote_config(job.remote_name)
-        strategy = job.strategy or "auto"
-        use_walk = strategy == "walk" or (strategy == "auto" and _uses_walk(cfg))
-        if use_walk:
-            log.info(
-                f"[rclone-runner] Estratégia: walk incremental "
-                f"(strategy={strategy}, backend {cfg.get('type', '?')}/{cfg.get('service', '?')})"
-            )
-            await _run_walk_strategy(job, db)
-        else:
-            log.info(
-                f"[rclone-runner] Estratégia: listagem recursiva "
-                f"(strategy={strategy}, backend {cfg.get('type', '?')})"
-            )
-            await _run_fast_strategy(job, db)
+            # Garante que o BackupID (label) existe
+            if not db.query(BackupID).filter(BackupID.label == job.target_label).first():
+                db.add(BackupID(label=job.target_label, client_name="rclone"))
+                db.commit()
+
+            cfg = await _remote_config(job.remote_name)
+            strategy = job.strategy or "auto"
+            use_walk = strategy == "walk" or (strategy == "auto" and _uses_walk(cfg))
+            if use_walk:
+                log.info(
+                    f"[rclone-runner] Estratégia: walk incremental "
+                    f"(strategy={strategy}, backend {cfg.get('type', '?')}/{cfg.get('service', '?')})"
+                )
+                await _run_walk_strategy(job, db)
+            else:
+                log.info(
+                    f"[rclone-runner] Estratégia: listagem recursiva "
+                    f"(strategy={strategy}, backend {cfg.get('type', '?')})"
+                )
+                await _run_fast_strategy(job, db)
 
     except Exception as e:
         log.exception(f"[rclone-runner] Job {job_id} falhou: {e}")

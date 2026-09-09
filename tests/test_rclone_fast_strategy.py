@@ -31,7 +31,8 @@ def _install_fast_mocks(monkeypatch, files, fail_prefixes=frozenset()):
     async def fake_list_files_recursive(remote_name, remote_path, **kw):
         return files
 
-    async def fake_bulk_copy(remote_name, remote_path, files_from, staging):
+    async def fake_bulk_copy(remote_name, remote_path, files_from, staging,
+                             *, ignore_size=False):
         paths = [p for p in files_from.read_text().splitlines() if p]
         for p in paths:
             if any(p.startswith(pref) for pref in fail_prefixes):

@@ -23,8 +23,6 @@ router = APIRouter()
 _REMOTE_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _VALID_STRATEGIES = {"auto", "walk", "fast"}
 
-_job_locks: dict[int, asyncio.Lock] = {}
-
 
 def _validate_strategy(v: Optional[str]) -> Optional[str]:
     if v is not None and v not in _VALID_STRATEGIES:
@@ -260,10 +258,6 @@ def delete_job(job_id: int, db: Session = Depends(get_db)):
     sched.remove_rclone_job(job.id)
     db.delete(job)
     db.commit()
-    # Evita acúmulo de locks órfãos (um por job_id que já rodou).
-    lock = _job_locks.get(job_id)
-    if lock is None or not lock.locked():
-        _job_locks.pop(job_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -272,18 +266,17 @@ def delete_job(job_id: int, db: Session = Depends(get_db)):
 
 @router.post("/jobs/{job_id}/run", status_code=202, dependencies=[Depends(require_admin)])
 async def run_job_now(job_id: int, db: Session = Depends(get_db)):
-    _require_job(job_id, db)
-    lock = _job_locks.setdefault(job_id, asyncio.Lock())
-    if lock.locked():
+    job = _require_job(job_id, db)
+
+    from cloud.rclone_runner import is_remote_busy, run_rclone_backup_job
+
+    # O lock de verdade é do runner, por remote_name — cobre também o disparo
+    # agendado, que não passa por aqui. Esta checagem só antecipa o 409 para a
+    # UI; sem ela o run seria silenciosamente descartado lá dentro.
+    if is_remote_busy(job.remote_name):
         raise HTTPException(409, "Job já está em execução")
 
-    from cloud.rclone_runner import run_rclone_backup_job
-
-    async def _run():
-        async with lock:
-            await run_rclone_backup_job(job_id)
-
-    asyncio.create_task(_run())
+    asyncio.create_task(run_rclone_backup_job(job_id))
     return {"status": "started", "job_id": job_id}
 
 

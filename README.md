@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v9.0.1`
+# 🗄️ NestVault  `v9.0.2`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **backup por usuário** — cada conta só cria, lista e restaura seus próprios backups.
 
@@ -1201,6 +1201,46 @@ Teste:
 rclone lsd onedrive:            # lista pastas na raiz
 rclone ls onedrive:Documentos   # lista arquivos em uma pasta
 ```
+
+### Configurar iCloud no rclone
+
+```bash
+rclone config
+```
+
+```
+n) New remote
+name> icloud                    # nome que você escolhe
+
+Storage> iclouddrive            # ou "iCloud Drive"
+
+apple_id> voce@icloud.com
+password>                       # senha da conta Apple (não é senha de app)
+
+service> drive                  # "drive" para arquivos; "photos" para a fototeca
+
+# 2FA: o rclone pede o código de 6 dígitos exibido no seu dispositivo confiável
+```
+
+Teste:
+
+```bash
+rclone lsd icloud:              # lista pastas na raiz
+```
+
+Três particularidades do backend iCloud que afetam a operação do NestVault:
+
+**O `trust_token` expira em 30 dias.** Passado esse prazo, todos os jobs desse remote passam a falhar com erros de autenticação (`HTTP error 421`, `Invalid session token`). A renovação é manual e exige o código 2FA:
+
+```bash
+rclone config reconnect icloud:
+```
+
+**O `rclone.conf` precisa ser gravável pelo usuário que roda o servidor.** Diferente do Google Drive e do OneDrive, o backend iCloud regrava cookies e `trust_token` no arquivo a cada renovação de sessão. Se o arquivo for somente-leitura para o usuário do systemd, a sessão é perdida a cada run e o job falha de forma intermitente com `421 (Invalid global session)`.
+
+**Um job por remote de cada vez.** O NestVault serializa os runs por `remote_name` — dois processos rclone reautenticando em paralelo sobrescrevem os cookies um do outro e invalidam a sessão. Um run (agendado ou manual) disparado enquanto outro está ativo no mesmo remote é descartado com aviso no log; o cron volta no horário seguinte.
+
+> **Packages do macOS** (`.pages`, `.numbers`, `.key`, `.playgroundbook`, `.xcodeproj`) são pastas que o iCloud entrega como **zip**, mas cujo tamanho é reportado descompactado. O rclone acusa `corrupted on transfer: sizes differ` e descarta o arquivo; o NestVault detecta esse caso específico e refaz o lote com `--ignore-size`. O arquivo é armazenado como o zip que a Apple entrega — é a única forma disponível pela API.
 
 ### Configurar Dropbox, S3, Backblaze B2 e outros
 
