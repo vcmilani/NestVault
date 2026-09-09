@@ -42,8 +42,22 @@ if DATABASE_URL:
             "  Instale com:  pip install -r requirements-postgres.txt\n"
             "  Raspberry Pi: sudo apt install -y python3-psycopg2"
         )
-    # PostgreSQL: pool com health-check automático; sem pragmas SQLite
-    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    # PostgreSQL: pool com health-check automático; sem pragmas SQLite.
+    # O pool é dimensionado explicitamente: o default do SQLAlchemy (pool_size=5,
+    # max_overflow=10) é um teto de 15 conexões, menor que o nº de requests que o
+    # FastAPI processa em paralelo (endpoints síncronos rodam no threadpool do
+    # anyio, 40 threads) somado às BackgroundTasks e aos jobs do scheduler — cada
+    # um com sua própria Session. Passado o teto, o request 16 espera pool_timeout
+    # e morre com "QueuePool limit of size 5 overflow 10 reached", que é como um
+    # backup paralelo derrubava /register/batch com 500.
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,
+        pool_size=config.get("database.pool_size"),
+        max_overflow=config.get("database.max_overflow"),
+        pool_timeout=config.get("database.pool_timeout_seconds"),
+        pool_recycle=1800,   # descarta conexões ociosas antes que o servidor as corte
+    )
 else:
     # SQLite: NullPool + WAL para melhor concorrência sem servidor externo
     engine = create_engine(

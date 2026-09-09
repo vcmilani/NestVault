@@ -141,6 +141,23 @@ SCHEMA: list[Field] = [
           "Caminho do SQLite",
           "Arquivo do banco quando DATABASE_URL está vazio.",
           requires_restart=True),
+    Field("database.pool_size", "DB_POOL_SIZE", "int", 10,
+          "Conexões permanentes do pool",
+          "Só PostgreSQL. Conexões mantidas abertas. O default do SQLAlchemy (5) fica "
+          "abaixo do nº de requests simultâneos que o servidor aceita e causa "
+          "'QueuePool limit ... timed out' sob backup paralelo.",
+          requires_restart=True, min=1),
+    Field("database.max_overflow", "DB_MAX_OVERFLOW", "int", 20,
+          "Conexões extras do pool",
+          "Só PostgreSQL. Conexões abertas sob pico, acima do pool permanente. "
+          "O teto real é pool_size + max_overflow — mantenha-o abaixo do "
+          "max_connections do PostgreSQL.",
+          requires_restart=True, min=0),
+    Field("database.pool_timeout_seconds", "DB_POOL_TIMEOUT", "float", 30.0,
+          "Timeout de espera por conexão (s)",
+          "Só PostgreSQL. Tempo que um request espera por uma conexão livre antes de "
+          "falhar com 500.",
+          requires_restart=True, min=1),
 
     # -- db_backup --
     Field("db_backup.enabled", "DB_BACKUP_ENABLED", "bool", True,

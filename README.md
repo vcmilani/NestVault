@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v9.0.0`
+# 🗄️ NestVault  `v9.0.1`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **backup por usuário** — cada conta só cria, lista e restaura seus próprios backups.
 
@@ -2314,6 +2314,20 @@ sudo systemctl restart nestvault
 ```
 
 O NestVault cria as tabelas automaticamente na primeira inicialização.
+
+### Dimensionando o pool de conexões
+
+Três campos em Configurações → Banco de dados controlam o pool do SQLAlchemy (ignorados no SQLite, que usa `NullPool`):
+
+| Campo | Padrão | O que é |
+|---|---|---|
+| `database.pool_size` | `10` | Conexões mantidas abertas permanentemente. |
+| `database.max_overflow` | `20` | Conexões extras abertas sob pico, acima do pool permanente. |
+| `database.pool_timeout_seconds` | `30` | Espera de um request por uma conexão livre antes de falhar com `500`. |
+
+O teto real de conexões é `pool_size + max_overflow` (padrão: 30) **por processo uvicorn** — mantenha-o abaixo do `max_connections` do PostgreSQL (padrão: 100). Os três exigem reinício.
+
+Se o log mostrar `QueuePool limit of size N overflow M reached, connection timed out`, o servidor está aceitando mais requests simultâneos do que o pool comporta: aumente `max_overflow` — ou reduza o paralelismo do cliente (`nestvault backup --workers`).
 
 ### Migrando dados do SQLite para PostgreSQL
 

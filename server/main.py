@@ -1,5 +1,5 @@
 """
-NestVault  v9.0.0
+NestVault  v9.0.1
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -594,7 +594,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="9.0.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="9.0.1", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
@@ -3300,16 +3300,44 @@ def check_batch(req: CheckBatchRequest, db: Session = Depends(get_db), user: Use
 
 
 # -- Register batch -----------------------------------------------------------
+_REPLICA_BATCH_CHUNK = 100
+
+
 def _bg_ensure_replicas_batch(sha256s: list[str]) -> None:
     """Garante réplicas dos conteúdos registrados em lote. Roda após a resposta
-    (BackgroundTasks) — espelha o upload, que cria réplicas fora do write-lock."""
+    (BackgroundTasks) — espelha o upload, que cria réplicas fora do write-lock.
+
+    Processa em blocos com um commit por bloco. A forma anterior fazia uma query
+    por sha256 (N+1 sobre um lote de até 500) e segurava a MESMA conexão do pool
+    do começo ao fim, incluindo as cópias de arquivo entre volumes — e cada
+    /register/batch agenda uma destas tasks no threadpool. Meia dúzia de tasks
+    concorrentes durante um backup paralelo prendia o pool inteiro, e os requests
+    seguintes morriam em "QueuePool limit ... timed out" já no get_current_user.
+    O commit por bloco devolve a conexão ao pool entre os blocos; a query única
+    de cópias por bloco também deixa passar direto os sha256 que já atingiram o
+    fator de replicação, sem nenhum I/O — que é o caso comum."""
+    target = _target_replicas()
     db = SessionLocal()
     try:
-        for sha in sha256s:
-            first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha).first()
-            if first_copy:
-                _ensure_replicas(sha, Path(first_copy.stored_at), db)
-        db.commit()
+        for i in range(0, len(sha256s), _REPLICA_BATCH_CHUNK):
+            chunk = sha256s[i:i + _REPLICA_BATCH_CHUNK]
+            # Uma query por bloco em vez de uma por sha256: fonte da cópia + quantas
+            # cópias já existem, para pular o que já está replicado.
+            sources: dict[str, str] = {}
+            counts: dict[str, int] = {}
+            for row in (db.query(FileContentCopy.sha256, FileContentCopy.stored_at)
+                          .filter(FileContentCopy.sha256.in_(chunk))
+                          .all()):
+                counts[row.sha256] = counts.get(row.sha256, 0) + 1
+                sources.setdefault(row.sha256, row.stored_at)
+            for sha in chunk:
+                stored_at = sources.get(sha)
+                # counts >= target é exatamente a condição em que ensure_replicas não
+                # teria nenhum volume alvo para preencher e voltaria sem fazer nada.
+                if stored_at is None or counts.get(sha, 0) >= target:
+                    continue
+                _ensure_replicas(sha, Path(stored_at), db)
+            db.commit()
     except Exception as e:
         log.warning(f"[register/batch] réplicas em background falharam: {e}")
     finally:

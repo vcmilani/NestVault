@@ -83,8 +83,20 @@ def _estimate_db_size() -> int:
 
 
 def run_db_backup() -> dict:
-    """Exporta o banco de dados para todos os volumes saudáveis e aplica rotação de backups."""
+    """Exporta o banco de dados para todos os volumes saudáveis e aplica rotação de backups.
+
+    A Session vive num try/finally: antes, o close() estava só nos dois caminhos de
+    saída normais, então qualquer exceção no meio (_rotate, healthy_volumes, falha de
+    commit) vazava a conexão para sempre — e este job roda diariamente, então cada
+    falha encolhia permanentemente o pool do PostgreSQL."""
     db = SessionLocal()
+    try:
+        return _run_db_backup(db)
+    finally:
+        db.close()
+
+
+def _run_db_backup(db) -> dict:
     mj = MaintenanceJob(
         job_type="db-backup",
         status="running",
@@ -114,7 +126,6 @@ def run_db_backup() -> dict:
             mj.summary = summary
             db.commit()
         invalidate_activity()
-        db.close()
         return {"db_type": db_type, "files": [], "removed": 0, "error": summary}
 
     db_size = _estimate_db_size()
@@ -195,6 +206,5 @@ def run_db_backup() -> dict:
         mj.summary     = summary
         db.commit()
     invalidate_activity()
-    db.close()
 
     return {"db_type": db_type, "files": saved, "removed": total_removed}
