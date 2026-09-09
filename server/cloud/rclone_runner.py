@@ -117,6 +117,45 @@ def _is_session_error(msg: str) -> bool:
     return any(marker in low for marker in _SESSION_ERROR_MARKERS)
 
 
+def _lsjson_failure(rc: int, err_msg: str, remote_name: str) -> str:
+    """Mensagem de falha do lsjson, com a ação concreta quando é erro de sessão.
+
+    O 421 sobrevive a qualquer retry: o trust_token do iclouddrive expira a cada
+    30 dias e só reautenticação resolve. Sem a dica, last_run_message mostra só o
+    JSON cru da Apple e não dá para saber o que fazer.
+    """
+    msg = f"rclone lsjson falhou ({rc}): {err_msg}"
+    if _is_session_error(err_msg):
+        msg += (
+            f" — sessão do remote expirada; rode "
+            f"`rclone config reconnect {remote_name}:` no servidor"
+        )
+    return msg
+
+
+def _short_reason(err_msg: str) -> str:
+    """Última linha útil do stderr do rclone, truncada para last_run_message."""
+    lines = [ln.strip() for ln in err_msg.splitlines() if ln.strip()]
+    reason = lines[-1] if lines else err_msg.strip()
+    if len(reason) > _MAX_REASON_LEN:
+        reason = reason[:_MAX_REASON_LEN] + "…"
+    return reason
+
+
+def _parse_lsjson(stdout: bytes) -> list[dict]:
+    """Entradas do stdout do lsjson, ou [] se a saída não for JSON utilizável.
+
+    O rclone fecha o array mesmo quando aborta com erro em alguns diretórios,
+    então a saída de um run que falhou parcialmente ainda é JSON válido com tudo
+    que ele conseguiu listar.
+    """
+    try:
+        items = json.loads(stdout or b"[]")
+    except (ValueError, TypeError):
+        return []
+    return items if isinstance(items, list) else []
+
+
 async def _sleep_before_retry(attempt: int, err_msg: str, what: str) -> None:
     """Espera antes de retentar, com backoff maior em erro de sessão."""
     if _is_session_error(err_msg):
@@ -309,7 +348,7 @@ async def list_dir_one_level(
             )
             await _sleep_before_retry(attempt, err_msg, f"lsjson de {rel_dir or '/'}")
         else:
-            raise RuntimeError(f"rclone lsjson falhou ({rc}): {err_msg}")
+            raise RuntimeError(_lsjson_failure(rc, err_msg, remote_name))
 
     files: list[RcloneFileEntry] = []
     subdirs: list[str] = []
@@ -335,15 +374,26 @@ async def list_dir_one_level(
 
 
 async def list_files_recursive(
-    remote_name: str, remote_path: str, *, retries: int = 3
+    remote_name: str, remote_path: str, *, retries: int = 3,
+    errors: list[str] | None = None,
 ) -> list[RcloneFileEntry]:
     """Lista todos os arquivos recursivamente (caminho rápido — uma chamada).
 
     Eficiente em backends que suportam listagem recursiva (OneDrive, GDrive,
     iCloud Drive): o rclone varre tudo num só processo, com concorrência interna
     e reuso de conexão. NÃO usar para iCloud Photos (usa o walk incremental).
+
+    Falha parcial não perde a listagem: quando o rclone aborta em alguns
+    diretórios (ex: 421 do iCloud no meio da varredura) ele ainda entrega no
+    stdout tudo que listou, e é isso que o backup usa — antes o job inteiro
+    morria por causa de um punhado de pastas. O motivo vai para `errors`, o que
+    faz a versão terminar como "incomplete" em vez de "done": ela não pode virar
+    baseline de skip-por-mtime nem de retenção com arquivos faltando.
     """
     src = f"{remote_name}:{remote_path}" if remote_path else f"{remote_name}:"
+    rc = 0
+    best: list[dict] = []
+    best_err = ""
     for attempt in range(1, retries + 1):
         exclude_flags: list[str] = []
         for folder in _ONEDRIVE_PROTECTED_FOLDERS:
@@ -359,21 +409,37 @@ async def list_files_recursive(
             "--exclude", "desktop.ini",
             src,
         )
+        items = _parse_lsjson(stdout)
         if rc == 0:
+            best, best_err = items, ""
             break
         err_msg = stderr.decode().strip()
+        # Guarda a tentativa mais completa: com a sessão morrendo, a retry pode
+        # voltar com menos entradas (ou nenhuma) do que a primeira.
+        if items and len(items) > len(best):
+            best = items
+        best_err = best_err or err_msg
         if attempt < retries:
             log.warning(
                 f"[rclone] lsjson falhou (tentativa {attempt}/{retries}): {err_msg} "
                 f"— retentando"
             )
             await _sleep_before_retry(attempt, err_msg, "lsjson recursivo")
-        else:
-            raise RuntimeError(f"rclone lsjson falhou ({rc}): {err_msg}")
+        elif not best:
+            raise RuntimeError(_lsjson_failure(rc, err_msg, remote_name))
+
+    if best_err:
+        reason = _short_reason(best_err)
+        log.warning(
+            f"[rclone] listagem de {src} incompleta ({len(best)} entrada(s) "
+            f"aproveitada(s)): {reason}"
+        )
+        if errors is not None:
+            errors.append(f"listagem incompleta: {reason}")
 
     result = []
     filtered_protected: set[str] = set()
-    for item in json.loads(stdout or b"[]"):
+    for item in best:
         if item.get("IsDir"):
             continue
         if Path(item["Path"]).name in _IGNORED_SYSTEM_FILES:
@@ -1287,9 +1353,14 @@ async def _run_fast_strategy(job: RcloneBackupJob, db) -> None:
         db.commit()
         db.refresh(version)
 
-        # Lista arquivos no remote
+        # Lista arquivos no remote. `errors` já entra aqui para receber uma
+        # listagem parcial: com pastas faltando a versão precisa terminar
+        # "incomplete", nunca "done".
+        errors: list[str] = []
         log.info(f"[rclone-runner] Listando {job.remote_name}:{job.remote_path}")
-        all_files = await list_files_recursive(job.remote_name, job.remote_path)
+        all_files = await list_files_recursive(
+            job.remote_name, job.remote_path, errors=errors
+        )
         total = len(all_files)
         total_size = sum(e.size for e in all_files)
         log.info(f"[rclone-runner] {total} arquivo(s) encontrado(s) ({_fmt_size(total_size)} total)")
@@ -1339,7 +1410,6 @@ async def _run_fast_strategy(job: RcloneBackupJob, db) -> None:
                     "incompleta adicionados para resume"
                 )
 
-        errors: list[str] = []
         abort = asyncio.Event()
         queue: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_SIZE)
 

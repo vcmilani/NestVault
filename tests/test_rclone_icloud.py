@@ -8,7 +8,9 @@
   falha virava "não baixado pelo rclone (verifique permissão/atalho)");
 - serialização por remote, que evita dois processos rclone reautenticando em
   paralelo e invalidando os cookies um do outro ("Invalid global session");
-- backoff maior no retry quando o erro é de sessão.
+- backoff maior no retry quando o erro é de sessão;
+- listagem recursiva parcial: um 421 no meio da varredura não pode
+  descartar tudo que o rclone já tinha listado.
 
 Mesmo padrão dos demais testes de rclone: mocka _bulk_copy/list_files_recursive
 e deixa o resto do pipeline rodar de verdade.
@@ -322,3 +324,90 @@ async def test_session_error_uses_longer_backoff(monkeypatch):
     await rr._sleep_before_retry(1, "directory not found", "lsjson")
 
     assert slept == [*rr._SESSION_RETRY_BACKOFF, 10]
+
+
+# ---------------------------------------------------------------------------
+# Listagem parcial (421 no meio da varredura recursiva)
+# ---------------------------------------------------------------------------
+
+_LSJSON_OK = (
+    b'[\n'
+    b'{"Path":"a/f1.txt","Name":"f1.txt","Size":3,"ModTime":"2026-09-09T08:00:00Z","IsDir":false},\n'
+    b'{"Path":"z/f2.txt","Name":"f2.txt","Size":4,"ModTime":"2026-09-09T08:00:00Z","IsDir":false}\n'
+    b']\n'
+)
+# Stderr real do job 8: o rclone aborta em 2 diretórios mas fecha o array JSON
+# com tudo que já tinha listado.
+_LSJSON_421 = (
+    b'2026/09/09 08:14:13 ERROR : Documents/x: error listing: HTTP error 421 '
+    b'(421 Misdirected Request) returned body: "{\\"reason\\":\\"Invalid global session\\"}"\n'
+    b'2026/09/09 08:14:21 NOTICE: Failed to lsjson with 2 errors: last error was: '
+    b'error in ListJSON: HTTP error 421 (421 Misdirected Request)'
+)
+
+
+def _fake_lsjson(monkeypatch, runs):
+    """Mocka _run_lsjson devolvendo `runs` em sequência (repete o último)."""
+    calls = []
+
+    async def fake(*args, **kw):
+        calls.append(args)
+        return runs[min(len(calls) - 1, len(runs) - 1)]
+
+    monkeypatch.setattr(rr, "_run_lsjson", fake)
+
+    async def no_sleep(*a, **kw):
+        pass
+
+    monkeypatch.setattr(rr, "_sleep_before_retry", no_sleep)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_partial_listing_is_used_and_reported(monkeypatch):
+    """Erro em algumas pastas não pode matar o job inteiro: aproveita o que o
+    rclone listou e registra o motivo, para a versão fechar 'incomplete'."""
+    calls = _fake_lsjson(monkeypatch, [(_LSJSON_OK, _LSJSON_421, 1)])
+    errors: list[str] = []
+
+    files = await rr.list_files_recursive("victor_icloud", "", errors=errors)
+
+    assert [f.path for f in files] == ["a/f1.txt", "z/f2.txt"]
+    assert len(calls) == 3          # só aceita o parcial depois de esgotar os retries
+    assert len(errors) == 1 and errors[0].startswith("listagem incompleta:")
+    assert "421" in errors[0]
+
+
+@pytest.mark.asyncio
+async def test_partial_listing_keeps_most_complete_attempt(monkeypatch):
+    """Com a sessão morrendo, a retry pode voltar vazia — vale a melhor tentativa."""
+    _fake_lsjson(monkeypatch, [
+        (_LSJSON_OK, _LSJSON_421, 1),
+        (b"[]", _LSJSON_421, 1),
+    ])
+    files = await rr.list_files_recursive("victor_icloud", "")
+    assert len(files) == 2
+
+
+@pytest.mark.asyncio
+async def test_listing_without_any_output_raises_with_reconnect_hint(monkeypatch):
+    """Sem nada listado não há backup possível — a mensagem tem de dizer o que fazer."""
+    _fake_lsjson(monkeypatch, [(b"", _LSJSON_421, 1)])
+
+    with pytest.raises(RuntimeError) as exc:
+        await rr.list_files_recursive("victor_icloud", "")
+
+    assert "rclone config reconnect victor_icloud:" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_truncated_stdout_does_not_break_parsing(monkeypatch):
+    """JSON cortado no meio não pode virar JSONDecodeError solto."""
+    _fake_lsjson(monkeypatch, [(b'[{"Path":"a"', _LSJSON_421, 1)])
+
+    with pytest.raises(RuntimeError, match="rclone lsjson falhou"):
+        await rr.list_files_recursive("victor_icloud", "")
+
+
+def test_lsjson_failure_hint_only_for_session_errors():
+    assert "reconnect" not in rr._lsjson_failure(1, "directory not found", "onedrive")
