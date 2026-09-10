@@ -12,7 +12,7 @@ import pytest
 
 import cloud.rclone_runner as rr
 from cloud.rclone_runner import RcloneFileEntry
-from database import BackupVersion
+from database import BackupVersion, RcloneBackupJob, VersionFile
 
 from test_rclone_walk import session_factory, _make_job  # noqa: F401 — reaproveita os fixtures
 
@@ -21,10 +21,14 @@ def _fe(path, mtime=1.0, size=10):
     return RcloneFileEntry(path=path, size=size, mtime=mtime)
 
 
-def _install_fast_mocks(monkeypatch, files, fail_prefixes=frozenset()):
+def _install_fast_mocks(monkeypatch, files, fail_prefixes=frozenset(),
+                        fail_reason=None):
     """files: lista de RcloneFileEntry retornada por list_files_recursive.
-    fail_prefixes: paths com esse prefixo "não são baixados pelo rclone" (staged
-    ausente) — mesmo mecanismo de falha usado nos testes do walk."""
+    fail_prefixes: paths com esse prefixo não chegam ao staging — mesmo
+    mecanismo de falha usado nos testes do walk.
+    fail_reason=None simula o caso "sumiu do staging sem linha ERROR" (rc=0),
+    que é como o rclone pula atalho órfão/arquivo sem permissão; com
+    fail_reason, devolve rc=1 + linha ERROR (falha de verdade, re-tentável)."""
     async def fake_cfg(remote_name):
         return {"type": "onedrive"}  # backend "rápido" — não decide walk
 
@@ -34,12 +38,19 @@ def _install_fast_mocks(monkeypatch, files, fail_prefixes=frozenset()):
     async def fake_bulk_copy(remote_name, remote_path, files_from, staging,
                              *, ignore_size=False):
         paths = [p for p in files_from.read_text().splitlines() if p]
+        failed = []
         for p in paths:
             if any(p.startswith(pref) for pref in fail_prefixes):
-                continue  # simula "não baixado pelo rclone" — arquivo falha
+                failed.append(p)
+                continue  # arquivo não chega ao staging — falha
             dest = staging / p
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(b"x" * 10)
+        if failed and fail_reason:
+            err = "\n".join(
+                f"2026/09/09 00:26:13 ERROR : {p}: {fail_reason}" for p in failed
+            )
+            return 1, err
         return 0, ""
 
     monkeypatch.setattr(rr, "_remote_config", fake_cfg)
@@ -70,6 +81,7 @@ async def test_fast_strategy_partial_failure_marks_incomplete_not_done(session_f
         monkeypatch,
         files=[_fe("ok/a.txt"), _fe("bad/b.txt"), _fe("bad/c.txt")],
         fail_prefixes={"bad/"},
+        fail_reason="Failed to copy: 421 Misdirected Request",
     )
 
     await rr.run_rclone_backup_job(jid)
@@ -88,6 +100,7 @@ async def test_fast_strategy_total_failure_marks_failed(session_factory, monkeyp
         monkeypatch,
         files=[_fe("bad/a.txt"), _fe("bad/b.txt")],
         fail_prefixes={"bad/"},
+        fail_reason="Failed to copy: 421 Misdirected Request",
     )
 
     await rr.run_rclone_backup_job(jid)
@@ -113,3 +126,36 @@ async def test_fast_strategy_full_success_marks_done(session_factory, monkeypatc
     version = _get_version(Session, "fotos")
     assert version is not None
     assert version.status == "done"
+
+
+@pytest.mark.asyncio
+async def test_fast_strategy_permission_failure_marks_done(session_factory, monkeypatch):
+    """Arquivos sem permissão/atalho órfão (pulados pelo rclone, sem linha ERROR)
+    não impedem 'done': nenhum retry os traria, e prender a versão em
+    'incomplete' só faria o run seguinte repetir a mesma falha para sempre."""
+    Session = session_factory
+    jid = _make_job(Session, remote_path="")
+    _install_fast_mocks(
+        monkeypatch,
+        files=[_fe("ok/a.txt"), _fe("bad/b.txt"), _fe("bad/c.txt")],
+        fail_prefixes={"bad/"},   # sem fail_reason — falha permanente
+    )
+
+    await rr.run_rclone_backup_job(jid)
+
+    version = _get_version(Session, "fotos")
+    assert version is not None
+    assert version.status == "done"
+
+    db = Session()
+    try:
+        paths = {
+            vf.original_path
+            for vf in db.query(VersionFile).filter_by(version_id=version.id)
+        }
+        assert paths == {"ok/a.txt"}   # os inacessíveis ficam de fora da versão
+        job = db.get(RcloneBackupJob, jid)
+        assert job.last_run_status == "success"
+        assert "ignorado(s) sem permissão/atalho" in job.last_run_message
+    finally:
+        db.close()

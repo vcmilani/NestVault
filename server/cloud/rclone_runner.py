@@ -647,6 +647,46 @@ _RCLONE_ERROR_RE = re.compile(
 _RCLONE_PARTIAL_RE = re.compile(r"(?:\.[0-9a-f]{4,16})?\.partial$")
 _MAX_REASON_LEN = 200
 
+# Falhas que nenhum retry resolve: arquivo sem permissão, atalho quebrado/órfão,
+# item que o backend se recusa a exportar. Tratá-las como erro comum prendia a
+# versão em "incomplete" para sempre — o próximo run re-tentava os mesmos
+# arquivos, falhava igual, e nunca fechava um baseline "done". Elas saem da
+# versão e são reportadas à parte (ver `unavailable` em _download_batch).
+#
+# A mensagem genérica entra aqui de propósito: o --drive-skip-dangling-shortcuts
+# e os arquivos sem permissão do Drive são pulados SEM linha ERROR no stderr, e é
+# exatamente esse caso que sobra sem staged e sem motivo.
+_PERMANENT_ERROR_MARKERS = (
+    "não baixado pelo rclone",
+    "permission denied",
+    "insufficientfilepermissions",
+    "cannotdownloadabusivefile",
+    "cannotdownloadfile",
+    "filenotdownloadable",
+    "notdownloadable",
+    "error 403",
+    "error 404",
+    "forbidden",
+    "access denied",
+    "object not found",
+    "no such file or directory",
+)
+
+
+def _is_permanent_error(reason: str) -> bool:
+    low = reason.lower()
+    return any(marker in low for marker in _PERMANENT_ERROR_MARKERS)
+
+
+def _fmt_issue_summary(label: str, items: list[str]) -> str:
+    """Trecho ', N label: a; b; c ... (+k)' para o last_run_message."""
+    if not items:
+        return ""
+    out = f", {len(items)} {label}: {'; '.join(items[:3])}"
+    if len(items) > 3:
+        out += f" ... (+{len(items) - 3})"
+    return out
+
 
 def _parse_rclone_errors(stderr: str) -> dict[str, str]:
     """Mapeia path → motivo real a partir do stderr do rclone.
@@ -679,8 +719,15 @@ async def _download_batch(
     errors: list,
     done_before: int,
     total_dl: int,
+    unavailable: list | None = None,
 ) -> None:
-    """Baixa um lote em staging, calcula hash, e enfileira cada arquivo."""
+    """Baixa um lote em staging, calcula hash, e enfileira cada arquivo.
+
+    Arquivos que falham por permissão/atalho vão para `unavailable` em vez de
+    `errors`: não bloqueiam o status "done" da versão (nenhum retry os traria)
+    e são enfileirados como ("miss", entry) para que o walk consiga fechar o
+    diretório dono deles.
+    """
     volume = storage.pick_volume()
     staging = Path(tempfile.mkdtemp(dir=volume, prefix="_rclone_stage_"))
     ff_path = Path(f"{staging}.files")
@@ -721,6 +768,11 @@ async def _download_batch(
                     "não baixado pelo rclone (verifique permissão/atalho)"
                 )
                 msg = f"{entry.path}: {reason}"
+                if unavailable is not None and _is_permanent_error(reason):
+                    unavailable.append(msg)
+                    log.warning(f"[rclone-runner] ignorado (permanente) — {msg}")
+                    await queue.put(("miss", entry))
+                    continue
                 errors.append(msg)
                 log.error(f"[rclone-runner] {msg}")
                 continue
@@ -751,6 +803,7 @@ async def _producer(
     remote_path: str,
     errors: list,
     abort: asyncio.Event,
+    unavailable: list | None = None,
 ) -> None:
     total = len(all_files)
 
@@ -782,14 +835,16 @@ async def _producer(
             batch_bytes += entry.size
             if len(batch) >= _BATCH_MAX_FILES or batch_bytes >= _BATCH_MAX_BYTES:
                 await _download_batch(
-                    queue, batch, remote_name, remote_path, errors, done, total_dl
+                    queue, batch, remote_name, remote_path, errors, done, total_dl,
+                    unavailable,
                 )
                 done += len(batch)
                 batch = []
                 batch_bytes = 0
         if batch and not abort.is_set():
             await _download_batch(
-                queue, batch, remote_name, remote_path, errors, done, total_dl
+                queue, batch, remote_name, remote_path, errors, done, total_dl,
+                unavailable,
             )
     finally:
         await queue.put(None)
@@ -811,6 +866,11 @@ async def _consumer(
             break
 
         kind = item[0]
+
+        if kind == "miss":
+            # Indisponível em definitivo (permissão/atalho): já contabilizado em
+            # `unavailable` pelo _download_batch. Só não entra em processed.
+            continue
 
         if kind == "skip":
             _, entry, sha256 = item
@@ -1026,6 +1086,7 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
             )
 
         errors: list[str] = []
+        unavailable: list[str] = []   # permissão/atalho — não impedem "done"
         failed_dirs: list[str] = []   # diretórios com erro — re-tentados no resume
         downloaded_total = 0
         bytes_total      = 0
@@ -1155,7 +1216,7 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                     return
                 await _download_batch(
                     process_queue, batch, remote_name, remote_path,
-                    errors, total_dl, total_dl + len(batch),
+                    errors, total_dl, total_dl + len(batch), unavailable,
                 )
                 total_dl += len(batch)
                 batch, batch_bytes = [], 0
@@ -1198,6 +1259,15 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                 item = await process_queue.get()
                 if item is None:
                     break
+
+                if item[0] == "miss":
+                    # Arquivo que nunca vai vir (permissão/atalho). Conta como
+                    # resolvido para o diretório: sem isso ele nunca bate
+                    # dir_total, cai em failed_dirs na reconciliação e prende a
+                    # versão em "incomplete" para sempre.
+                    _, entry = item
+                    _mark_dir_progress(file_to_dir.pop(entry.path, ""))
+                    continue
 
                 if item[0] == "skip":
                     _, rel_dir, entry = item
@@ -1312,10 +1382,8 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
             f"({downloaded_total} baixado(s) [{_fmt_size(bytes_total)}], "
             f"{skipped_total} sem alteração) em {elapsed:.0f}s"
         )
-        if errors:
-            summary += f", {len(errors)} erro(s): {'; '.join(errors[:3])}"
-            if len(errors) > 3:
-                summary += f" ... (+{len(errors) - 3})"
+        summary += _fmt_issue_summary("erro(s)", errors)
+        summary += _fmt_issue_summary("ignorado(s) sem permissão/atalho", unavailable)
 
         job.last_run_status  = "success" if not errors else "partial"
         job.last_run_message = summary
@@ -1357,6 +1425,7 @@ async def _run_fast_strategy(job: RcloneBackupJob, db) -> None:
         # listagem parcial: com pastas faltando a versão precisa terminar
         # "incomplete", nunca "done".
         errors: list[str] = []
+        unavailable: list[str] = []   # permissão/atalho — não impedem "done"
         log.info(f"[rclone-runner] Listando {job.remote_name}:{job.remote_path}")
         all_files = await list_files_recursive(
             job.remote_name, job.remote_path, errors=errors
@@ -1415,7 +1484,8 @@ async def _run_fast_strategy(job: RcloneBackupJob, db) -> None:
 
         t_start = time.monotonic()
         _, (processed, skipped, bytes_dl) = await asyncio.gather(
-            _producer(queue, all_files, prev_files, job.remote_name, job.remote_path, errors, abort),
+            _producer(queue, all_files, prev_files, job.remote_name, job.remote_path,
+                      errors, abort, unavailable),
             _consumer(queue, version.id, enc_key, errors),
         )
         elapsed = time.monotonic() - t_start
@@ -1427,6 +1497,11 @@ async def _run_fast_strategy(job: RcloneBackupJob, db) -> None:
         # arquivos que nunca chegaram a ser baixados. "incomplete" já é reconhecida
         # pelo bloco de resume acima (prev_incomplete), que soma seus arquivos à
         # baseline de skip sem tratá-la como versão íntegra.
+        #
+        # Falha permanente (permissão/atalho) NÃO conta aqui: está em
+        # `unavailable`, não em `errors`. Re-tentar não muda nada, e o arquivo
+        # que falhou nunca entra em prev_files — então ele continua sendo
+        # tentado no próximo run mesmo com a versão marcada "done".
         if not errors:
             version.status = "done"
         elif processed == 0:
@@ -1442,10 +1517,8 @@ async def _run_fast_strategy(job: RcloneBackupJob, db) -> None:
             f"({downloaded} baixado(s) [{_fmt_size(bytes_dl)}], {skipped} sem alteração) "
             f"em {elapsed:.0f}s"
         )
-        if errors:
-            summary += f", {len(errors)} erro(s): {'; '.join(errors[:3])}"
-            if len(errors) > 3:
-                summary += f" ... (+{len(errors) - 3})"
+        summary += _fmt_issue_summary("erro(s)", errors)
+        summary += _fmt_issue_summary("ignorado(s) sem permissão/atalho", unavailable)
 
         job.last_run_status  = "success" if not errors else "partial"
         job.last_run_message = summary
