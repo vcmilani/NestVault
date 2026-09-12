@@ -26,7 +26,8 @@
   .running-card-title{font-size:14px;font-weight:300;color:var(--amber);margin-bottom:10px;display:flex;align-items:center;gap:8px}
   .running-card-meta{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--text-dim)}
   .running-card-meta span{color:var(--text)}
-  .running-card-row{display:flex;gap:4px}
+  .running-card-row{display:flex;gap:4px;flex-wrap:wrap}
+  .running-card-row span{min-width:0;overflow-wrap:anywhere}
   .running-card.maintenance{border-left-color:var(--text-dim)}
 
   .pulse-dot{width:7px;height:7px;border-radius:50%;background:var(--amber);box-shadow:0 0 8px var(--amber);animation:pulse 1.5s ease-in-out infinite;display:inline-block;flex-shrink:0;margin-top:3px}
@@ -121,18 +122,92 @@
   .sf-btn.filter-done.active{border-color:var(--green);color:var(--green);background:color-mix(in srgb,var(--green) 8%,transparent)}
   .sf-btn.filter-failed.active{border-color:var(--red);color:var(--red);background:color-mix(in srgb,var(--red) 8%,transparent)}
   .sf-btn.filter-running.active{border-color:var(--amber);color:var(--amber)}
+  .sf-label{font-size:10px;color:var(--text-mute);letter-spacing:.06em;align-self:center;min-width:48px}
+
+  /* Origem da versão — texto simples, não badge: badge aqui já significa status.
+     Só o glifo é colorido: azul cheio competia com .td-num (Tamanho), que é
+     azul e aparece na mesma linha. */
+  .origin-rclone{color:var(--text-dim)}
+  .origin-rclone .oi{color:var(--blue);font-style:normal}
+  .origin-local{color:var(--text-mute)}
+  /* Contador de linhas: vive dentro do .table-sub, que é uppercase */
+  #recentCount{text-transform:none;letter-spacing:.02em;color:var(--text-dim);margin-left:8px}
+  #recentCount.filter-empty{color:var(--amber)}
 
   /* Notification banner */
-  .notif-bar{display:none;background:color-mix(in srgb,var(--blue) 10%,var(--bg2));border:1px solid var(--blue-dim);padding:8px 18px;font-size:11px;color:var(--blue);align-items:center;gap:10px;margin-bottom:12px}
+  .notif-bar{display:none;background:color-mix(in srgb,var(--blue) 10%,var(--bg2));border:1px solid var(--blue-dim);padding:8px 18px;font-size:11px;color:var(--blue);align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
   .notif-bar.visible{display:flex}
+  .notif-bar .sf-btn{font-size:10px}
+  .notif-bar .nb-close{border:none;opacity:.6}
+
+  /* ── Tabela de versões ──────────────────────────────────────────────
+     Ordem das colunas (as media queries abaixo dependem dela):
+       1 Label · 2 Origem · 3 Versão · 4 Status · 5 Tamanho
+       6 Arquivos · 7 Duração · 8 Alterações · 9 Finalizado
+     As 9 colunas somam ~1010px; num celular de 360px sobram ~340px.
+     .tbl-ver/.tbl-maint existem porque as duas tabelas dividem
+     #recentSection e os seletores por posição precisam se distinguir. */
+
+  /* Label fixo: enquanto ainda houver scroll horizontal (tablet/paisagem),
+     a linha continua identificável. border-collapse não pinta a borda da
+     célula fixa — daí o box-shadow. */
+  .tbl-ver th:first-child,.tbl-ver td:first-child{position:sticky;left:0;background:var(--bg);z-index:1;box-shadow:1px 0 0 var(--border)}
+  .tbl-ver thead th:first-child{background:var(--bg3);z-index:4}
+  .tbl-ver tbody tr:hover td:first-child{background:var(--bg2)}
 
   @media(max-width:768px){
     .storage-nums{grid-template-columns:1fr 1fr}
+    /* Versão é o mesmo instante de Finalizado; Arquivos duplica Tamanho numa
+       varredura; Duração só importa depois que algo chamou atenção. */
+    .tbl-ver th:nth-child(3),.tbl-ver td:nth-child(3),
+    .tbl-ver th:nth-child(6),.tbl-ver td:nth-child(6),
+    .tbl-ver th:nth-child(7),.tbl-ver td:nth-child(7){display:none}
+    /* Resumo é texto livre; sem limite ele sozinho estoura a tabela. */
+    .tbl-maint td:nth-child(3){max-width:38vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    /* .hbtn e .small-btn crescem no app.css; .sf-btn tinha ficado de fora. */
+    .sf-btn{min-height:40px;padding:8px 12px;font-size:11px;white-space:nowrap}
+  }
+  @media(max-width:600px){
+    /* "0 de 128 — nada neste filtro" não cabe ao lado do título uppercase. */
+    #recentCount{display:block;margin-left:0;margin-top:3px}
   }
   @media(max-width:480px){
     .running-grid{grid-template-columns:1fr}
     .sys-grid{grid-template-columns:1fr}
     .storage-nums{grid-template-columns:1fr 1fr}
+    .tbl-ver th:nth-child(5),.tbl-ver td:nth-child(5),
+    .tbl-ver th:nth-child(8),.tbl-ver td:nth-child(8),
+    .tbl-maint th:nth-child(3),.tbl-maint td:nth-child(3){display:none}
+    /* Origem vira só o glifo: "⟳ rclone" custa ~86px, o ⟳ custa 24px e
+       identifica igual. O texto volta a partir de 481px. */
+    .tbl-ver th:nth-child(2),.tbl-ver td:nth-child(2){font-size:0;text-align:center}
+    .tbl-ver th:nth-child(2)::before{content:'⟳';font-size:9px}
+    .tbl-ver td:nth-child(2) .oi{font-size:12px}
+    .tbl-ver td:nth-child(2).origin-local::before{content:'·';font-size:12px}
+    /* Sem colunas sobrando o wrap deixa de precisar rolar; tirar o overflow
+       é o que permite o thead grudar (overflow-x:auto faz o overflow-y
+       computar como auto e mata o position:sticky). */
+    .tbl-ver-wrap{overflow:visible}
+    .tbl-ver{table-layout:fixed}
+    .tbl-ver th,.tbl-ver td{padding:8px 6px}
+    /* Larguras medidas em IBM Plex Mono (avanço .6em), box-sizing border-box:
+       badge "INCOMPLETE" ~80px, "59min atrás" ~79px, + 12px de padding.
+       Sobram ~130px para o Label, que é a única coluna que quebra linha.
+       O ⊕ absorve, quando aparece, empilha na segunda linha do Status. */
+    .tbl-ver th:nth-child(2){width:22px}
+    .tbl-ver th:nth-child(4){width:96px}
+    .tbl-ver th:nth-child(9){width:92px}
+    .tbl-ver th:first-child,.tbl-ver td:first-child{position:static;box-shadow:none}
+    .tbl-ver td:first-child{white-space:normal;overflow-wrap:anywhere;line-height:1.35}
+    /* 56px = altura do header fixo (app.css). */
+    .tbl-ver thead th{position:sticky;top:56px;z-index:3;box-shadow:0 1px 0 var(--border)}
+    .tbl-ver tbody tr:nth-child(even){background:var(--bg2)}
+    .sf-btn{min-height:44px}
+    /* Rótulo em linha própria: sem isso, quando a fileira de status quebra, a
+       segunda leva começa em x=0 e desalinha da primeira (empurrada pelo
+       rótulo). De quebra devolve largura aos chips. */
+    .sf-label{flex-basis:100%;min-width:0;align-self:flex-start;margin-bottom:2px}
+    .status-filters{margin-bottom:10px}
   }
 </style>
 </head>
@@ -207,16 +282,22 @@
   </div>
   <div class="notif-bar" id="notifBar">
     🔔 Notificações de backup inativas —
-    <button class="sf-btn" onclick="requestNotifPermission()" style="min-height:24px;font-size:10px">Permitir</button>
-    <button class="sf-btn" onclick="document.getElementById('notifBar').classList.remove('visible')" style="min-height:24px;border:none;opacity:.5">✕</button>
+    <button class="sf-btn" onclick="requestNotifPermission()">Permitir</button>
+    <button class="sf-btn nb-close" onclick="document.getElementById('notifBar').classList.remove('visible')">✕</button>
   </div>
   <div class="status-filters" id="statusFilters">
-    <span style="font-size:10px;color:var(--text-mute);letter-spacing:.06em;align-self:center">Filtrar:</span>
+    <span class="sf-label">Status:</span>
     <button class="sf-btn active" data-filter="all" onclick="setStatusFilter('all')">Todos</button>
     <button class="sf-btn filter-done" data-filter="done" onclick="setStatusFilter('done')">done</button>
     <button class="sf-btn filter-failed" data-filter="failed" onclick="setStatusFilter('failed')">failed</button>
     <button class="sf-btn" data-filter="incomplete" onclick="setStatusFilter('incomplete')">incomplete</button>
     <button class="sf-btn filter-running" data-filter="running" onclick="setStatusFilter('running')">running</button>
+  </div>
+  <div class="status-filters" id="originFilters">
+    <span class="sf-label">Origem:</span>
+    <button class="sf-btn active" data-filter="all" onclick="setOriginFilter('all')">Todos</button>
+    <button class="sf-btn" data-filter="local" onclick="setOriginFilter('local')">Local</button>
+    <button class="sf-btn filter-rclone" data-filter="rclone" onclick="setOriginFilter('rclone')">⟳ rclone</button>
   </div>
   <div id="recentSection">
     <div class="loading">Carregando</div>
@@ -240,6 +321,7 @@
 <script src="/static/app.js"></script>
 <script>
   let _statusFilter = 'all';
+  let _originFilter = 'all';
   let _lastVersionStatuses = {};  // label -> status (para notificações)
 
   const fmtDiff = v => {
@@ -268,24 +350,46 @@
   };
   const badge = s => `<span class="badge badge-${esc(s)}">${esc(s)}</span>`;
 
-  // Status filter
-  function setStatusFilter(f) {
-    _statusFilter = f;
-    document.querySelectorAll('#statusFilters .sf-btn').forEach(b => {
-      b.classList.toggle('active', b.dataset.filter === f);
+  // Filtros de status e origem — combinam entre si. Só a tabela de versões
+  // (a primeira de #recentSection) é filtrada; manutenção fica de fora.
+  function _setFilter(containerId, value) {
+    document.querySelectorAll('#'+containerId+' .sf-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.filter === value);
     });
-    applyStatusFilter();
+    applyFilters();
   }
 
-  function applyStatusFilter() {
-    const tbl = document.querySelector('#recentSection .table-section table tbody');
-    if (!tbl) return;
-    tbl.querySelectorAll('tr').forEach(tr => {
-      if (_statusFilter === 'all') { tr.style.display = ''; return; }
-      const badge = tr.querySelector('.badge');
-      const status = badge ? badge.textContent.trim() : '';
-      tr.style.display = status === _statusFilter ? '' : 'none';
+  function setStatusFilter(f) { _statusFilter = f; _setFilter('statusFilters', f); }
+  function setOriginFilter(f) { _originFilter = f; _setFilter('originFilters', f); }
+
+  function applyFilters() {
+    // .tbl-ver e não "a primeira table": sem versões nas últimas 24h a
+    // primeira .table-section renderiza só o empty-state, e o seletor
+    // posicional caía na tabela de Manutenção.
+    const tbl = document.querySelector('#recentSection .tbl-ver tbody');
+    const counter = document.getElementById('recentCount');
+    if (!tbl) { if (counter) counter.textContent = ''; return; }
+    const rows = tbl.querySelectorAll('tr');
+    let shown = 0;
+    rows.forEach(tr => {
+      const ok = (_statusFilter === 'all' || tr.dataset.status === _statusFilter)
+              && (_originFilter === 'all' || tr.dataset.origin === _originFilter);
+      tr.style.display = ok ? '' : 'none';
+      if (ok) shown++;
     });
+    if (counter) {
+      if (shown === rows.length) {
+        counter.textContent = rows.length + (rows.length === 1 ? ' versão' : ' versões');
+        counter.className = '';
+      } else {
+        counter.textContent = shown + ' de ' + rows.length
+          + (shown === 0 ? ' · nada neste filtro' : '');
+        counter.className = shown === 0 ? 'filter-empty' : '';
+      }
+    }
+    // Esconder linhas muda a largura do conteúdo — a dica de scroll horizontal
+    // precisa ser recalculada aqui, não só no render.
+    if (typeof _updateOverflowHints === 'function') _updateOverflowHints();
   }
 
   // Browser notifications
@@ -365,7 +469,7 @@
   // Render — só reconstrói o DOM quando os dados mudam (evita flicker e
   // perda de scroll). Com algo rodando, força re-render a cada 30s para o
   // "iniciado há" não congelar.
-  let _lastRenderKey = null;
+  let _lastRunKey = null, _lastHistKey = null;
 
   function render(data) {
     // Métricas de sistema mudam a cada poll — renderizadas fora do diff abaixo,
@@ -376,15 +480,33 @@
     _checkNotifications(data.running_versions || [], data.recent_versions || []);
     const hasRunning = (data.running_versions || []).length > 0
       || (data.maintenance_jobs || []).some(j => j.status === 'running');
-    const {system, ...rest} = data;
-    const key = JSON.stringify(rest) + (hasRunning ? '|' + Math.floor(Date.now() / 30000) : '');
-    if (key === _lastRenderKey) return;
-    _lastRenderKey = key;
+    // Duas chaves, e não uma. running_versions carrega file_count/size, que
+    // mudam a cada poll enquanto um backup roda — com chave única a tabela
+    // histórica (até algumas centenas de linhas) era reconstruída de 2 em 2
+    // segundos, zerando o scroll horizontal e o hover justo enquanto se olha
+    // para ela. O bloco histórico só muda quando o servidor incrementa
+    // hist_rev, então ele basta como chave.
+    const runKey = JSON.stringify({r: data.running_versions, s: data.storage, d: data.disks})
+      + (hasRunning ? '|' + Math.floor(Date.now() / 30000) : '');
+    // hist_rev reinicia do zero quando o servidor reinicia e poderia repetir um
+    // valor já renderizado — a contagem e a versão mais recente desempatam sem
+    // custo de serializar a lista.
+    const rv = data.recent_versions || [];
+    const histKey = data.hist_rev + '|' + rv.length
+      + '|' + (rv[0] ? rv[0].backup_label + rv[0].finished_at : '');
 
-    renderRunning(data.running_versions || [], data.maintenance_jobs || []);
-    renderStorage(data.storage, data.disks);
-    renderRecent(data.recent_versions || [], data.maintenance_jobs || []);
-    setTimeout(applyStatusFilter, 0);
+    if (runKey !== _lastRunKey) {
+      _lastRunKey = runKey;
+      renderRunning(data.running_versions || [], data.maintenance_jobs || []);
+      renderStorage(data.storage, data.disks);
+    }
+    if (histKey !== _lastHistKey) {
+      _lastHistKey = histKey;
+      renderRecent(data.recent_versions || [], data.maintenance_jobs || []);
+      // Síncrono: com setTimeout as linhas filtradas apareciam por um frame
+      // antes de sumir, o que com centenas delas é um salto de scroll visível.
+      applyFilters();
+    }
     document.body.classList.add('nv-loaded');
     if (typeof _updateOverflowHints === 'function') _updateOverflowHints();
   }
@@ -538,7 +660,7 @@
 
     const vCards = versions.map(v => `
       <div class="running-card">
-        <div class="running-card-type">Backup local</div>
+        <div class="running-card-type">${v.is_rclone ? 'Backup rclone' : 'Backup local'}</div>
         <div class="running-card-title">
           <span class="pulse-dot"></span>${esc(v.backup_label)}
         </div>
@@ -625,8 +747,9 @@
     const recentMaint = maintJobs.filter(m => m.status !== 'running');
 
     const vRows = versions.map(v => `
-      <tr>
+      <tr data-status="${esc(v.status)}" data-origin="${v.is_rclone ? 'rclone' : 'local'}">
         <td>${esc(v.backup_label)}</td>
+        <td class="td-nb ${v.is_rclone ? 'origin-rclone' : 'origin-local'}">${v.is_rclone ? '<i class="oi">⟳</i> rclone' : 'local'}</td>
         <td class="td-dim td-nb">${esc(v.version_key.slice(0,19))}</td>
         <td>${badge(v.status)}${v.absorbed_count > 0 ? ' <span class="badge badge-absorb" title="'+v.absorbed_count+' arquivo(s) herdados via absorve">⊕ absorve</span>' : ''}</td>
         <td class="td-r td-num">${fmtSize(v.total_size_bytes)}</td>
@@ -651,11 +774,11 @@
 
     el.innerHTML = `
       <div class="table-section">
-        <div class="table-sub">Versões de backup</div>
-        <div class="table-wrap">
-          ${versions.length ? `<table>
+        <div class="table-sub">Versões de backup <span id="recentCount"></span></div>
+        <div class="table-wrap tbl-ver-wrap">
+          ${versions.length ? `<table class="tbl-ver">
             <thead><tr>
-              <th>Label</th><th>Versão</th><th>Status</th>
+              <th>Label</th><th>Origem</th><th>Versão</th><th>Status</th>
               <th class="td-r">Tamanho</th><th class="td-r">Arquivos</th>
               <th class="td-r">Duração</th><th>Alterações</th><th>Finalizado</th>
             </tr></thead>
@@ -665,8 +788,8 @@
       </div>
       <div class="table-section">
         <div class="table-sub">Manutenção</div>
-        <div class="table-wrap">
-          ${recentMaint.length ? `<table>
+        <div class="table-wrap tbl-maint-wrap">
+          ${recentMaint.length ? `<table class="tbl-maint">
             <thead><tr>
               <th>Operação</th><th>Status</th><th>Resumo</th>
               <th class="td-r">Duração</th><th>Concluído</th>

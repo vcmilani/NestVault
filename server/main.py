@@ -150,7 +150,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
-from typing import Optional, Literal
+from typing import Optional, Literal, Iterable
 import asyncio, os, tempfile, hashlib, base64, shutil, logging, time, threading, re, secrets
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
@@ -225,7 +225,12 @@ _RECLAIMABLE_TTL = 60.0
 # Cache para dados históricos (recent_versions com diffs, recent_jobs, maintenance_jobs).
 # Só atualizado quando invalidate_activity() é chamado (fim de backup/job/manutenção).
 # Fallback de 5 min para não ficar preso caso alguma invalidação seja perdida.
-_historical_cache: dict = {"data": None, "ts": 0.0}
+# "rev" é incrementado a cada reconstrução e vai no payload de /api/activity:
+# o front usa esse número para saber se o bloco histórico mudou, em vez de
+# serializar a lista inteira a cada poll de 2s. Contador próprio, e não
+# activity_generation(), porque o fallback de 5 min também reconstrói (e pode
+# mudar o conteúdo, com versões saindo da janela de 24h) sem mexer na geração.
+_historical_cache: dict = {"data": None, "ts": 0.0, "rev": 0}
 _HISTORICAL_FALLBACK_TTL = 300.0
 
 _stats_cache: dict = {"data": None, "ts": 0.0}
@@ -234,6 +239,11 @@ _STATS_TTL = 300.0
 # Idade a partir da qual uma versão 'running' sem arquivos novos é considerada
 # abandonada. Mesmo critério da limpeza noturna (nightly_cleanup._SIX_HOURS).
 _STALE_RUNNING_VERSION = timedelta(hours=6)
+
+# Teto da lista de atividade recente. Quem manda na lista é a janela de 24h;
+# isto existe só para o payload não explodir num cenário anormal. Era 30, o que
+# escondia a madrugada inteira em servidores com backup de hora em hora.
+_RECENT_VERSIONS_CAP = 500
 
 
 def _get_reclaimable_bytes(db: Session) -> int:
@@ -936,6 +946,7 @@ class RunningVersionInfo(BaseModel):
     total_size_bytes: int
     prev_file_count: Optional[int] = None
     prev_size_bytes: Optional[int] = None
+    is_rclone: bool = False
 
 class RecentVersionInfo(BaseModel):
     backup_label: str
@@ -947,6 +958,7 @@ class RecentVersionInfo(BaseModel):
     file_count: int
     total_size_bytes: int
     absorbed_count: int = 0
+    is_rclone: bool = False
     diff_added: Optional[int] = None
     diff_modified: Optional[int] = None
     diff_removed: Optional[int] = None
@@ -988,6 +1000,7 @@ class ActivityResponse(BaseModel):
     recent_versions: list[RecentVersionInfo]
     maintenance_jobs: list[MaintenanceJobInfo]
     server_time: str
+    hist_rev: int = 0
     system: Optional[SystemMetricsResponse] = None
 
 
@@ -2287,6 +2300,26 @@ def get_stats(db: Session = Depends(get_db)):
     return data
 
 
+def _rclone_labels(db: Session, labels: Optional[Iterable[str]] = None) -> set[str]:
+    """Dentre `labels`, os que são alimentados por jobs rclone.
+
+    backup_versions não tem coluna de origem — uma versão criada pelo runner é
+    idêntica a um upload de cliente. A classificação vem de duas fontes que se
+    completam: os jobs configurados (autoritativo, mas some quando o job é
+    apagado — o DELETE preserva os dados) e o client_name que o runner grava ao
+    criar o label (sobrevive ao delete, mas não pega label pré-criado à mão).
+    """
+    jobs_q = db.query(RcloneBackupJob.target_label).distinct()
+    ids_q = db.query(BackupID.label).filter(BackupID.client_name == "rclone")
+    if labels is not None:
+        labels = list(labels)
+        if not labels:
+            return set()
+        jobs_q = jobs_q.filter(RcloneBackupJob.target_label.in_(labels))
+        ids_q = ids_q.filter(BackupID.label.in_(labels))
+    return {r[0] for r in jobs_q} | {r[0] for r in ids_q}
+
+
 def _build_fast_data(db: Session) -> tuple:
     """Queries leves para dados em tempo real: versões em execução, storage e discos.
     Chamado inline a cada request — retorna (running_version_infos, storage_obj, disks_list)."""
@@ -2352,6 +2385,9 @@ def _build_fast_data(db: Session) -> tuple:
             ):
                 prev_stats[id_to_label[row.version_id]] = (row.fc, int(row.sz))
 
+    # Restrito aos labels em execução: sem nada rodando, o poll não paga nada.
+    rclone_labels = _rclone_labels(db, labels) if labels else set()
+
     running_version_infos = [
         RunningVersionInfo(
             backup_label=v.backup_label,
@@ -2361,6 +2397,7 @@ def _build_fast_data(db: Session) -> tuple:
             total_size_bytes=stats_map.get(v.id, (0, 0))[1],
             prev_file_count=prev_stats[v.backup_label][0] if v.backup_label in prev_stats else None,
             prev_size_bytes=prev_stats[v.backup_label][1] if v.backup_label in prev_stats else None,
+            is_rclone=v.backup_label in rclone_labels,
         )
         for v in running_vs
     ]
@@ -2422,7 +2459,7 @@ def _build_historical_data(db: Session) -> tuple:
             BackupVersion.finished_at >= cutoff,
         )
         .order_by(BackupVersion.finished_at.desc())
-        .limit(30)
+        .limit(_RECENT_VERSIONS_CAP)
         .all()
     )
     rstats: dict[int, tuple[int, int]] = {}
@@ -2453,6 +2490,8 @@ def _build_historical_data(db: Session) -> tuple:
         _win = db.query(_vseq).filter(_vseq.c.vid.in_([v.id for v in done_vs])).subquery()
         diff_map = version_diff.diff_counts_by_version(db, _win)
 
+    rclone_labels = _rclone_labels(db, {v.backup_label for v in recent_vs})
+
     recent_version_infos = []
     for v in recent_vs:
         fc, sz = rstats.get(v.id, (0, 0))
@@ -2466,6 +2505,7 @@ def _build_historical_data(db: Session) -> tuple:
             finished_at=str(v.finished_at) if v.finished_at else None,
             duration_seconds=duration, file_count=fc, total_size_bytes=sz,
             absorbed_count=v.absorbed_count or 0,
+            is_rclone=v.backup_label in rclone_labels,
             diff_added=d["added"] if d else None,
             diff_modified=d["modified"] if d else None,
             diff_removed=d["removed"] if d else None,
@@ -2530,7 +2570,8 @@ async def _activity_refresh_loop() -> None:
                 finally:
                     db.close()
             result = await loop.run_in_executor(None, _do_hist)
-            _historical_cache.update({"data": result, "ts": time.monotonic()})
+            _historical_cache.update({"data": result, "ts": time.monotonic(),
+                                      "rev": _historical_cache["rev"] + 1})
             log.debug("[activity-hist] cache histórico atualizado")
         except asyncio.CancelledError:
             raise
@@ -2547,7 +2588,8 @@ def get_activity(db: Session = Depends(get_db)):
         # Cold start: bloco histórico ainda não foi calculado — faz inline uma vez
         recent_versions, maint_jobs = _build_historical_data(db)
         _historical_cache.update({"data": (recent_versions, maint_jobs),
-                                   "ts": time.monotonic()})
+                                   "ts": time.monotonic(),
+                                   "rev": _historical_cache["rev"] + 1})
     else:
         recent_versions, maint_jobs = hist
 
@@ -2558,6 +2600,7 @@ def get_activity(db: Session = Depends(get_db)):
         recent_versions=recent_versions,
         maintenance_jobs=maint_jobs,
         server_time=datetime.now().isoformat(),
+        hist_rev=_historical_cache["rev"],
         system=sysmetrics.snapshot(),
     )
 
