@@ -67,6 +67,7 @@ from rich.progress import (
     TextColumn, TimeRemainingColumn,
 )
 from rich import box
+from rich.markup import escape
 
 # -- Console & tema -----------------------------------------------------------
 console = Console(highlight=False)
@@ -118,6 +119,20 @@ def _make_progress() -> Progress:
         console=console,
         transient=False,
     )
+
+
+def _scan_progress() -> Progress:
+    """Linha viva (spinner + texto) para etapas sem total conhecido."""
+    return Progress(
+        SpinnerColumn(style=AMBER),
+        TextColumn(f"[{TEXT}]{{task.description}}"),
+        console=console,
+        transient=True,
+    )
+
+
+def _short_path(path: str, width: int = 50) -> str:
+    return path if len(path) <= width else "…" + path[-(width - 1):]
 
 
 # -- Config -------------------------------------------------------------------
@@ -639,23 +654,45 @@ def backup_directory(
     if dry_run:
         _kv("Modo", "dry-run", AMBER)
 
-    prev_done_key, prev_cache = _fetch_prev_cache(server, label) if not dry_run else (None, {})
+    if dry_run:
+        prev_done_key, prev_cache = None, {}
+    else:
+        with console.status(f"[{TEXT}]Buscando cache da versao anterior…", spinner_style=AMBER):
+            prev_done_key, prev_cache = _fetch_prev_cache(server, label)
     if prev_cache:
         _dim(f"Cache: {len(prev_cache)} arquivo(s) da versao anterior")
 
     # Ordena dirs/arquivos durante o walk (determinístico) em vez de acumular
     # a árvore inteira numa lista extra e ordenar globalmente no final.
     pending = []
-    for dirpath, dirnames, filenames in os.walk(root, onerror=lambda e: _dim(f"Aviso: {e}")):
-        dirnames.sort()
-        for name in sorted(filenames):
-            fp = Path(dirpath) / name
-            if not fp.is_file() or fp.name in IGNORED_NAMES:
-                continue
-            if any(_is_excluded(fp, root, ex) for ex in (exclude or [])):
-                continue
-            op = str(fp) if not path_prefix else str(Path(path_prefix) / fp.relative_to(root))
-            pending.append((fp, op))
+    n_dirs = 0
+    with _scan_progress() as scan_progress:
+        scan_task = scan_progress.add_task("Varrendo…", total=None)
+        for dirpath, dirnames, filenames in os.walk(root, onerror=lambda e: _dim(f"Aviso: {e}")):
+            n_dirs += 1
+            current = escape(_short_path(os.path.relpath(dirpath, root)))
+
+            def _show_scan():
+                scan_progress.update(
+                    scan_task,
+                    description=(
+                        f"Varrendo  {len(pending)} arquivos · {n_dirs} pastas  "
+                        f"[{DIM}]{current}[/{DIM}]"
+                    ),
+                )
+
+            _show_scan()
+            dirnames.sort()
+            for i, name in enumerate(sorted(filenames), 1):
+                if i % 1000 == 0:
+                    _show_scan()
+                fp = Path(dirpath) / name
+                if not fp.is_file() or fp.name in IGNORED_NAMES:
+                    continue
+                if any(_is_excluded(fp, root, ex) for ex in (exclude or [])):
+                    continue
+                op = str(fp) if not path_prefix else str(Path(path_prefix) / fp.relative_to(root))
+                pending.append((fp, op))
 
     total = len(pending)
     _kv("Arquivos", str(total))
@@ -701,7 +738,9 @@ def backup_directory(
             pending_hash = []
             vanished     = False  # arquivo sumiu entre o walk e o stat — desabilita smart skip
 
+            compare = progress.add_task(f"[{DIM}]Comparando com cache[/{DIM}]", total=total)
             for fp, op in pending:
+                progress.update(compare, advance=1)
                 try:
                     stat = fp.stat()
                 except OSError:
@@ -717,6 +756,7 @@ def backup_directory(
                     fast_files.append((fp, op, mtime, cached["sha256"], cached["size"]))
                 else:
                     pending_hash.append((fp, op, mtime, size))
+            progress.remove_task(compare)
 
             smart_skip_used = not vanished and _smart_skip_eligible(
                 pending_hash, set(all_paths), set(prev_cache.keys()),
