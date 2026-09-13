@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v9.0.3`
+# 🗄️ NestVault  `v9.1.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **backup por usuário** — cada conta só cria, lista e restaura seus próprios backups.
 
@@ -498,6 +498,8 @@ O cliente possui dez subcomandos: `backup`, `backups`, `versions`, `restore`, `c
 Envia arquivos para o servidor criando uma **nova versão** a cada execução. A versão é identificada automaticamente pela data e hora de início (`2026-04-25T10:42:31`).
 
 Arquivos cujo conteúdo já existe no storage (mesmo sha256) são apenas **registrados** na nova versão — zero bytes trafegam na rede. Arquivos sem alteração desde a última versão são **ignorados**.
+
+Antes do envio, o cliente mostra o andamento das etapas locais, para que pastas grandes não pareçam travadas: um spinner enquanto busca o cache da versão anterior, uma linha com a contagem de arquivos e pastas encontrados (e a pasta sendo lida) durante a varredura, e uma barra **Comparando com cache** enquanto confere tamanho e mtime de cada arquivo. Essas linhas somem ao terminar; fica só a barra principal do backup.
 
 ```bash
 # Backup simples — cria nova versão automaticamente
