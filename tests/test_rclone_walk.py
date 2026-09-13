@@ -70,14 +70,18 @@ def _fe(path, mtime=1.0, size=10):
 
 
 def _install_tree(monkeypatch, tree, downloaded_paths, fail_dirs=None,
-                  list_fail_dirs=None):
+                  list_fail_dirs=None, fail_reason=None):
     """tree: {rel_dir: (files:[RcloneFileEntry], subdirs:[str])}.
     Registra os paths efetivamente baixados (staged) em downloaded_paths;
-    fail_dirs força "não baixado pelo rclone" pros arquivos daquele
-    diretório (simulando falha de download); list_fail_dirs força erro de
-    listagem. O download em si (_bulk_copy) é mockado escrevendo bytes
-    fake no staging — o resto do pipeline (_download_batch/hash/
-    _process_file_sync) roda de verdade."""
+    fail_dirs força falha de download pros arquivos daquele diretório;
+    list_fail_dirs força erro de listagem. O download em si (_bulk_copy) é
+    mockado escrevendo bytes fake no staging — o resto do pipeline
+    (_download_batch/hash/_process_file_sync) roda de verdade.
+
+    fail_reason=None simula o caso "sumiu do staging sem linha ERROR"
+    (rc=0) — é assim que o rclone pula atalho órfão/arquivo sem permissão.
+    Com fail_reason, devolve rc=1 e a linha ERROR correspondente, que é o
+    formato de uma falha de verdade (421, sizes differ, timeout)."""
     fail_dirs = fail_dirs or set()
     list_fail_dirs = list_fail_dirs or set()
 
@@ -91,16 +95,23 @@ def _install_tree(monkeypatch, tree, downloaded_paths, fail_dirs=None,
             raise RuntimeError("lsjson simulado falhou")
         return tree[rel_dir]
 
-    async def fake_bulk_copy(remote_name, remote_path, files_from, staging):
+    async def fake_bulk_copy(remote_name, remote_path, files_from, staging, **kw):
         paths = [p for p in files_from.read_text().splitlines() if p]
+        failed = []
         for p in paths:
             top_dir = p.rsplit("/", 1)[0] if "/" in p else ""
             if top_dir in fail_dirs:
-                continue   # simula "não baixado pelo rclone" — arquivo falha
+                failed.append(p)
+                continue   # arquivo não chega ao staging — falha
             dest = staging / p
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(b"x" * 10)
             downloaded_paths.append(p)
+        if failed and fail_reason:
+            err = "\n".join(
+                f"2026/09/09 00:26:13 ERROR : {p}: {fail_reason}" for p in failed
+            )
+            return 1, err
         return 0, ""
 
     monkeypatch.setattr(rr, "list_dir_one_level", fake_list)
@@ -146,8 +157,9 @@ async def test_failed_dir_keeps_version_incomplete_and_resumes(session_factory, 
         "B": ([_fe("B/bad.jpg")], []),
     }
     downloaded = []
-    # 1ª execução: arquivos de B falham no download.
-    _install_tree(monkeypatch, tree, downloaded, fail_dirs={"B"})
+    # 1ª execução: arquivos de B falham no download (erro transitório).
+    _install_tree(monkeypatch, tree, downloaded, fail_dirs={"B"},
+                  fail_reason="Failed to copy: 421 Misdirected Request")
     await rr.run_rclone_backup_job(jid)
 
     db = Session()
@@ -173,6 +185,37 @@ async def test_failed_dir_keeps_version_incomplete_and_resumes(session_factory, 
     assert downloaded == ["B/bad.jpg"]          # só B foi baixado no resume
     paths = {vf.original_path for vf in db.query(VersionFile).filter_by(version_id=ver.id)}
     assert paths == {"A/ok.jpg", "B/bad.jpg"}
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_permission_failure_marks_version_done(session_factory, monkeypatch):
+    """Arquivo sem permissão/atalho órfão não pode prender a versão em
+    'incomplete': nenhum retry o traria, e o diretório dono dele nunca fecharia.
+    A versão termina 'done' (sem o arquivo) e o job reporta o run como sucesso."""
+    Session = session_factory
+    jid = _make_job(Session)
+    tree = {
+        "": ([], ["A", "B"]),
+        "A": ([_fe("A/ok.jpg")], []),
+        "B": ([_fe("B/sem-permissao.jpg")], []),
+    }
+    downloaded = []
+    # Sem fail_reason: staged ausente e nenhuma linha ERROR — atalho pulado
+    # pelo --drive-skip-dangling-shortcuts / arquivo sem permissão.
+    _install_tree(monkeypatch, tree, downloaded, fail_dirs={"B"})
+    await rr.run_rclone_backup_job(jid)
+
+    db = Session()
+    ver = db.query(BackupVersion).filter_by(backup_label="fotos").one()
+    assert ver.status == "done"
+    assert ver.progress_json is None            # sem checkpoint pendente
+    assert downloaded == ["A/ok.jpg"]
+    paths = {vf.original_path for vf in db.query(VersionFile).filter_by(version_id=ver.id)}
+    assert paths == {"A/ok.jpg"}                # o inacessível fica de fora
+    job = db.get(RcloneBackupJob, jid)
+    assert job.last_run_status == "success"
+    assert "ignorado(s) sem permissão/atalho" in job.last_run_message
     db.close()
 
 

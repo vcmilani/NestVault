@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v9.0.0`
+# 🗄️ NestVault  `v9.1.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **backup por usuário** — cada conta só cria, lista e restaura seus próprios backups.
 
@@ -498,6 +498,8 @@ O cliente possui dez subcomandos: `backup`, `backups`, `versions`, `restore`, `c
 Envia arquivos para o servidor criando uma **nova versão** a cada execução. A versão é identificada automaticamente pela data e hora de início (`2026-04-25T10:42:31`).
 
 Arquivos cujo conteúdo já existe no storage (mesmo sha256) são apenas **registrados** na nova versão — zero bytes trafegam na rede. Arquivos sem alteração desde a última versão são **ignorados**.
+
+Antes do envio, o cliente mostra o andamento das etapas locais, para que pastas grandes não pareçam travadas: um spinner enquanto busca o cache da versão anterior, uma linha com a contagem de arquivos e pastas encontrados (e a pasta sendo lida) durante a varredura, e uma barra **Comparando com cache** enquanto confere tamanho e mtime de cada arquivo. Essas linhas somem ao terminar; fica só a barra principal do backup.
 
 ```bash
 # Backup simples — cria nova versão automaticamente
@@ -1201,6 +1203,46 @@ Teste:
 rclone lsd onedrive:            # lista pastas na raiz
 rclone ls onedrive:Documentos   # lista arquivos em uma pasta
 ```
+
+### Configurar iCloud no rclone
+
+```bash
+rclone config
+```
+
+```
+n) New remote
+name> icloud                    # nome que você escolhe
+
+Storage> iclouddrive            # ou "iCloud Drive"
+
+apple_id> voce@icloud.com
+password>                       # senha da conta Apple (não é senha de app)
+
+service> drive                  # "drive" para arquivos; "photos" para a fototeca
+
+# 2FA: o rclone pede o código de 6 dígitos exibido no seu dispositivo confiável
+```
+
+Teste:
+
+```bash
+rclone lsd icloud:              # lista pastas na raiz
+```
+
+Três particularidades do backend iCloud que afetam a operação do NestVault:
+
+**O `trust_token` expira em 30 dias.** Passado esse prazo, todos os jobs desse remote passam a falhar com erros de autenticação (`HTTP error 421`, `Invalid session token`). A renovação é manual e exige o código 2FA:
+
+```bash
+rclone config reconnect icloud:
+```
+
+**O `rclone.conf` precisa ser gravável pelo usuário que roda o servidor.** Diferente do Google Drive e do OneDrive, o backend iCloud regrava cookies e `trust_token` no arquivo a cada renovação de sessão. Se o arquivo for somente-leitura para o usuário do systemd, a sessão é perdida a cada run e o job falha de forma intermitente com `421 (Invalid global session)`.
+
+**Um job por remote de cada vez.** O NestVault serializa os runs por `remote_name` — dois processos rclone reautenticando em paralelo sobrescrevem os cookies um do outro e invalidam a sessão. Um run (agendado ou manual) disparado enquanto outro está ativo no mesmo remote é descartado com aviso no log; o cron volta no horário seguinte.
+
+> **Packages do macOS** (`.pages`, `.numbers`, `.key`, `.playgroundbook`, `.xcodeproj`) são pastas que o iCloud entrega como **zip**, mas cujo tamanho é reportado descompactado. O rclone acusa `corrupted on transfer: sizes differ` e descarta o arquivo; o NestVault detecta esse caso específico e refaz o lote com `--ignore-size`. O arquivo é armazenado como o zip que a Apple entrega — é a única forma disponível pela API.
 
 ### Configurar Dropbox, S3, Backblaze B2 e outros
 
@@ -2314,6 +2356,20 @@ sudo systemctl restart nestvault
 ```
 
 O NestVault cria as tabelas automaticamente na primeira inicialização.
+
+### Dimensionando o pool de conexões
+
+Três campos em Configurações → Banco de dados controlam o pool do SQLAlchemy (ignorados no SQLite, que usa `NullPool`):
+
+| Campo | Padrão | O que é |
+|---|---|---|
+| `database.pool_size` | `10` | Conexões mantidas abertas permanentemente. |
+| `database.max_overflow` | `20` | Conexões extras abertas sob pico, acima do pool permanente. |
+| `database.pool_timeout_seconds` | `30` | Espera de um request por uma conexão livre antes de falhar com `500`. |
+
+O teto real de conexões é `pool_size + max_overflow` (padrão: 30) **por processo uvicorn** — mantenha-o abaixo do `max_connections` do PostgreSQL (padrão: 100). Os três exigem reinício.
+
+Se o log mostrar `QueuePool limit of size N overflow M reached, connection timed out`, o servidor está aceitando mais requests simultâneos do que o pool comporta: aumente `max_overflow` — ou reduza o paralelismo do cliente (`nestvault backup --workers`).
 
 ### Migrando dados do SQLite para PostgreSQL
 
