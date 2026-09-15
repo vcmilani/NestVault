@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, time as dt_time, timedelta
 
 from database import BackupVersion
 
@@ -256,11 +256,15 @@ def test_run_nightly_cleanup_combines_retention_and_prune_in_same_run(client, mo
     db = Session()
     try:
         now = datetime.now()
+        # Ancorado ao meio-dia da data alvo, não a `now - 12h`: a retenção agrupa por
+        # dia de calendário, então com `now` de madrugada as duas versões caíam em dias
+        # diferentes e o teste falhava entre 00h e 12h — justamente quando a limpeza roda.
+        day10 = datetime.combine((now - timedelta(days=10)).date(), dt_time(12, 0))
         # Mesmo dia calendário, 10 dias atrás: retenção mantém só a mais recente do dia.
-        v1 = _mkver(db, "lbl", "k1", now - timedelta(days=10, hours=12))
-        v2 = _mkver(db, "lbl", "k2", now - timedelta(days=10))
+        v1 = _mkver(db, "lbl", "k1", day10)
+        v2 = _mkver(db, "lbl", "k2", day10 + timedelta(hours=2))
         # Dia seguinte, conteúdo igual a v2: sobrevive à retenção, mas é podada por igualdade.
-        v3 = _mkver(db, "lbl", "k3", now - timedelta(days=9))
+        v3 = _mkver(db, "lbl", "k3", day10 + timedelta(days=1))
         # Recente, conteúdo diferente: sempre mantida (última do label).
         v4 = _mkver(db, "lbl", "k4", now - timedelta(hours=1))
         for v in (v1, v2, v3):
@@ -282,14 +286,12 @@ def test_run_nightly_cleanup_combines_retention_and_prune_in_same_run(client, mo
         db.close()
 
 
-# -- Retenção de versões stale (failed/incomplete) por idade (N1) -------------
-# CHANGELOG v5.2.0 documenta "failed/incomplete com mais de 1 semana são removidas
-# se houver versão done mais recente" — o código nunca aplicou a checagem de idade,
-# só a de "tem done mais recente". Uma versão failed de minutos atrás já sumia assim
-# que qualquer backup seguinte no mesmo label concluía, atrapalhando quem quer
-# investigar a falha logo depois dela acontecer.
+# -- Limpeza de versões stale (failed/incomplete) -----------------------------
+# Regra: uma versão failed/incomplete é removida assim que existir uma done MAIS NOVA
+# que ela — sem exigência de idade. A última falha do label (sem done posterior) é
+# sempre preservada: é ela que descreve o estado atual e da qual o rclone retoma.
 
-def test_stale_version_kept_when_recent_even_with_newer_done(client, monkeypatch):
+def test_stale_version_removed_immediately_when_newer_done_exists(client, monkeypatch):
     import main as m
     import nightly_cleanup as nc
 
@@ -304,8 +306,9 @@ def test_stale_version_kept_when_recent_even_with_newer_done(client, monkeypatch
     db = Session()
     try:
         now = datetime.now()
-        failed = _mkver(db, "lbl", "kfail", now - timedelta(hours=1), status="failed")
-        _mkver(db, "lbl", "kdone", now, status="done")
+        # Falhou há 1 hora e já foi sucedida por uma done: sai na mesma limpeza.
+        _mkver(db, "lbl", "kfail", now - timedelta(hours=2), status="failed")
+        _mkver(db, "lbl", "kdone", now - timedelta(hours=1), status="done")
     finally:
         db.close()
 
@@ -317,12 +320,13 @@ def test_stale_version_kept_when_recent_even_with_newer_done(client, monkeypatch
             v.version_key
             for v in db.query(BackupVersion).filter(BackupVersion.backup_label == "lbl").all()
         }
-        assert "kfail" in remaining, "versão failed recente não deveria ser removida ainda"
+        assert "kfail" not in remaining, "failed com done mais nova deveria sair imediatamente"
+        assert "kdone" in remaining
     finally:
         db.close()
 
 
-def test_stale_version_removed_after_one_week_with_newer_done(client, monkeypatch):
+def test_stale_version_removed_when_older_than_newest_done(client, monkeypatch):
     import main as m
     import nightly_cleanup as nc
 
@@ -347,7 +351,41 @@ def test_stale_version_removed_after_one_week_with_newer_done(client, monkeypatc
             v.version_key
             for v in db.query(BackupVersion).filter(BackupVersion.backup_label == "lbl").all()
         }
-        assert "kfail" not in remaining, "versão failed com mais de 1 semana deveria ser removida"
+        assert "kfail" not in remaining, "versão failed anterior à done mais nova deveria ser removida"
         assert "kdone" in remaining
+    finally:
+        db.close()
+
+
+def test_latest_stale_version_kept_when_no_newer_done(client, monkeypatch):
+    """Trava de segurança da regra: a falha mais recente do label — sem nenhuma done
+    depois dela — descreve o estado atual do backup e é de onde o rclone retoma
+    (progress_json). Nunca é removida, por mais antiga que seja."""
+    import main as m
+    import nightly_cleanup as nc
+
+    monkeypatch.setattr(nc, "SessionLocal", m.SessionLocal)
+    monkeypatch.setattr(nc, "engine", m.SessionLocal.kw["bind"])
+
+    make_backup(client, "lbl")
+    Session = m.SessionLocal
+    db = Session()
+    try:
+        now = datetime.now()
+        _mkver(db, "lbl", "kdone", now - timedelta(days=40), status="done")
+        # Incompleta mais nova que a única done: é o estado corrente do label.
+        _mkver(db, "lbl", "kinc", now - timedelta(days=30), status="incomplete")
+    finally:
+        db.close()
+
+    run_nightly_cleanup()
+
+    db = Session()
+    try:
+        remaining = {
+            v.version_key
+            for v in db.query(BackupVersion).filter(BackupVersion.backup_label == "lbl").all()
+        }
+        assert "kinc" in remaining, "última incompleta sem done posterior não pode ser removida"
     finally:
         db.close()

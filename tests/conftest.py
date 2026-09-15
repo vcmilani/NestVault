@@ -23,9 +23,9 @@ for _legacy in ("STORAGE_DIRS", "STORAGE_DIR", "REPLICATION_FACTOR",
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
+from sqlalchemy.pool import NullPool
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 import config as config_mod
 import database as db_mod
@@ -50,13 +50,33 @@ def _fake_ample_disk_usage(path):
     return _DiskUsage(total=200 * 1024 ** 3, used=100 * 1024 ** 3, free=_FAKE_FREE_BYTES)
 
 
-def _make_engine():
-    # StaticPool garante que todas as sessões usam a mesma conexão in-memory
-    return create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+def _make_engine(db_path):
+    """Banco de teste em arquivo, uma conexão por sessão — como em produção.
+
+    Era ":memory:" com StaticPool, o que faz TODAS as sessões compartilharem uma
+    única conexão. Com o app rodando em outra thread (TestClient) isso vira uma
+    corrida real: o `db.close()` de uma sessão devolve a conexão ao pool, que emite
+    ROLLBACK, e esse rollback descarta a transação ainda aberta de outra sessão. Os
+    testes de run_nightly_cleanup falhavam ~10% das vezes por isso — a limpeza
+    logava "1 versão removida" e a linha continuava no banco.
+    """
+    engine = create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False, "timeout": 60},
+        poolclass=NullPool,
     )
+
+    # Mesmos PRAGMAs de database.py: WAL (leitura não bloqueia escrita) e FKs
+    # enforçadas, para que os testes exerçam as mesmas regras que a produção.
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragma(dbapi_connection, _):
+        cur = dbapi_connection.cursor()
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA synchronous=NORMAL")
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
+    return engine
 
 
 @pytest.fixture(autouse=True)
@@ -89,7 +109,7 @@ def _setup_app(tmp_vol, monkeypatch):
     """Cria engine/Session in-memory isolada e registra os overrides comuns
     (storage, get_db, SessionLocal). Retorna o sessionmaker para os testes
     poderem inserir dados de setup (ex: usuários) direto no banco."""
-    engine = _make_engine()
+    engine = _make_engine(tmp_vol.parent / "test.db")
     db_mod.Base.metadata.create_all(bind=engine)
     Session = sessionmaker(bind=engine)
 

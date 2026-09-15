@@ -1,5 +1,5 @@
 """
-NestVault  v9.1.1
+NestVault  v9.1.2
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -604,7 +604,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="9.1.1", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="9.1.2", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():

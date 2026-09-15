@@ -1353,7 +1353,11 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
             )
             # Walk percorreu tudo, mas alguns diretórios falharam → versão fica
             # 'incomplete' (resumível); o próximo run re-tenta failed_dirs.
+            # finished_at precisa ser gravado aqui também: sem ele a versão fica
+            # fora da tela de atividade (que filtra por finished_at) e sem duração,
+            # que é justamente o caso mais comum de versão rclone incompleta.
             version.status = "incomplete"
+            version.finished_at = datetime.now().astimezone().replace(tzinfo=None)
             await asyncio.to_thread(
                 _save_checkpoint_sync, version_id, done_dirs, failed_dirs, resume_count
             )

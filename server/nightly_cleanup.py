@@ -14,7 +14,6 @@ from cache_state import invalidate_activity
 log = logging.getLogger("backup-server")
 
 _SIX_HOURS  = timedelta(hours=6)
-_ONE_WEEK   = timedelta(days=7)
 _ONE_DAY    = timedelta(hours=24)
 _ONE_MONTH  = timedelta(days=30)
 _SIX_MONTHS = timedelta(days=180)
@@ -427,6 +426,7 @@ def run_nightly_cleanup() -> None:
         total_month     = 0
         total_unchanged = 0
         labels_touched  = 0
+        labels_failed: list[str] = []
 
         for idx, label in enumerate(labels, 1):
             mj = db.get(MaintenanceJob, mj_id)
@@ -435,72 +435,89 @@ def run_nightly_cleanup() -> None:
                 db.commit()
                 invalidate_activity()
 
-            versions = (
-                db.query(BackupVersion)
-                .filter(BackupVersion.backup_label == label)
-                .order_by(BackupVersion.created_at.desc())
-                .all()
-            )
-            if not versions:
+            try:
+                versions = (
+                    db.query(BackupVersion)
+                    .filter(BackupVersion.backup_label == label)
+                    .order_by(BackupVersion.created_at.desc())
+                    .all()
+                )
+                if not versions:
+                    continue
+
+                done_versions  = [v for v in versions if v.status == "done"]
+                stale_versions = [v for v in versions if v.status in ("failed", "incomplete")]
+
+                # Conjunto de datas das versões done para comparação
+                done_dates = {v.created_at for v in done_versions}
+
+                # 1. Limpar stale (failed/incomplete) assim que existir uma done MAIS NOVA
+                # que elas. Uma tentativa que falhou e já foi sucedida por um backup completo
+                # não descreve mais nenhum estado do label — só ocupa espaço e polui a lista
+                # de versões. A exigência de "mais de 1 semana" da v9.0.0 fazia essas versões
+                # se acumularem por semanas (visível sobretudo nos labels rclone, que falham
+                # parcialmente com frequência) e foi removida.
+                #
+                # O "mais nova" continua sendo a trava de segurança: a falha mais recente do
+                # label, sem nenhuma done depois dela, é preservada — é ela que descreve o
+                # estado atual do backup e é dela que o rclone retoma (progress_json).
+                stale_to_delete: list[int] = []
+                for v in stale_versions:
+                    if any(d > v.created_at for d in done_dates):
+                        stale_to_delete.append(v.id)
+
+                if stale_to_delete:
+                    _delete_versions(db, stale_to_delete)
+                    total_stale += len(stale_to_delete)
+                    log.debug(f"[nightly-cleanup] {label}: {len(stale_to_delete)} versão(ões) stale removida(s)")
+
+                # 2. Aplicar política de retenção nas versões done
+                if not done_versions:
+                    continue
+
+                keep_ids = _versions_to_keep(done_versions, now)
+                done_to_delete = [v.id for v in done_versions if v.id not in keep_ids]
+                # Capturado antes de _delete_versions() abaixo: o commit() dela expira todos os
+                # objetos da sessão, e reacessar atributos de uma instância já deletada explode
+                # com ObjectDeletedError — então survivors precisa vir do keep_ids já calculado.
+                survivors = [v for v in done_versions if v.id in keep_ids]
+
+                if done_to_delete:
+                    # Separar por período para contagem macro
+                    for v in done_versions:
+                        if v.id not in keep_ids:
+                            if v.created_at < now - _SIX_MONTHS:
+                                total_month += 1
+                            elif v.created_at < now - _ONE_MONTH:
+                                total_week += 1
+                            else:
+                                total_day += 1
+
+                    _delete_versions(db, done_to_delete)
+                    log.debug(f"[nightly-cleanup] {label}: {len(done_to_delete)} versão(ões) done removida(s) por retenção")
+
+                # 3. Podar versões done sem alteração de conteúdo em relação à anterior
+                # (preserva a primeira de cada bloco idêntico e sempre a última done do label)
+                unchanged_to_delete = _prune_unchanged_versions(db, survivors)
+                if unchanged_to_delete:
+                    _delete_versions(db, unchanged_to_delete)
+                    total_unchanged += len(unchanged_to_delete)
+                    log.debug(f"[nightly-cleanup] {label}: {len(unchanged_to_delete)} versão(ões) sem alteração removida(s)")
+
+                if stale_to_delete or done_to_delete or unchanged_to_delete:
+                    labels_touched += 1
+            except Exception:
+                # Um label problemático não pode mais abortar a rotina inteira: antes,
+                # qualquer erro aqui propagava para o except externo e todos os labels
+                # seguintes (os rclone são os últimos criados, logo os últimos da fila)
+                # ficavam sem limpeza naquela noite, silenciosamente.
+                db.rollback()
+                labels_failed.append(label)
+                log.exception(
+                    f"[nightly-cleanup] erro ao limpar o label {label} — "
+                    f"seguindo para o próximo"
+                )
                 continue
-
-            done_versions  = [v for v in versions if v.status == "done"]
-            stale_versions = [v for v in versions if v.status in ("failed", "incomplete")]
-
-            # Conjunto de datas das versões done para comparação
-            done_dates = {v.created_at for v in done_versions}
-
-            # 1. Limpar stale (failed/incomplete) com mais de 1 semana que tenham done mais
-            # recente. A checagem de idade documentada desde a v5.2.0 nunca foi aplicada no
-            # código — sem ela, uma versão que falhou há minutos já sumia assim que qualquer
-            # backup seguinte no mesmo label concluía, o que atrapalha investigar falhas
-            # recentes (a versão failed é justamente o que se quer inspecionar logo depois).
-            _cutoff_stale = now - _ONE_WEEK
-            stale_to_delete: list[int] = []
-            for v in stale_versions:
-                if v.created_at < _cutoff_stale and any(d > v.created_at for d in done_dates):
-                    stale_to_delete.append(v.id)
-
-            if stale_to_delete:
-                _delete_versions(db, stale_to_delete)
-                total_stale += len(stale_to_delete)
-                log.debug(f"[nightly-cleanup] {label}: {len(stale_to_delete)} versão(ões) stale removida(s)")
-
-            # 2. Aplicar política de retenção nas versões done
-            if not done_versions:
-                continue
-
-            keep_ids = _versions_to_keep(done_versions, now)
-            done_to_delete = [v.id for v in done_versions if v.id not in keep_ids]
-            # Capturado antes de _delete_versions() abaixo: o commit() dela expira todos os
-            # objetos da sessão, e reacessar atributos de uma instância já deletada explode
-            # com ObjectDeletedError — então survivors precisa vir do keep_ids já calculado.
-            survivors = [v for v in done_versions if v.id in keep_ids]
-
-            if done_to_delete:
-                # Separar por período para contagem macro
-                for v in done_versions:
-                    if v.id not in keep_ids:
-                        if v.created_at < now - _SIX_MONTHS:
-                            total_month += 1
-                        elif v.created_at < now - _ONE_MONTH:
-                            total_week += 1
-                        else:
-                            total_day += 1
-
-                _delete_versions(db, done_to_delete)
-                log.debug(f"[nightly-cleanup] {label}: {len(done_to_delete)} versão(ões) done removida(s) por retenção")
-
-            # 3. Podar versões done sem alteração de conteúdo em relação à anterior
-            # (preserva a primeira de cada bloco idêntico e sempre a última done do label)
-            unchanged_to_delete = _prune_unchanged_versions(db, survivors)
-            if unchanged_to_delete:
-                _delete_versions(db, unchanged_to_delete)
-                total_unchanged += len(unchanged_to_delete)
-                log.debug(f"[nightly-cleanup] {label}: {len(unchanged_to_delete)} versão(ões) sem alteração removida(s)")
-
-            if stale_to_delete or done_to_delete or unchanged_to_delete:
-                labels_touched += 1
 
         total_removed = total_stale + total_day + total_week + total_month + total_unchanged
 
@@ -560,6 +577,16 @@ def run_nightly_cleanup() -> None:
             if total_stale_running else ""
         )
 
+        # Falha por label é visível no resumo: sem isto, um label que nunca é
+        # limpo (versões stale que não somem) não tem como ser percebido pela tela.
+        failed_note = (
+            f"; ATENÇÃO: {len(labels_failed)} label(s) com erro e sem limpeza "
+            f"({', '.join(labels_failed[:5])}"
+            + (f" +{len(labels_failed) - 5}" if len(labels_failed) > 5 else "")
+            + ") — ver logs do servidor"
+            if labels_failed else ""
+        )
+
         if total_removed:
             summary = (
                 f"{total_removed} versão(ões) removida(s) em {labels_touched} label(s)"
@@ -568,10 +595,12 @@ def run_nightly_cleanup() -> None:
                 + _tmp_note
                 + _integrity_note
                 + stale_running_note
+                + failed_note
             )
             log.info(f"[nightly-cleanup] {summary}")
         else:
-            summary = "Nenhuma versão removida — política de retenção satisfeita" + _tmp_note + _integrity_note + stale_running_note
+            summary = ("Nenhuma versão removida — política de retenção satisfeita"
+                       + _tmp_note + _integrity_note + stale_running_note + failed_note)
             log.info(f"[nightly-cleanup] {summary}")
 
         mj = db.get(MaintenanceJob, mj_id)
@@ -606,10 +635,15 @@ def run_nightly_cleanup() -> None:
         log.info("[nightly-cleanup] Backend não-SQLite — VACUUM ignorado")
     else:
         try:
-            raw = engine.raw_connection()
-            raw.isolation_level = None  # autocommit — VACUUM não pode rodar dentro de transação
-            raw.execute("VACUUM")
-            raw.close()
+            # AUTOCOMMIT pela API do SQLAlchemy, não mutando o driver: a versão
+            # anterior fazia `raw.isolation_level = None` numa conexão do pool e
+            # nunca restaurava o valor. A conexão voltava para o pool em
+            # autocommit permanente, e a partir daí qualquer sessão que a pegasse
+            # rodava sem transação — commit/rollback viravam no-op, inclusive o
+            # rollback de proteção de _cleanup_orphan_contents. execution_options
+            # restaura o nível original ao devolver a conexão ao pool.
+            with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+                conn.exec_driver_sql("VACUUM")
             log.info("[nightly-cleanup] VACUUM concluído — espaço em disco liberado")
         except Exception as exc:
             log.warning("[nightly-cleanup] Falha ao executar VACUUM (não crítico): %s", exc)
