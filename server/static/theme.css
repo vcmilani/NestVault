@@ -2,11 +2,13 @@
 :root {
   --bg:#0d0f0f; --bg2:#131616; --bg3:#1a1e1e;
   --border:#232929; --border2:#2e3636;
-  --text:#c8d0ce; --text-dim:#7e9898; --text-mute:#5e7878;
-  --amber:#e8a940; --amber-dim:#7a5520;
-  --green:#4ecb8d; --green-dim:#1d5a3d;
-  --red:#e05c5c; --red-dim:#5a2020;
-  --blue:#5ba4cf; --blue-dim:#1d3d54; --purple:#a78bfa;
+  /* text-mute e os *-dim são calibrados para 4.5:1 (WCAG AA, texto pequeno):
+     text-mute sobre bg/bg2/bg3, e cada *-dim como fundo do badge da sua cor. */
+  --text:#c8d0ce; --text-dim:#7e9898; --text-mute:#6c8a8a;
+  --amber:#e8a940; --amber-dim:#5e4119;
+  --green:#4ecb8d; --green-dim:#1a5137;
+  --red:#e05c5c; --red-dim:#3a1515;
+  --blue:#5ba4cf; --blue-dim:#1a374c; --purple:#a78bfa;
   /* Paleta de gráficos — validada para daltonismo (protan/deutan/tritan), ver skill dataviz */
   --chart-1:#3987e5; --chart-2:#d95926; --chart-3:#199e70;
   --mono:'IBM Plex Mono',monospace;
@@ -19,10 +21,12 @@ html[data-theme="light"] {
   --bg:#f5f6f5; --bg2:#eceeed; --bg3:#e2e5e3;
   --border:#cfd3d1; --border2:#b8bebc;
   --text:#1e2424; --text-dim:#394847; --text-mute:#536664;
-  --amber:#b87010; --amber-dim:#fce9c0;
-  --green:#1e7a4a; --green-dim:#c6edd9;
-  --red:#b83838; --red-dim:#fad8d8;
-  --blue:#3272a0; --blue-dim:#d0e6f5; --purple:#6642c0;
+  /* amber escurecido: 3.61:1 → 5.48:1 sobre --bg. Corrige de uma vez o texto
+     âmbar geral, o badge âmbar e o .login-btn (que pinta --bg sobre --amber). */
+  --amber:#8f570d; --amber-dim:#fce9c0;
+  --green:#1e7a4a; --green-dim:#cdf6e1;
+  --red:#b83838; --red-dim:#ffdcdc;
+  --blue:#3272a0; --blue-dim:#dcf3ff; --purple:#6642c0;
   --chart-1:#2a78d6; --chart-2:#eb6834; --chart-3:#1baf7a;
   --overlay-bg:rgba(245,246,245,.93);
 }

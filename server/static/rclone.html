@@ -16,9 +16,8 @@
 <link rel="stylesheet" href="/static/nav.css">
 <script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
 <style>
-  main{max-width:1300px}
 
-  .table-wrap{border:1px solid var(--border);margin-bottom:24px;animation:fadeUp .4s .1s ease both;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .table-wrap{margin-bottom:24px;animation-delay:.1s}
   table{width:100%;border-collapse:collapse}
   thead th{background:var(--bg3);padding:9px 14px;text-align:left;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);border-bottom:1px solid var(--border);white-space:nowrap}
   thead th:first-child{padding-left:18px}

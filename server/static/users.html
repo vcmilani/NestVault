@@ -16,12 +16,8 @@
 <link rel="stylesheet" href="/static/nav.css">
 <script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
 <style>
-  main{max-width:900px}
+  :root{--content-max:var(--w-narrow)}
 
-  .page-title{display:flex;align-items:center;gap:10px;margin-bottom:24px;animation:fadeUp .3s ease}
-  .page-title-icon{font-size:18px;color:var(--amber)}
-  .page-title-text{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--text)}
-  .page-title-sub{font-size:10px;color:var(--text-mute);letter-spacing:.08em;margin-top:2px}
 
   .new-user-card{border:1px solid var(--border);background:var(--bg2);padding:20px 24px;margin-bottom:24px;animation:fadeUp .4s ease both}
   .new-user-title{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim);margin-bottom:14px}

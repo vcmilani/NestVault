@@ -16,21 +16,10 @@
 <link rel="stylesheet" href="/static/nav.css">
 <script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
 <style>
-  main{max-width:1300px}
   .last-updated{font-size:10px}
 
   /* Stats bar */
-  .stats-bar{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;border:1px solid var(--border);margin-bottom:28px;background:var(--border)}
-  .stat-box{background:var(--bg2);padding:18px 22px;position:relative;overflow:hidden;animation:fadeUp .4s ease both}
-  .stat-box:nth-child(1){animation-delay:.05s}.stat-box:nth-child(2){animation-delay:.10s}
-  .stat-box:nth-child(3){animation-delay:.15s}.stat-box:nth-child(4){animation-delay:.20s}
-  .stat-box:nth-child(5){animation-delay:.25s}.stat-box:nth-child(6){animation-delay:.30s}
-  .stat-box:nth-child(7){animation-delay:.35s}.stat-box:nth-child(8){animation-delay:.40s}
-  .stat-box::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:var(--amber);transform:scaleX(0);transform-origin:left;transition:transform .3s}
-  .stat-box:hover::before{transform:scaleX(1)}
-  .stat-label{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim);margin-bottom:8px}
-  .stat-value{font-size:26px;font-weight:300;color:var(--amber);letter-spacing:-.02em;line-height:1}
-  .stat-sub{font-size:10px;color:var(--text-mute);margin-top:5px;letter-spacing:.04em}
+  /* .stats-bar usa o padrão de 4 colunas do app.css */
 
   /* Storage */
   .storage-wrap{border:1px solid var(--border);background:var(--bg2);padding:20px;margin-bottom:12px}
@@ -53,7 +42,6 @@
   .snum-sub{font-size:10px;color:var(--text-mute);margin-top:4px}
 
   /* Tables */
-  .table-wrap{border:1px solid var(--border);overflow-x:auto;-webkit-overflow-scrolling:touch;animation:fadeUp .35s ease both}
   table{width:100%;border-collapse:collapse}
   thead th{background:var(--bg3);padding:8px 14px;text-align:left;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);border-bottom:1px solid var(--border);white-space:nowrap}
   tbody tr{border-bottom:1px solid var(--border)}
@@ -140,11 +128,11 @@
   .badge-stale{background:rgba(245,176,65,.12);color:var(--amber);border:1px solid rgba(245,176,65,.35);border-radius:4px;padding:1px 6px;font-size:.75em;white-space:nowrap}
 
   @media(max-width:768px){
-    .stats-bar{grid-template-columns:repeat(2,1fr)}
+    .stats-bar{--cols:2}
     .storage-nums{grid-template-columns:1fr 1fr}
   }
   @media(max-width:480px){
-    .stats-bar{grid-template-columns:repeat(2,1fr)}
+    .stats-bar{--cols:2}
     .stat-box{padding:14px 12px}
     .stat-value{font-size:20px}
     .storage-nums{grid-template-columns:1fr 1fr}
