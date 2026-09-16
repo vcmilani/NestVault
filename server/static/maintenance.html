@@ -16,12 +16,7 @@
 <link rel="stylesheet" href="/static/nav.css">
 <script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
 <style>
-  main{max-width:1100px}
 
-  .page-title{display:flex;align-items:center;gap:10px;margin-bottom:8px;animation:fadeUp .3s ease}
-  .page-title-icon{font-size:18px;color:var(--amber)}
-  .page-title-text{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--text)}
-  .page-title-sub{font-size:10px;color:var(--text-mute);letter-spacing:.08em;margin-bottom:24px}
 
   .ops-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(460px,1fr));gap:16px}
 
@@ -198,9 +193,11 @@
 <main>
   <div class="page-title">
     <span class="page-title-icon">⚙</span>
-    <span class="page-title-text">Manutenção</span>
+    <div>
+      <div class="page-title-text">Manutenção</div>
+      <div class="page-title-sub">Operações administrativas de storage — execute com atenção</div>
+    </div>
   </div>
-  <div class="page-title-sub">Operações administrativas de storage — execute com atenção</div>
 
   <div class="ops-grid">
 
@@ -216,7 +213,7 @@
         </div>
         <span class="risk-badge medium">Médio risco</span>
       </div>
-      <div class="op-desc">Aplica a política de retenção progressiva em todas as versões: últimas 24h tudo é preservado; entre 1 dia e 1 mês, 1 versão <em>done</em> por dia; entre 1 e 6 meses, 1 por semana; acima de 6 meses, 1 por mês. Versões <em>failed/incomplete</em> são removidas imediatamente se houver versão <em>done</em> mais recente. Em seguida, remove versões <em>done</em> com conteúdo idêntico à anterior (mantendo a primeira de cada bloco igual e sempre a última versão do label). Executa automaticamente à meia-noite — use este botão para acionar manualmente.</div>
+      <div class="op-desc">Aplica a política de retenção progressiva em todas as versões: últimas 24h tudo é preservado; entre 1 dia e 1 mês, 1 versão <em>done</em> por dia; entre 1 e 6 meses, 1 por semana; acima de 6 meses, 1 por mês. Versões <em>failed/incomplete</em> são removidas assim que existir uma versão <em>done</em> mais recente (criada depois delas); a falha mais recente do label, sem nenhuma <em>done</em> posterior, é preservada. Em seguida, remove versões <em>done</em> com conteúdo idêntico à anterior (mantendo a primeira de cada bloco igual e sempre a última versão do label). Executa automaticamente à meia-noite — use este botão para acionar manualmente.</div>
       <div class="op-footer">
         <button class="run-btn" id="btn-nightly" onclick="runOp('nightly')">▶ Executar agora</button>
         <div class="op-result" id="result-nightly"></div>

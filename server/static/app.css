@@ -21,7 +21,8 @@ body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradi
 .spin{display:inline-block;animation:spin .8s linear infinite}
 
 /* Header */
-header{border-bottom:1px solid var(--border);padding:0 32px;display:flex;align-items:center;justify-content:space-between;height:56px;position:sticky;top:0;background:var(--bg);z-index:10}
+/* padding-inline do header é definido junto do layout base, logo abaixo */
+header{border-bottom:1px solid var(--border);padding-block:0;display:flex;align-items:center;justify-content:space-between;height:56px;position:sticky;top:0;background:var(--bg);z-index:10}
 .logo{display:flex;align-items:center;gap:12px}
 .logo-icon{width:28px;height:28px;border:1.5px solid var(--amber);display:grid;place-items:center;color:var(--amber);font-size:14px}
 .logo-text{font-size:12px;font-weight:500;letter-spacing:.12em;text-transform:uppercase}
@@ -40,8 +41,46 @@ header{border-bottom:1px solid var(--border);padding:0 32px;display:flex;align-i
 .small-btn.btn-run.is-running{border-color:var(--amber-dim);color:var(--amber);pointer-events:none}
 .small-btn.btn-danger:hover{border-color:var(--red);color:var(--red)}
 
-/* Layout base (max-width fica por página) */
-main{padding:28px 32px}
+/* ── Layout base ───────────────────────────────────────────────────────────
+   Uma única coluna centrada. A página escolhe o nível redefinindo
+   --content-max no seu <style> inline (só settings e users usam o estreito). */
+:root{
+  --w-wide:1440px;
+  --w-narrow:960px;
+  --content-max:var(--w-wide);
+  --gutter:32px;
+  --pad-y:28px;
+}
+main{max-width:var(--content-max);margin-inline:auto;padding:var(--pad-y) var(--gutter)}
+/* Header segue full-bleed (borda e fundo até as pontas), mas o conteúdo dele
+   alinha com a coluna do main. O 100% resolve contra a largura do body, que já
+   exclui a barra de rolagem — usar 100vw aqui desalinharia por ~15px. */
+header{padding-inline:max(var(--gutter),calc((100% - var(--content-max))/2 + var(--gutter)))}
+
+/* Título de página (disks, maintenance, settings, users) */
+.page-title{display:flex;align-items:center;gap:10px;margin-bottom:24px;animation:fadeUp .3s ease}
+.page-title-icon{font-size:18px;color:var(--amber)}
+.page-title-text{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--text)}
+.page-title-sub{font-size:10px;color:var(--text-mute);letter-spacing:.08em;margin-top:2px}
+
+/* Wrapper de tabela — rola na horizontal em vez de estourar o main.
+   A dica de gradiente no overflow vive em nav.css (.has-h-overflow::after).
+   Sem margin-bottom por padrão: em stats a tabela é seguida de uma legenda
+   colada. As páginas que precisam de respiro declaram a própria margem. */
+.table-wrap{position:relative;border:1px solid var(--border);overflow-x:auto;-webkit-overflow-scrolling:touch;animation:fadeUp .35s ease both}
+
+/* Barra de números do topo. A página define a contagem via .stats-bar{--cols:N} */
+.stats-bar{display:grid;grid-template-columns:repeat(var(--cols,4),1fr);gap:1px;border:1px solid var(--border);background:var(--border);margin-bottom:28px}
+.stat-box{background:var(--bg2);padding:18px 22px;position:relative;overflow:hidden;animation:fadeUp .4s ease both}
+.stat-box:nth-child(1){animation-delay:.05s}.stat-box:nth-child(2){animation-delay:.10s}
+.stat-box:nth-child(3){animation-delay:.15s}.stat-box:nth-child(4){animation-delay:.20s}
+.stat-box:nth-child(5){animation-delay:.25s}.stat-box:nth-child(6){animation-delay:.30s}
+.stat-box:nth-child(7){animation-delay:.35s}.stat-box:nth-child(8){animation-delay:.40s}
+.stat-box::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:var(--amber);transform:scaleX(0);transform-origin:left;transition:transform .3s}
+.stat-box:hover::before{transform:scaleX(1)}
+.stat-label{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim);margin-bottom:8px}
+.stat-value{font-size:26px;font-weight:300;color:var(--amber);letter-spacing:-.02em;line-height:1}
+.stat-sub{font-size:10px;color:var(--text-mute);margin-top:5px;letter-spacing:.04em}
 
 /* Seções */
 .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
@@ -97,6 +136,15 @@ main{padding:28px 32px}
 .nv-confirm-ok:hover:not(:disabled){background:var(--red);color:var(--bg)}
 .nv-confirm-ok:disabled{opacity:.35;cursor:not-allowed}
 
+/* Foco de teclado. Seletor de tipo + pseudo-classe = (0,1,1), que vence os
+   .classe{outline:none} (0,1,0) das páginas sem precisar editá-las uma a uma.
+   :focus-visible só dispara em navegação por teclado, não no clique do mouse. */
+a:focus-visible,button:focus-visible,input:focus-visible,
+select:focus-visible,textarea:focus-visible{
+  outline:2px solid var(--amber);
+  outline-offset:2px;
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar{width:6px;height:6px}
 ::-webkit-scrollbar-track{background:var(--bg)}
@@ -104,14 +152,13 @@ main{padding:28px 32px}
 
 /* Responsivo — regras comuns (grids específicos ficam por página) */
 @media(max-width:768px){
-  main{padding:16px}
-  header{padding:0 16px}
+  :root{--gutter:16px;--pad-y:16px}
   .hbtn{min-height:40px;padding:8px 12px}
   .small-btn{min-height:36px;padding:4px 8px}
   .login-overlay .login-input{font-size:16px}
 }
 @media(max-width:480px){
-  main{padding:12px 10px}
+  :root{--gutter:10px;--pad-y:12px}
   .hbtn{min-height:44px;font-size:12px}
   .small-btn{min-height:44px}
   .login-overlay .login-box{padding:28px 20px;max-height:calc(100vh - 32px);overflow-y:auto}

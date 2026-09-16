@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v9.1.0`
+# 🗄️ NestVault  `v9.1.2`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **backup por usuário** — cada conta só cria, lista e restaura seus próprios backups.
 
@@ -1368,6 +1368,8 @@ http://<ip-da-pi>:8000/
 Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Para trocar, clique em **⌀ API Key** no header.
 
 > **v7.9 — dashboard é admin-only.** O painel web (stats, discos, manutenção, atividade, rclone, usuários) exige uma chave com `role=admin`; uma chave de usuário comum recebe a tela de login novamente com "Esta chave não tem permissão de administrador." O caminho de backup/restore do usuário comum é o CLI (`nestvault.py`), cuja API (`/backups`, `/files`, etc.) já é escopada por dono.
+
+> **v9.1.1 — layout e leitura.** Todas as telas usam a mesma coluna centrada, em duas larguras: 1440px nas páginas de dados e 960px em Configurações e Usuários, que são formulários. O cabeçalho ocupa a largura toda mas alinha os botões com a borda do conteúdo, então a coluna não muda de posição ao navegar. As cores foram calibradas para atender WCAG AA em texto pequeno nos dois temas — inclusive os badges de status, que antes não passavam em nenhum —, e a navegação por `Tab` passa a mostrar um anel de foco visível.
 
 **O que o dashboard exibe:**
 
