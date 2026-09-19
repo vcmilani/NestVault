@@ -134,3 +134,28 @@ def test_cache_dir_windows_uses_localappdata(monkeypatch):
     monkeypatch.setattr(nestvault.sys, "platform", "win32")
     monkeypatch.setenv("LOCALAPPDATA", "C:\\Users\\test\\AppData\\Local")
     assert nestvault._local_cache_dir() == nestvault.Path("C:\\Users\\test\\AppData\\Local") / "nestvault"
+
+
+# -- varredura com --exclude -----------------------------------------------------
+
+def test_scan_prunes_excluded_dirs(tmp_path, monkeypatch):
+    for rel in ("a.txt", "node_modules/x/y.js", "sub/node_modules/z.js",
+                "sub/keep.txt", "sub/cache.txt"):
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x")
+
+    visited = []
+    real_walk = nestvault.os.walk
+
+    def spy_walk(*args, **kwargs):
+        for dirpath, dirnames, filenames in real_walk(*args, **kwargs):
+            visited.append(dirpath)
+            yield dirpath, dirnames, filenames
+
+    monkeypatch.setattr(nestvault.os, "walk", spy_walk)
+    nestvault.backup_directory(tmp_path, "t", dry_run=True,
+                               exclude=["node_modules", "cache.txt"])
+
+    assert visited
+    assert not any("node_modules" in d for d in visited)

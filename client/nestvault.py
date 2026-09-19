@@ -50,7 +50,7 @@ Changelog (cliente — histórico completo do sistema no README):
         reconciliação de replicação (reconcile-replication).
 """
 
-VERSION = "v9.1.2"
+VERSION = "v9.1.3"
 
 import os, sys, hashlib, argparse, base64, json, socket, threading, time
 from pathlib import Path
@@ -204,13 +204,6 @@ def fmt_size(size: int) -> str:
 
 def now_key() -> str:
     return datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S")
-
-
-def _is_excluded(fp: Path, root: Path, ex: str) -> bool:
-    try:
-        return ex in fp.relative_to(root).parts
-    except ValueError:
-        return False
 
 
 # -- HTTP session -------------------------------------------------------------
@@ -666,6 +659,7 @@ def backup_directory(
     # a árvore inteira numa lista extra e ordenar globalmente no final.
     pending = []
     n_dirs = 0
+    exclude_set = set(exclude or [])
     with _scan_progress() as scan_progress:
         scan_task = scan_progress.add_task("Varrendo…", total=None)
         for dirpath, dirnames, filenames in os.walk(root, onerror=lambda e: _dim(f"Aviso: {e}")):
@@ -682,14 +676,16 @@ def backup_directory(
                 )
 
             _show_scan()
-            dirnames.sort()
+            # Poda in-place: pastas do --exclude (e tudo abaixo delas) nem são
+            # lidas, em vez de percorridas inteiras e filtradas arquivo a arquivo.
+            dirnames[:] = sorted(d for d in dirnames if d not in exclude_set)
             for i, name in enumerate(sorted(filenames), 1):
                 if i % 1000 == 0:
                     _show_scan()
-                fp = Path(dirpath) / name
-                if not fp.is_file() or fp.name in IGNORED_NAMES:
+                if name in IGNORED_NAMES or name in exclude_set:
                     continue
-                if any(_is_excluded(fp, root, ex) for ex in (exclude or [])):
+                fp = Path(dirpath) / name
+                if not fp.is_file():
                     continue
                 op = str(fp) if not path_prefix else str(Path(path_prefix) / fp.relative_to(root))
                 pending.append((fp, op))
