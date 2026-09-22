@@ -136,6 +136,11 @@ class BackupVersion(Base):
     # Checkpoint de progresso para jobs rclone resumíveis: JSON com
     # {"done_dirs": [...]} dos diretórios já totalmente processados.
     progress_json  = Column(Text, nullable=True)
+    # NULL = íntegra; "suspect" = referencia FileContent em quarentena.
+    # Coluna própria, e não um valor novo em `status`: a limpeza noturna apaga
+    # versões failed/incomplete, e todo o resto do código filtra status == "done".
+    # Marcar a suspeita aqui não muda a visibilidade nem a retenção da versão.
+    integrity_status = Column(String, nullable=True)
 
     backup = relationship("BackupID", back_populates="versions")
     files  = relationship("VersionFile", back_populates="version", lazy="dynamic",
@@ -150,6 +155,12 @@ class FileContent(Base):
     size       = Column(BigInteger, nullable=False)
     encrypted  = Column(Boolean, nullable=False, default=False, server_default="0")
     created_at = Column(DateTime, default=_now)
+    # Quarentena: a validação de integridade provou que o arquivo sumiu de todos
+    # os volumes confiáveis. A linha é PRESERVADA — apagá-la torna a perda
+    # irreversível, porque toda reconciliação (rereplicate_*, backfill) parte
+    # daqui e nada varre _content/ para reconstruir o índice.
+    quarantined_at   = Column(DateTime, nullable=True)
+    quarantine_reason = Column(Text, nullable=True)
 
     refs = relationship("VersionFile", back_populates="content", lazy="dynamic")
 
@@ -376,6 +387,27 @@ def init_db():
             conn.commit()
             _log_init.info("[db-migrate] Coluna maintenance_jobs.bytes_freed adicionada")
             _backfill_bytes_freed(conn, _log_init)
+
+    # Quarentena de integridade. Todas nullable e sem default, então o ALTER é
+    # barato em tabela grande e bancos antigos já nascem com tudo NULL = íntegro.
+    for _table, _col, _type in (
+        ("file_contents",   "quarantined_at",    "TIMESTAMP"),
+        ("file_contents",   "quarantine_reason", "TEXT"),
+        ("backup_versions", "integrity_status",  "TEXT"),
+    ):
+        with engine.connect() as conn:
+            try:
+                if engine.dialect.name == "sqlite":
+                    conn.execute(text(f"ALTER TABLE {_table} ADD COLUMN {_col} {_type}"))
+                else:
+                    conn.execute(text(
+                        f"ALTER TABLE {_table} ADD COLUMN IF NOT EXISTS {_col} {_type}"
+                    ))
+                conn.commit()
+                _log_init.info(f"[db-migrate] Coluna {_table}.{_col} garantida")
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
 
     # Demais migrações manuais apenas para SQLite — no PostgreSQL o schema é
     # criado via create_all (bancos novos) ou migração externa.

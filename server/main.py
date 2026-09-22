@@ -1,5 +1,5 @@
 """
-NestVault  v9.1.3
+NestVault  v9.2.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -405,32 +405,15 @@ def _cleanup_stale_running_states():
     finally:
         db.close()
 
-    import shutil as _shutil
-    from nightly_cleanup import _TMP_PREFIXES, _TMP_DIR_PREFIXES
-    for vol in storage.tmp_sweep_dirs():
-        # "_enc_*" (cifragem de upload/encrypt-existing/rclone) é criado dentro de
-        # _content/<2-hex>/, não na raiz do volume — sem isso um crash durante a
-        # cifragem deixava lixo permanente ali, nunca varrido no startup.
-        tmp_candidates = list(vol.glob("_content/*/_enc_*"))
-        for prefix in _TMP_PREFIXES:
-            tmp_candidates += list(vol.glob(f"{prefix}*"))
-        for f in tmp_candidates:
-            if f.is_file():
-                try:
-                    f.unlink()
-                    log.info(f"[startup] arquivo temporário órfão removido: {f.name}")
-                except OSError as e:
-                    log.warning(f"[startup] não foi possível remover {f}: {e}")
-        for prefix in _TMP_DIR_PREFIXES:
-            for d in vol.glob(f"{prefix}*"):
-                try:
-                    if d.is_dir():
-                        _shutil.rmtree(d, ignore_errors=True)
-                    else:
-                        d.unlink()
-                    log.info(f"[startup] staging temporário órfão removido: {d.name}")
-                except OSError as e:
-                    log.warning(f"[startup] não foi possível remover {d}: {e}")
+    # Sem cutoff de idade: no startup nada está em voo, então todo temporário é
+    # lixo. Reusa a varredura da limpeza noturna em vez de duplicá-la — e com
+    # isso herda o isolamento por volume e os logs de listagem que falha.
+    from nightly_cleanup import _cleanup_stale_tmp_files
+    _n, _b, _failed = _cleanup_stale_tmp_files(storage.tmp_sweep_dirs(), max_age_hours=0)
+    if _n:
+        log.info(f"[startup] {_n} temporário(s) órfão(s) removido(s) ({storage.fmt_bytes(_b)})")
+    if _failed:
+        log.warning(f"[startup] varredura de temporários falhou em: {', '.join(_failed)}")
 
 
 def _backup_labels_for_sha256s(db, sha256s: list[str]) -> list[str]:
@@ -604,7 +587,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="9.1.3", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="9.2.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
@@ -852,9 +835,10 @@ class EncryptExistingResponse(BaseModel):
 
 class ValidateIntegrityResponse(BaseModel):
     checked: int
-    invalidated: int
-    files_removed: int
+    quarantined: int
     labels: list[str]
+    skipped: bool = False
+    untrusted: list[str] = []
 
 class MigrateDiskRequest(BaseModel):
     source: str
@@ -3971,13 +3955,19 @@ def _bg_validate_integrity(job_id: int) -> None:
         if mj:
             mj.status = "done"
             mj.finished_at = datetime.now()
-            parts = [f"{result['checked']} versão(ões) verificada(s)"]
-            if result["invalidated"]:
-                parts.append(f"{result['invalidated']} invalidada(s): {', '.join(result['labels'])}")
+            if result.get("skipped"):
+                parts = ["PULADA — volume(s) não confiável(is): "
+                         + ", ".join(result.get("untrusted") or ["?"]),
+                         "nenhum conteúdo foi avaliado"]
             else:
-                parts.append("nenhuma invalidada")
-            if result["files_removed"]:
-                parts.append(f"{result['files_removed']} arquivo(s) removido(s)")
+                parts = [f"{result['checked']} versão(ões) verificada(s)"]
+                if result["quarantined"]:
+                    parts.append(
+                        f"{result['quarantined']} conteúdo(s) em quarentena "
+                        f"({', '.join(result['labels'])}) — nada foi apagado"
+                    )
+                else:
+                    parts.append("nenhum conteúdo em quarentena")
             mj.summary = " — ".join(parts)
             db.commit()
     except Exception as e:
@@ -3995,7 +3985,7 @@ def _bg_validate_integrity(job_id: int) -> None:
 
 @app.post("/maintenance/validate-integrity", dependencies=[Depends(require_admin)])
 def validate_integrity(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    """Verifica se os arquivos das últimas versões done existem no disco; invalida e limpa registros ausentes."""
+    """Verifica se os arquivos das últimas versões done existem no disco; põe os ausentes em quarentena."""
     mj = MaintenanceJob(
         job_type="validate-integrity",
         status="running",
@@ -4006,6 +3996,98 @@ def validate_integrity(background_tasks: BackgroundTasks, db: Session = Depends(
     db.refresh(mj)
     background_tasks.add_task(_bg_validate_integrity, mj.id)
     return {"scheduled": True, "job_id": mj.id}
+
+
+@app.get("/maintenance/quarantine", dependencies=[Depends(require_admin)])
+def list_quarantine(db: Session = Depends(get_db)):
+    """Conteúdos que a validação de integridade não encontrou no disco.
+
+    Ficam aqui em vez de serem apagados: enquanto a linha existir, remontar o
+    disco ou rodar tools/rebuild_content_index.py readota o arquivo. Apagar é
+    ação explícita do admin (POST .../quarantine/purge).
+    """
+    rows = (
+        db.query(FileContent)
+        .filter(FileContent.quarantined_at.isnot(None))
+        .order_by(FileContent.quarantined_at.desc())
+        .limit(500)
+        .all()
+    )
+    items = []
+    for fc in rows:
+        labels = sorted({
+            r[0] for r in db.query(BackupVersion.backup_label)
+            .join(VersionFile, VersionFile.version_id == BackupVersion.id)
+            .filter(VersionFile.sha256 == fc.sha256)
+            .distinct().all()
+        })
+        items.append({
+            "sha256": fc.sha256,
+            "size": fc.size,
+            "quarantined_at": fc.quarantined_at.isoformat() if fc.quarantined_at else None,
+            "reason": fc.quarantine_reason,
+            "labels": labels,
+        })
+    total = (
+        db.query(func.count(FileContent.sha256))
+        .filter(FileContent.quarantined_at.isnot(None)).scalar()
+    ) or 0
+    suspect_versions = (
+        db.query(func.count(BackupVersion.id))
+        .filter(BackupVersion.integrity_status == "suspect").scalar()
+    ) or 0
+    return {"total": total, "suspect_versions": suspect_versions, "items": items}
+
+
+@app.post("/maintenance/quarantine/purge", dependencies=[Depends(require_admin)])
+def purge_quarantine(db: Session = Depends(get_db)):
+    """Apaga definitivamente os conteúdos em quarentena e seus VersionFiles.
+
+    É o que a validação de integridade fazia sozinha, de madrugada, a partir de
+    um Path.exists() que não distinguia "apagado" de "disco fora do ar". Agora
+    exige um humano que já viu a lista.
+    """
+    shas = [
+        r[0] for r in db.query(FileContent.sha256)
+        .filter(FileContent.quarantined_at.isnot(None)).all()
+    ]
+    if not shas:
+        return {"purged": 0, "versions_failed": 0}
+
+    affected_ids: set[int] = set()
+    for sha in shas:
+        affected_ids.update(
+            r[0] for r in db.query(VersionFile.version_id)
+            .filter(VersionFile.sha256 == sha).distinct().all()
+        )
+        for c in db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha).all():
+            try:
+                Path(c.stored_at).unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                log.warning(f"[quarantine-purge] não foi possível remover {c.stored_at}: {e}")
+        db.query(VersionFile).filter(VersionFile.sha256 == sha).delete(synchronize_session=False)
+        db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha).delete(synchronize_session=False)
+        db.query(FileContent).filter(FileContent.sha256 == sha).delete(synchronize_session=False)
+
+    versions = (
+        db.query(BackupVersion)
+        .filter(BackupVersion.id.in_(affected_ids), BackupVersion.status == "done")
+        .all()
+    )
+    for v in versions:
+        v.status = "failed"
+        v.finished_at = datetime.now()
+        v.integrity_status = None
+    db.commit()
+
+    log.warning(
+        f"[quarantine-purge] {len(shas)} conteúdo(s) apagado(s) definitivamente; "
+        f"{len(versions)} versão(ões) marcada(s) como failed"
+    )
+    invalidate_activity()
+    return {"purged": len(shas), "versions_failed": len(versions)}
 
 
 def _bg_run_db_backup() -> None:

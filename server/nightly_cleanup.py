@@ -2,6 +2,7 @@
 
 import hashlib
 import logging
+import os
 import shutil
 import time
 from datetime import datetime, timedelta
@@ -140,48 +141,86 @@ def _cleanup_orphan_contents(db, limit: int | None = None) -> tuple[int, int]:
     return removed, bytes_freed
 
 
-def _cleanup_stale_tmp_files(volumes: list[Path], max_age_hours: float = 24.0) -> tuple[int, int]:
-    """Remove arquivos temporários órfãos com mais de max_age_hours horas. Retorna (removidos, bytes_liberados)."""
+def _safe_glob(vol: Path, pattern: str) -> list[Path]:
+    """vol.glob(pattern) que NÃO falha em silêncio.
+
+    Path.glob engole o OSError do scandir por baixo: um volume desmontado ou
+    com diretório ilegível rendia zero candidatos e zero linhas de log, e o
+    resumo da noite ficava idêntico ao de uma varredura saudável.
+    """
+    try:
+        return list(vol.glob(pattern))
+    except OSError as e:
+        log.warning(f"[cleanup-tmp] não foi possível listar {vol}/{pattern}: {e}")
+        raise
+
+
+def _cleanup_stale_tmp_files(volumes: list[Path], max_age_hours: float = 24.0) -> tuple[int, int, list[str]]:
+    """Remove arquivos temporários órfãos com mais de max_age_hours horas.
+
+    Retorna (removidos, bytes_liberados, volumes_que_falharam). Cada volume é
+    isolado: um disco com problema não aborta a varredura dos outros nem
+    derruba o job inteiro — mesma razão do isolamento por label em
+    run_nightly_cleanup (um label ruim não pode impedir a limpeza dos demais).
+    """
     cutoff = time.time() - max_age_hours * 3600
     removed = 0
     bytes_freed = 0
+    volumes_failed: list[str] = []
     for vol in volumes:
-        # "_enc_*" (cifragem de upload/encrypt-existing/rclone) é criado dentro de
-        # _content/<2-hex>/, não na raiz do volume — glob(f"{prefix}*") sozinho nunca via
-        # esses arquivos, então um crash durante a cifragem deixava lixo permanente ali.
-        candidates = list(vol.glob("_content/*/_enc_*"))
-        for prefix in _TMP_PREFIXES:
-            candidates += list(vol.glob(f"{prefix}*"))
-        for f in candidates:
-            if not f.is_file():
-                continue
+        try:
+            r, b = _sweep_one_volume(vol, cutoff)
+            removed += r
+            bytes_freed += b
+        except Exception as e:
+            log.exception(f"[cleanup-tmp] volume {vol} falhou — seguindo para o próximo")
+            volumes_failed.append(f"{vol} ({e.__class__.__name__})")
+    return removed, bytes_freed, volumes_failed
+
+
+def _sweep_one_volume(vol: Path, cutoff: float) -> tuple[int, int]:
+    """Varre um único volume. Levanta se a listagem falhar (o caller isola)."""
+    removed = 0
+    bytes_freed = 0
+
+    # "_enc_*" (cifragem de upload/encrypt-existing/rclone) é criado dentro de
+    # _content/<2-hex>/, não na raiz do volume — glob(f"{prefix}*") sozinho nunca via
+    # esses arquivos, então um crash durante a cifragem deixava lixo permanente ali.
+    candidates = _safe_glob(vol, "_content/*/_enc_*")
+    for prefix in _TMP_PREFIXES:
+        candidates += _safe_glob(vol, f"{prefix}*")
+    for f in candidates:
+        if not f.is_file():
+            continue
+        try:
+            st = f.stat()
+            if st.st_mtime < cutoff:
+                bytes_freed += st.st_size
+                f.unlink()
+                removed += 1
+                log.info(f"[cleanup-tmp] removido {f.name} ({st.st_size} bytes)")
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            log.warning(f"[cleanup-tmp] não foi possível remover {f}: {e}")
+
+    # Diretórios de staging órfãos (e o arquivo-sidecar .files de mesmo prefixo).
+    for prefix in _TMP_DIR_PREFIXES:
+        for d in _safe_glob(vol, f"{prefix}*"):
             try:
-                st = f.stat()
-                if st.st_mtime < cutoff:
-                    bytes_freed += st.st_size
-                    f.unlink()
-                    removed += 1
-                    log.info(f"[cleanup-tmp] removido {f.name} ({st.st_size} bytes)")
+                if d.stat().st_mtime >= cutoff:
+                    continue
+                if d.is_dir():
+                    shutil.rmtree(d, ignore_errors=True)
+                else:
+                    d.unlink()
+                removed += 1
+                log.info(f"[cleanup-tmp] staging órfão removido: {d.name}")
             except FileNotFoundError:
                 pass
             except OSError as e:
-                log.warning(f"[cleanup-tmp] não foi possível remover {f}: {e}")
-        # Diretórios de staging órfãos (e o arquivo-sidecar .files de mesmo prefixo).
-        for prefix in _TMP_DIR_PREFIXES:
-            for d in vol.glob(f"{prefix}*"):
-                try:
-                    if d.stat().st_mtime >= cutoff:
-                        continue
-                    if d.is_dir():
-                        shutil.rmtree(d, ignore_errors=True)
-                    else:
-                        d.unlink()
-                    removed += 1
-                    log.info(f"[cleanup-tmp] staging órfão removido: {d.name}")
-                except FileNotFoundError:
-                    pass
-                except OSError as e:
-                    log.warning(f"[cleanup-tmp] não foi possível remover {d}: {e}")
+                log.warning(f"[cleanup-tmp] não foi possível remover {d}: {e}")
+
     return removed, bytes_freed
 
 
@@ -264,15 +303,63 @@ def _prune_unchanged_versions(db, done_versions: list[BackupVersion]) -> list[in
     return to_delete
 
 
-def validate_latest_versions_integrity(db, log_fn=None) -> dict:
-    """Verifica se todos os arquivos das últimas versões 'done' existem no disco.
-    Remove registros de arquivos ausentes e invalida versões afetadas.
+PRESENT, MISSING, UNKNOWN = "present", "missing", "unknown"
+
+
+def untrusted_volumes(db) -> list[Path]:
+    """Volumes cuja resposta 'esse arquivo não existe' NÃO pode ser levada a sério.
+
+    Duas fontes: os degradados (statvfs falhou) e os que o banco diz conter
+    cópias mas não mostram nenhuma (storage.volume_looks_sane). Refresca a
+    saúde antes de ler o set — run_nightly_cleanup roda às 00:00 e, sem isto,
+    _degraded_volumes pode estar horas obsoleto: safe_disk_usage é o único
+    writer do set, e o caminho de limpeza nunca o chamava.
+    """
+    import storage
+
+    bad: list[Path] = []
+    for v in storage.STORAGE_VOLUMES:
+        storage.safe_disk_usage(v)          # atualiza _degraded_volumes
+        if v in storage._degraded_volumes:
+            bad.append(v)
+        elif not storage.volume_looks_sane(v, db):
+            bad.append(v)
+    return bad
+
+
+def validate_latest_versions_integrity(db, log_fn=None, untrusted=None) -> dict:
+    """Verifica se os arquivos das últimas versões 'done' existem no disco.
+
+    Coloca em QUARENTENA (sem apagar nada) os conteúdos cuja ausência foi
+    provada, e marca as versões afetadas com integrity_status='suspect'.
+
+    A versão anterior desta função apagava VersionFile + FileContentCopy +
+    FileContent e marcava as versões como 'failed', tudo a partir de um
+    Path.exists() — que engole OSError e devolve False tanto para "apagado"
+    quanto para "volume fora do ar". Um disco desmontado às 00:00 destruía
+    assim as linhas das réplicas BOAS em discos saudáveis, e como toda
+    reconciliação parte de FileContent, remontar o disco não restaurava nada.
+
     log_fn(msg) é chamado em cada evento relevante para reportar progresso em tempo real."""
 
     def _log(msg: str) -> None:
         log.info(msg)
         if log_fn:
             log_fn(msg)
+
+    if untrusted is None:
+        untrusted = untrusted_volumes(db)
+    untrusted_str = {str(v) for v in untrusted}
+    if untrusted_str:
+        # Com um volume fora do ar não dá para provar a ausência de NADA: a
+        # cópia sobrevivente pode estar justamente nele. Melhor não verificar
+        # do que verificar errado e destruir metadados.
+        msg = ("[integrity] PULADA — volume(s) não confiável(is): "
+               + ", ".join(sorted(untrusted_str))
+               + ". Nenhum conteúdo foi avaliado.")
+        _log(msg)
+        return {"checked": 0, "quarantined": 0, "invalidated": 0, "files_removed": 0,
+                "labels": [], "skipped": True, "untrusted": sorted(untrusted_str)}
 
     max_ts_sq = (
         db.query(
@@ -298,22 +385,58 @@ def validate_latest_versions_integrity(db, log_fn=None) -> dict:
     _log(f"[integrity] {total} label(s) para verificar")
 
     checked = 0
-    invalidated = 0
-    files_removed = 0
+    quarantined = 0
     labels: list[str] = []
-    exists_cache: dict[str, bool] = {}
+    state_cache: dict[str, str] = {}
 
-    def _exists(sha256: str) -> bool:
-        if sha256 in exists_cache:
-            return exists_cache[sha256]
+    def _probe(path: str) -> str:
+        """PRESENT / MISSING / UNKNOWN para um caminho.
+
+        Path.exists() não serve aqui: ele engole todo OSError e colapsa
+        "não existe" com "não deu para perguntar". os.stat separa os dois —
+        só FileNotFoundError (ENOENT) é prova de ausência; EIO, ENODEV,
+        EACCES e afins são desconhecimento, não evidência.
+        """
+        try:
+            os.stat(path)
+            return PRESENT
+        except FileNotFoundError:
+            return MISSING
+        except OSError as e:
+            log.warning(f"[integrity] {path} ilegível ({e.__class__.__name__}: {e}) — tratado como desconhecido")
+            return UNKNOWN
+
+    def _content_state(sha256: str) -> str:
+        """Estado agregado das cópias de um conteúdo.
+
+        PRESENT se QUALQUER cópia existe. MISSING só se TODAS as cópias
+        responderam ENOENT — uma única UNKNOWN já invalida a conclusão.
+        """
+        if sha256 in state_cache:
+            return state_cache[sha256]
+
+        paths: list[str] = []
         fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
-        if fc and Path(fc.stored_at).exists():
-            exists_cache[sha256] = True
-            return True
-        copies = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).all()
-        found = any(Path(c.stored_at).exists() for c in copies)
-        exists_cache[sha256] = found
-        return found
+        if fc:
+            paths.append(fc.stored_at)
+        paths += [
+            r[0] for r in db.query(FileContentCopy.stored_at)
+            .filter(FileContentCopy.sha256 == sha256).all()
+        ]
+
+        if not paths:
+            state = MISSING
+        else:
+            states = {_probe(p) for p in dict.fromkeys(paths)}
+            if PRESENT in states:
+                state = PRESENT
+            elif UNKNOWN in states:
+                state = UNKNOWN
+            else:
+                state = MISSING
+
+        state_cache[sha256] = state
+        return state
 
     for version in latest_versions:
         checked += 1
@@ -325,13 +448,23 @@ def validate_latest_versions_integrity(db, log_fn=None) -> dict:
             .distinct()
             .all()
         ]
-        missing = [s for s in sha256s if not _exists(s)]
+        states = {s: _content_state(s) for s in sha256s}
+        missing = [s for s, st in states.items() if st == MISSING]
+        unknown = [s for s, st in states.items() if st == UNKNOWN]
+
+        if unknown:
+            _log(f"[integrity] ({checked}/{total}) {version.backup_label}/{version.version_key} — "
+                 f"{len(unknown)} arquivo(s) não verificável(is) (I/O); nada foi alterado")
         if not missing:
-            _log(f"[integrity] ({checked}/{total}) {version.backup_label}/{version.version_key} — OK ({len(sha256s)} arquivo(s))")
+            if not unknown:
+                _log(f"[integrity] ({checked}/{total}) {version.backup_label}/{version.version_key} — OK ({len(sha256s)} arquivo(s))")
             continue
 
-        # Coleta todas as versões que referenciam os arquivos ausentes ANTES de deletar
+        # Quarentena, não deleção. Preserva FileContent/FileContentCopy/VersionFile
+        # para que a perda seja reversível: remontar o disco ou rodar
+        # tools/rebuild_content_index.py readota as cópias a partir destas linhas.
         affected_ids: set[int] = set()
+        now = datetime.now()
         for sha256 in missing:
             ids = [
                 r[0] for r in db.query(VersionFile.version_id)
@@ -340,32 +473,32 @@ def validate_latest_versions_integrity(db, log_fn=None) -> dict:
                 .all()
             ]
             affected_ids.update(ids)
-            db.query(VersionFile).filter(VersionFile.sha256 == sha256).delete(synchronize_session=False)
-            db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).delete(synchronize_session=False)
-            db.query(FileContent).filter(FileContent.sha256 == sha256).delete(synchronize_session=False)
-            files_removed += 1
-            _log(f"[integrity] {sha256[:8]}… removido do banco (arquivo ausente no disco)")
+            fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+            if fc and fc.quarantined_at is None:
+                fc.quarantined_at = now
+                fc.quarantine_reason = "ausente em todos os volumes confiáveis"
+                quarantined += 1
+                _log(f"[integrity] {sha256[:8]}… em QUARENTENA (ausente no disco; registros preservados)")
 
-        # Invalida todas as versões afetadas (não só a latest)
         affected_versions = (
             db.query(BackupVersion)
             .filter(BackupVersion.id.in_(affected_ids), BackupVersion.status == "done")
             .all()
         )
         for av in affected_versions:
-            av.status = "failed"
-            av.finished_at = datetime.now()
-            invalidated += 1
-            if av.backup_label not in labels:
-                labels.append(av.backup_label)
-            _log(
-                f"[integrity] versão {av.backup_label}/{av.version_key} "
-                f"invalidada — arquivo(s) ausente(s) no disco"
-            )
+            if av.integrity_status != "suspect":
+                av.integrity_status = "suspect"
+                if av.backup_label not in labels:
+                    labels.append(av.backup_label)
+                _log(
+                    f"[integrity] versão {av.backup_label}/{av.version_key} "
+                    f"marcada como suspeita — arquivo(s) ausente(s) no disco"
+                )
         db.commit()
 
-    _log(f"[integrity] concluído: {checked} verificadas, {invalidated} invalidadas, {files_removed} arquivo(s) removidos")
-    return {"checked": checked, "invalidated": invalidated, "files_removed": files_removed, "labels": labels}
+    _log(f"[integrity] concluído: {checked} verificadas, {quarantined} conteúdo(s) em quarentena")
+    return {"checked": checked, "quarantined": quarantined, "invalidated": 0,
+            "files_removed": 0, "labels": labels, "skipped": False, "untrusted": []}
 
 
 def run_nightly_cleanup() -> None:
@@ -535,30 +668,59 @@ def run_nightly_cleanup() -> None:
             mj.summary = "Limpando arquivos temporários órfãos..."
             db.commit()
             invalidate_activity()
-        from storage import tmp_sweep_dirs
-        tmp_removed, tmp_bytes = _cleanup_stale_tmp_files(tmp_sweep_dirs(), max_age_hours=24.0)
+        # Volumes não confiáveis são apurados uma vez e reusados pelas duas fases
+        # seguintes: varrer ou julgar ausência num disco fora do ar é o que
+        # destruía metadados.
+        untrusted = untrusted_volumes(db)
+        untrusted_str = {str(v) for v in untrusted}
 
-        # Validação de integridade das últimas versões done
+        from storage import tmp_sweep_dirs
+        sweep_dirs = [d for d in tmp_sweep_dirs() if str(d) not in untrusted_str]
+        tmp_removed, tmp_bytes, tmp_failed = _cleanup_stale_tmp_files(sweep_dirs, max_age_hours=24.0)
+
+        # Validação de integridade das últimas versões done.
+        # Fases 5 e 6 envolvidas em try/except próprios: antes, qualquer erro
+        # aqui subia para o except externo, marcava o job failed e dava raise —
+        # e o VACUUM, que fica DEPOIS do try, nunca rodava.
         mj = db.get(MaintenanceJob, mj_id)
         if mj:
             mj.summary = "Verificando integridade das últimas versões..."
             db.commit()
             invalidate_activity()
-        integrity = validate_latest_versions_integrity(db)
-        if integrity["invalidated"]:
+        try:
+            integrity = validate_latest_versions_integrity(db, untrusted=untrusted)
+            _integrity_err = ""
+        except Exception as e:
+            db.rollback()
+            log.exception("[nightly-cleanup] erro na validação de integridade — demais fases preservadas")
+            integrity = {"checked": 0, "quarantined": 0, "labels": [], "skipped": True, "untrusted": []}
+            _integrity_err = f"; ATENÇÃO: integridade falhou ({e.__class__.__name__}) — ver logs"
+
+        if integrity.get("skipped") and integrity.get("untrusted"):
             _integrity_note = (
-                f"; integridade: {integrity['invalidated']}/{integrity['checked']} "
-                f"versões invalidadas, {integrity['files_removed']} arquivo(s) removido(s)"
+                "; ATENÇÃO: integridade PULADA — volume(s) não confiável(is): "
+                + ", ".join(integrity["untrusted"])
+            )
+        elif integrity["quarantined"]:
+            _integrity_note = (
+                f"; integridade: {integrity['quarantined']} conteúdo(s) em quarentena "
+                f"em {integrity['checked']} versão(ões) verificada(s) "
+                f"({', '.join(integrity['labels'][:5])}) — nada foi apagado"
             )
         elif integrity["checked"] > 0:
             _integrity_note = f"; integridade: {integrity['checked']} versões OK"
         else:
             _integrity_note = ""
+        _integrity_note += _integrity_err
 
         _tmp_note = (
             f"; {tmp_removed} arquivo(s) temporário(s) removido(s) ({round(tmp_bytes/1024/1024, 1)} MB)"
             if tmp_removed else ""
         )
+        if tmp_failed:
+            _tmp_note += f"; ATENÇÃO: varredura de temporários falhou em {', '.join(tmp_failed)}"
+        if untrusted_str:
+            _tmp_note += f"; volume(s) pulado(s) por não confiabilidade: {', '.join(sorted(untrusted_str))}"
 
         removed_parts = []
         if total_stale:

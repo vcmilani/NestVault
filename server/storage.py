@@ -75,6 +75,77 @@ def healthy_volumes() -> list[Path]:
     return [v for v in STORAGE_VOLUMES if v not in _degraded_volumes]
 
 
+# Amostra por volume em volume_looks_sane(). 32 é barato (32 stat()).
+_SANITY_SAMPLE = 32
+# Abaixo disto, "toda a amostra ausente" não é evidência de disco fora do ar:
+# num volume com 1 ou 2 conteúdos é exatamente o que uma deleção legítima
+# produz, e concluir "não confiável" pularia a integridade para sempre num
+# install pequeno — pior que verificá-la.
+_SANITY_MIN_EVIDENCE = 8
+
+
+def volume_looks_sane(vol: Path, db) -> bool:
+    """O volume contém, de fato, o conteúdo que o banco diz que ele contém?
+
+    safe_disk_usage() só detecta o mountpoint sumido: ele faz um statvfs, que
+    continua respondendo quando o disco está montado mas com o _content/
+    ilegível, e responde sobre o ROOTFS quando o mkdir do import (linha 23)
+    recriou o mountpoint de um disco que não subiu — caso em que o volume passa
+    por saudável e vazio.
+
+    A pergunta aqui é outra e não depende de estado novo em disco: o banco
+    registra cópias neste volume; o volume corrobora?
+    """
+    from sqlalchemy import func
+    from database import FileContentCopy
+
+    expected = (
+        db.query(func.count(FileContentCopy.id))
+        .filter(FileContentCopy.volume_path == str(vol))
+        .scalar()
+    ) or 0
+    if expected == 0:
+        return True  # volume novo ou vazio — não há o que conferir
+
+    # Sinal 1: o próprio _content/ não está lá, embora o banco espere cópias.
+    # É a assinatura exata do disco que não subiu e teve o mountpoint recriado
+    # vazio pelo mkdir do import — e não depende do tamanho da amostra, porque
+    # apagar arquivos nunca apaga o diretório.
+    try:
+        os.stat(vol / "_content")
+    except OSError as e:
+        log.error(
+            f"[volume] {vol} não confiável — o banco registra {expected} cópia(s) "
+            f"mas {vol / '_content'} não está acessível ({e.__class__.__name__}): "
+            f"disco desmontado, mountpoint recriado vazio ou diretório ilegível"
+        )
+        return False
+
+    # Sinal 2: _content/ existe mas nada do que o banco registra está nele.
+    # Só conclui com amostra grande (ver _SANITY_MIN_EVIDENCE).
+    if expected < _SANITY_MIN_EVIDENCE:
+        return True
+
+    sample = [
+        r[0] for r in db.query(FileContentCopy.stored_at)
+        .filter(FileContentCopy.volume_path == str(vol))
+        .limit(_SANITY_SAMPLE)
+        .all()
+    ]
+    for p in sample:
+        try:
+            os.stat(p)
+            return True
+        except OSError:
+            continue
+
+    log.error(
+        f"[volume] {vol} não confiável — o banco registra {expected} cópia(s) e "
+        f"nenhuma das {len(sample)} amostradas está acessível, embora _content/ exista"
+    )
+    return False
+
+
 def target_replicas() -> int:
     n = len(healthy_volumes())
     factor = REPLICATION_FACTOR if REPLICATION_FACTOR > 0 else len(STORAGE_VOLUMES)

@@ -84,8 +84,24 @@ def reset_degraded_volumes():
     m._degraded_volumes.clear()
     _reset_module_caches()
     yield
+    _wait_background_stats_refresh()
     m._degraded_volumes.clear()
     _reset_module_caches()
+
+
+def _wait_background_stats_refresh():
+    """Espera o recálculo de stats disparado pelo lifespan terminar.
+
+    Todo startup do app (main.py, lifespan) chama _refresh_stats_async(), que
+    sobe uma thread daemon e ninguém a espera. Num teste curto — que não faz
+    request algum, por exemplo — o teardown chega com ela ainda no meio de
+    _build_stats_data(), e ela segue rodando dentro do teste SEGUINTE,
+    disputando o SQLAlchemy com ele: falhas intermitentes em testes que não
+    têm nada a ver (IndexError dentro de .scalar() em _get_reclaimable_bytes).
+    A thread solta o lock no finally, então adquiri-lo aqui = ela acabou.
+    """
+    if m._stats_refresh_lock.acquire(timeout=60):
+        m._stats_refresh_lock.release()
 
 
 def _reset_module_caches():
