@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v9.1.3`
+# 🗄️ NestVault  `v9.2.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **backup por usuário** — cada conta só cria, lista e restaura seus próprios backups.
 
@@ -1879,6 +1879,8 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 | `POST` | `/maintenance/encrypt-existing` | Cifra arquivos físicos ainda não criptografados (requer `storage.encryption_enabled`) |
 | `GET` | `/maintenance/cleanup-by-date/preview` | Preview de versões elegíveis para remoção antes de uma data (`?before=YYYY-MM-DD[&label=X]`) |
 | `POST` | `/maintenance/cleanup-by-date` | Remove versões anteriores a uma data; preserva última versão `done` por label e versões `running` (`?before=YYYY-MM-DD[&label=X]`) |
+| `GET` | `/maintenance/quarantine` | Lista conteúdos em quarentena (ausentes no disco, registros preservados) e as versões marcadas `suspect` |
+| `POST` | `/maintenance/quarantine/purge` | Apaga definitivamente os conteúdos em quarentena e marca as versões afetadas como `failed` |
 
 ### Cloud Backup / rclone (admin)
 

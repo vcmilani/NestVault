@@ -506,10 +506,30 @@
         </div>
         <span class="risk-badge medium">Médio risco</span>
       </div>
-      <div class="op-desc">Verifica se todos os arquivos das últimas versões <em>done</em> existem fisicamente no disco. Versões com arquivos ausentes são marcadas como <em>failed</em> e seus registros removidos do banco — permitindo que o backup reenvie os arquivos na próxima execução.</div>
+      <div class="op-desc">Verifica se todos os arquivos das últimas versões <em>done</em> existem fisicamente no disco. Os ausentes vão para <strong>quarentena</strong> — nada é apagado, então remontar o disco ou rodar <code>tools/rebuild_content_index.py</code> ainda recupera o arquivo. Se qualquer volume estiver fora do ar ou não corroborar o que o banco diz conter, a verificação é <strong>pulada por inteiro</strong>: com um disco inacessível não dá para provar a ausência de nada.</div>
       <div class="op-footer">
         <button class="run-btn" id="btn-integrity" onclick="runOp('integrity')">▶ Verificar</button>
         <div class="op-result" id="result-integrity"></div>
+      </div>
+    </div>
+
+    <!-- Quarentena de Integridade -->
+    <div class="op-card" style="animation-delay:.5s">
+      <div class="op-header">
+        <div class="op-title-wrap">
+          <span class="op-icon">⚠</span>
+          <div>
+            <div class="op-name">Quarentena de Integridade</div>
+            <div class="op-endpoint">GET /maintenance/quarantine</div>
+          </div>
+        </div>
+        <span class="risk-badge high">Alto risco</span>
+      </div>
+      <div class="op-desc">Conteúdos que a validação não encontrou no disco. Enquanto estiverem aqui, os registros estão preservados e a perda é reversível. <strong>Purgar</strong> apaga os conteúdos em definitivo e marca as versões afetadas como <em>failed</em> — verifique antes se algum disco apenas estava fora do ar.</div>
+      <div class="op-footer">
+        <button class="run-btn" id="btn-quarantine" onclick="loadQuarantine()">▶ Listar</button>
+        <button class="run-btn danger" id="btn-quarantine-purge" onclick="purgeQuarantine()" disabled>✕ Purgar</button>
+        <div class="op-result" id="result-quarantine"></div>
       </div>
     </div>
 
@@ -653,8 +673,13 @@ function fmtBytes(b) {
 function fmtResult(key, data) {
   if (data.scheduled) return 'Operação iniciada — acompanhe nas atividades em execução';
   if (key === 'integrity') {
-    const parts = [`${data.checked} versão(ões) verificadas`, `${data.invalidated} invalidada(s)`];
-    if (data.files_removed) parts.push(`${data.files_removed} arquivo(s) removido(s)`);
+    if (data.skipped) {
+      return `Pulada — volume(s) não confiável(is): ${(data.untrusted || ['?']).join(', ')}`;
+    }
+    const parts = [`${data.checked} versão(ões) verificadas`];
+    parts.push(data.quarantined
+      ? `${data.quarantined} conteúdo(s) em quarentena (nada apagado)`
+      : 'nenhum conteúdo em quarentena');
     return parts.join(' · ');
   }
   const lines = [];
@@ -737,6 +762,54 @@ async function runOp(key) {
     showError(key, 'Erro de conexão: ' + e.message);
   }
   setRunning(key, false);
+}
+
+// -- Quarentena de Integridade -------------------------------------------------
+async function loadQuarantine() {
+  setRunning('quarantine', true, '▶ Listar');
+  try {
+    const r = await apiCall('GET', '/maintenance/quarantine');
+    if (!r.ok) { showError('quarantine', `HTTP ${r.status}`); setRunning('quarantine', false, '▶ Listar'); return; }
+    const d = await r.json();
+    document.getElementById('btn-quarantine-purge').disabled = d.total === 0;
+    if (d.total === 0) {
+      showSuccess('quarantine', 'Nada em quarentena');
+    } else {
+      const sample = d.items.slice(0, 5)
+        .map(i => `${i.sha256.slice(0,12)}… (${i.labels.join(', ') || 'sem label'})`)
+        .join('<br>');
+      showSuccess('quarantine',
+        `${d.total} conteúdo(s) em quarentena · ${d.suspect_versions} versão(ões) suspeita(s)<br>${sample}`
+        + (d.total > 5 ? `<br>… +${d.total - 5}` : ''));
+    }
+  } catch(e) {
+    showError('quarantine', 'Erro de conexão: ' + e.message);
+  }
+  setRunning('quarantine', false, '▶ Listar');
+}
+
+async function purgeQuarantine() {
+  const ok = await nvConfirm(
+    'Purgar quarentena',
+    'Os conteúdos em quarentena serão apagados DEFINITIVAMENTE e as versões afetadas marcadas como failed.\n\n'
+    + 'Se algum disco estava apenas fora do ar, os arquivos podem ainda existir — remonte-o e rode a validação de novo antes.\n\n'
+    + 'Essa ação é IRREVERSÍVEL. Deseja continuar?',
+    { word: 'PURGAR' }
+  );
+  if (!ok) return;
+  setRunning('quarantine-purge', true, '✕ Purgar');
+  try {
+    const r = await apiCall('POST', '/maintenance/quarantine/purge');
+    if (!r.ok) { showError('quarantine', `HTTP ${r.status}`); }
+    else {
+      const d = await r.json();
+      showSuccess('quarantine', `${d.purged} conteúdo(s) apagado(s) · ${d.versions_failed} versão(ões) marcada(s) como failed`);
+      document.getElementById('btn-quarantine-purge').disabled = true;
+    }
+  } catch(e) {
+    showError('quarantine', 'Erro de conexão: ' + e.message);
+  }
+  setRunning('quarantine-purge', false, '✕ Purgar');
 }
 
 // -- Rebalancear Discos --------------------------------------------------------
