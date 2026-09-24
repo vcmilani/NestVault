@@ -105,6 +105,8 @@
   .diff-add{color:var(--green);font-size:.85em}
   .diff-mod{color:var(--amber);font-size:.85em}
   .diff-del{color:var(--red);font-size:.85em}
+  /* Cópia de Alterações sob o Label — só aparece quando a coluna 8 some (≤480px). */
+  .diff-m{display:none}
 
   /* Após a primeira carga, não re-dispara animações a cada poll */
   body.nv-loaded .running-card,
@@ -197,6 +199,11 @@
     .tbl-ver th:nth-child(9){width:92px}
     .tbl-ver th:first-child,.tbl-ver td:first-child{position:static;box-shadow:none}
     .tbl-ver td:first-child{white-space:normal;overflow-wrap:anywhere;line-height:1.35}
+    /* Alterações perde a coluna mas é o que diz se o backup pegou o que devia:
+       desce para uma segunda linha do Label. Cada contador fica inteiro — o
+       overflow-wrap:anywhere do Label partiria "+1.234" no meio. */
+    .tbl-ver .diff-m{display:block;margin-top:2px;overflow-wrap:normal}
+    .tbl-ver .diff-m span{white-space:nowrap}
     /* 56px = altura do header fixo (app.css). */
     .tbl-ver thead th{position:sticky;top:56px;z-index:3;box-shadow:0 1px 0 var(--border)}
     .tbl-ver tbody tr:nth-child(even){background:var(--bg2)}
@@ -746,7 +753,7 @@
 
     const vRows = versions.map(v => `
       <tr data-status="${esc(v.status)}" data-origin="${v.is_rclone ? 'rclone' : 'local'}">
-        <td>${esc(v.backup_label)}</td>
+        <td>${esc(v.backup_label)}${v.diff_added != null ? `<div class="diff-m">${fmtDiff(v)}</div>` : ''}</td>
         <td class="td-nb ${v.is_rclone ? 'origin-rclone' : 'origin-local'}">${v.is_rclone ? '<i class="oi">⟳</i> rclone' : 'local'}</td>
         <td class="td-dim td-nb">${esc(v.version_key.slice(0,19))}</td>
         <td>${badge(v.status)}${v.absorbed_count > 0 ? ' <span class="badge badge-absorb" title="'+v.absorbed_count+' arquivo(s) herdados via absorve">⊕ absorve</span>' : ''}</td>
