@@ -47,12 +47,11 @@ from pathlib import Path
 import shutil
 
 import config
-import crypto
 import storage
 from cache_state import invalidate_activity, mark_backup_activity
 from database import (
     BackupID, BackupVersion, FileContent, FileContentCopy,
-    RcloneBackupJob, SessionLocal, VersionFile,
+    RcloneBackupJob, SessionLocal, VersionFile, TRASHED_STATUS,
 )
 
 log = logging.getLogger("backup-server")
@@ -196,6 +195,9 @@ class RcloneFileEntry:
 # descartado, não enfileirado), o asyncio é single-thread — não há await entre
 # o teste e a inserção — e o set não fica preso ao event loop em que foi criado.
 _busy_remotes: set[str] = set()
+# Jobs de fato em execução neste processo — o que o cancelamento precisa saber.
+# Não dá para derivar de _busy_remotes: outro job no mesmo remote o ocupa.
+_running_jobs: set[int] = set()
 
 
 def is_remote_busy(remote_name: str) -> bool:
@@ -203,13 +205,20 @@ def is_remote_busy(remote_name: str) -> bool:
     return remote_name in _busy_remotes
 
 
+def is_job_running(job_id: int) -> bool:
+    """True se este job está executando agora neste processo."""
+    return job_id in _running_jobs
+
+
 @contextmanager
-def _remote_slot(remote_name: str):
+def _remote_slot(remote_name: str, job_id: int):
     _busy_remotes.add(remote_name)
+    _running_jobs.add(job_id)
     try:
         yield
     finally:
         _busy_remotes.discard(remote_name)
+        _running_jobs.discard(job_id)
 
 
 # ---------------------------------------------------------------------------
@@ -516,40 +525,61 @@ def _process_file_sync(
 ) -> None:
     """Dedup, store, encrypt, replicate e registro no banco de um arquivo baixado.
     Bloqueante (I/O + criptografia) — roda via asyncio.to_thread com Session
-    própria (ver _register_version_file_sync)."""
+    própria (ver _register_version_file_sync).
+
+    Mesmo caminho do /upload: a dedup exige uma cópia legível (e repara a partir
+    do arquivo baixado quando não há nenhuma — antes o VersionFile era registrado
+    apontando para um conteúdo que podia já não existir em disco), o conteúdo
+    novo só é registrado depois de conferido (decifrar + re-hashear), e um
+    registro concorrente do mesmo sha256 não derruba o arquivo."""
     # Job rclone também é atividade de backup: mantém o gate de ociosidade do SSD
     # cache ciente do tráfego de disco que ele gera (ver _should_process_ssd_moves).
     mark_backup_activity()
     db = SessionLocal()
     try:
-        fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
-        if fc:
-            tmp_path.unlink(missing_ok=True)
-            first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).first()
-            if first_copy:
-                storage.ensure_replicas(sha256, Path(first_copy.stored_at), db)
-        else:
-            dest = storage.content_path(sha256, volume)
-            shutil.move(str(tmp_path), str(dest))
-            if enc_key:
-                _fd, _tmp_enc = tempfile.mkstemp(dir=dest.parent, prefix="_enc_")
-                os.close(_fd)
-                tmp_enc = Path(_tmp_enc)
-                try:
-                    crypto.encrypt_stream(dest, tmp_enc, enc_key)
-                    shutil.move(str(tmp_enc), str(dest))
-                except Exception:
-                    tmp_enc.unlink(missing_ok=True)
-                    raise
-            fc = FileContent(sha256=sha256, stored_at=str(dest), size=size, encrypted=bool(enc_key))
-            db.add(fc)
-            db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(volume)))
+        fc = db.get(FileContent, sha256)
+        replica_source = None
+        if fc is not None:
+            replica_source = storage.dedup_or_repair(
+                db, fc, tmp_path, volume, what=f"rclone {entry.path!r}",
+            )
             db.commit()
-            storage.ensure_replicas(sha256, dest, db)
+        else:
+            replica_source = _store_new_content_sync(db, sha256, size, tmp_path, volume, enc_key)
+        if replica_source is not None:
+            storage.ensure_replicas(sha256, replica_source, db)
+            db.commit()
 
         _register_version_file(db, version_id, entry, sha256)
     finally:
         db.close()
+
+
+def _store_new_content_sync(db, sha256: str, size: int, tmp_path: Path,
+                            volume: Path, enc_key: bytes | None) -> Path | None:
+    """Grava e registra conteúdo novo. Retorna o path para réplicas, ou None se
+    um registro concorrente do mesmo sha256 (outro job, um /upload) venceu."""
+    from sqlalchemy.exc import IntegrityError
+
+    dest = storage.content_path(sha256, volume)
+    storage.stage_content(tmp_path, dest, sha256, bool(enc_key), enc_key)
+    try:
+        db.add(FileContent(sha256=sha256, stored_at=str(dest), size=size, encrypted=bool(enc_key)))
+        db.flush()
+        storage.insert_copy_row(db, sha256, str(dest), str(volume))
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        # O arquivo em dest só fica se for a cópia que o vencedor registrou —
+        # mesmo critério de main._store_new_content. Caso contrário ele não tem
+        # linha nenhuma e seria lixo permanente.
+        registered = db.query(FileContentCopy).filter(
+            FileContentCopy.stored_at == str(dest)).first() is not None
+        if not registered:
+            dest.unlink(missing_ok=True)
+        log.info(f"[rclone] {sha256[:8]}… registrado em paralelo por outro processo — usando o existente")
+        return None
+    return dest
 
 
 # ---------------------------------------------------------------------------
@@ -932,7 +962,7 @@ async def run_rclone_backup_job(job_id: int) -> None:
             )
             return
 
-        with _remote_slot(job.remote_name):
+        with _remote_slot(job.remote_name, job_id):
             log.info(
                 f"[rclone-runner] Iniciando job {job_id}: "
                 f"{job.remote_name}:{job.remote_path} → {job.target_label}"
@@ -943,9 +973,15 @@ async def run_rclone_backup_job(job_id: int) -> None:
             db.commit()
             invalidate_activity()
 
-            # Garante que o BackupID (label) existe
-            if not db.query(BackupID).filter(BackupID.label == job.target_label).first():
+            # Garante que o BackupID (label) existe — e fora da lixeira: um run
+            # agendado num label excluído por usuário o reativa (as versões
+            # antigas continuam na lixeira), senão gravaria versões invisíveis.
+            _b = db.query(BackupID).filter(BackupID.label == job.target_label).first()
+            if not _b:
                 db.add(BackupID(label=job.target_label, client_name="rclone"))
+                db.commit()
+            elif _b.status == TRASHED_STATUS:
+                _b.status, _b.trashed_at, _b.trashed_by = "active", None, None
                 db.commit()
 
             cfg = await _remote_config(job.remote_name)

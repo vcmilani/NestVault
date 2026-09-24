@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v9.2.0`
+# 🗄️ NestVault  `v9.3.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **backup por usuário** — cada conta só cria, lista e restaura seus próprios backups.
 
@@ -352,6 +352,7 @@ Os parâmetros marcados com **↻** só passam a valer depois de reiniciar o ser
 | `dirs` | lista | `["./storage"]` | ↻ | Volumes em ordem de prioridade. Um único diretório também é válido |
 | `replication_factor` | int | `1` | | `1` = sem replicação; `2` = espelha em 2 volumes; `0` = todos os volumes saudáveis |
 | `fallback_threshold_gb` | float | `10.0` | | Piso de espaço livre por disco antes de passar para o próximo da lista |
+| `trash_retention_days` | int | `14` | | Quantos dias as exclusões de usuários comuns ficam na [lixeira](#lixeira) antes de a limpeza noturna apagá-las (1–365) |
 | `encryption_enabled` | bool | `false` | ↻ | Criptografia AES-256-GCM em repouso. Omitir se o disco já é criptografado (LUKS, ZFS, FileVault) |
 | `encryption_key` | str 🔒 | `""` | ↻ | 32 bytes em Base64. Obrigatória quando `encryption_enabled` é `true` |
 
@@ -1007,7 +1008,7 @@ Iniciando criptografia de arquivos existentes...
 
 O servidor verifica automaticamente o espaço livre **ao finalizar cada backup** (status → `done`). Se o espaço livre no disco estiver abaixo de **5%**, versões antigas são apagadas até que o espaço seja normalizado. Essa verificação ocorre **em background** — o cliente recebe a confirmação do backup imediatamente, sem esperar o scan de disco.
 
-Da mesma forma, ao excluir um label (`DELETE /backups/{label}`) ou uma versão (`DELETE /backups/{label}/versions/{key}`), a remoção dos registros no banco é imediata, mas a limpeza dos arquivos físicos órfãos ocorre em background.
+Da mesma forma, quando o admin exclui um label (`DELETE /backups/{label}`) ou uma versão (`DELETE /backups/{label}/versions/{key}`), a remoção dos registros no banco é imediata, mas a limpeza dos arquivos físicos órfãos ocorre em background. Exclusões feitas por usuários comuns vão para a [lixeira](#lixeira).
 
 **Comportamento:**
 
@@ -1788,6 +1789,21 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 
 ---
 
+### Lixeira
+
+A chave de API de cada usuário mora na máquina cliente. Se essa máquina for comprometida (ransomware, por exemplo), quem tem a chave não pode ser capaz de apagar o histórico de backups de forma irreversível. Por isso, **exclusões pedidas por usuários comuns não apagam nada na hora**:
+
+- `DELETE /backups/{label}`, `DELETE /backups/{label}/versions/{key}` e `POST /backups/{label}/cleanup` movem os itens para a lixeira. Para o cliente eles somem na hora: saem das listagens, respondem `404` e não podem ser baixados.
+- O admin lista e restaura em **Manutenção → Lixeira** (`GET /maintenance/trash`, `POST /maintenance/trash/restore`). A restauração devolve cada versão ao status que tinha.
+- A limpeza noturna apaga de vez o que passou de `storage.trash_retention_days` (padrão: 14 dias). Os arquivos físicos só são liberados quando nenhuma outra versão os usa. O admin também pode esvaziar a lixeira na hora.
+- Criar de novo um backup com o mesmo label reativa o label vazio. As versões antigas continuam na lixeira até o prazo.
+- Exclusões feitas pelo **admin** continuam imediatas.
+- Uma versão já finalizada (`done`/`failed`) não pode mais trocar de status: `PATCH` com outro status responde `409`, e repetir o mesmo status é idempotente. Antes, marcar uma versão `done` antiga como `failed` fazia a limpeza noturna apagá-la, o que contornava a lixeira.
+
+As respostas continuam com `"status": "deleted"`, para não quebrar clientes antigos, e ganham `"trashed": true` e `"purge_after"` (data a partir da qual a limpeza noturna pode apagar o item).
+
+---
+
 ## 🔌 Endpoints da API
 
 > **v7.9 — dois níveis de acesso.** Toda rota exige `X-API-Key` de uma conta válida. Rotas em **Backups/Versões/Arquivos** funcionam para qualquer usuário autenticado, mas são **escopadas por dono**: um usuário comum só enxerga/cria/altera labels em que é `owner_user_id`; tentar acessar um label de outro usuário retorna `403`. Admin não tem essa restrição. Rotas em **Storage/Manutenção/Cloud Backup/Usuários/Configuração** exigem `role=admin` — uma chave de usuário comum recebe `403` nelas.
@@ -1819,7 +1835,7 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 |--------|----------|-----------|
 | `POST` | `/users` | Cria usuário — retorna a API key gerada **uma única vez** |
 | `GET` | `/users` | Lista usuários (sem expor as chaves) |
-| `PATCH` | `/users/{id}` | Ativa/desativa o acesso (`is_active`) — histórico de backups é preservado |
+| `PATCH` | `/users/{id}` | Ativa/desativa o acesso (`is_active`) — histórico de backups é preservado. O admin não pode desativar a própria conta (`409`) |
 | `POST` | `/users/{id}/rotate-key` | Gera nova chave para o usuário e invalida a anterior — retorna a nova chave **uma única vez** |
 | `PATCH` | `/backups/{label}/owner` | Reatribui o dono de um backup (`owner_user_id`) |
 
@@ -1841,7 +1857,7 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 | `POST` | `/backups/{label}/versions` | Cria nova versão |
 | `GET` | `/backups/{label}/versions` | Lista versões |
 | `GET` | `/backups/{label}/versions/{key}` | Detalhes de uma versão |
-| `PATCH` | `/backups/{label}/versions/{key}` | Finaliza versão (done/failed) |
+| `PATCH` | `/backups/{label}/versions/{key}` | Finaliza versão (done/failed). Versão já finalizada não troca de status (`409`) |
 | `DELETE` | `/backups/{label}/versions/{key}` | Remove versão |
 | `POST` | `/backups/{label}/versions/{key}/absorb` | Herda arquivos ausentes de outra versão (modo acumulativo) |
 | `POST` | `/backups/{label}/cleanup` | Mantém apenas `keep` versões mais recentes |
@@ -1881,6 +1897,9 @@ Download tenta cada cópia automaticamente — se disk1 falhar, disk2 serve o ar
 | `POST` | `/maintenance/cleanup-by-date` | Remove versões anteriores a uma data; preserva última versão `done` por label e versões `running` (`?before=YYYY-MM-DD[&label=X]`) |
 | `GET` | `/maintenance/quarantine` | Lista conteúdos em quarentena (ausentes no disco, registros preservados) e as versões marcadas `suspect` |
 | `POST` | `/maintenance/quarantine/purge` | Apaga definitivamente os conteúdos em quarentena e marca as versões afetadas como `failed` |
+| `GET` | `/maintenance/trash` | Lista a [lixeira](#lixeira): labels e versões excluídos por usuários comuns, com quem excluiu e quando serão apagados |
+| `POST` | `/maintenance/trash/restore` | Restaura `{"label": ...}` (o label e todas as versões dele) ou `{"label": ..., "version_key": ...}` (uma versão) |
+| `POST` | `/maintenance/trash/purge` | Esvazia a lixeira agora, sem esperar o prazo. Irreversível |
 
 ### Cloud Backup / rclone (admin)
 
@@ -2048,7 +2067,9 @@ Stats agregados refletem a **última versão `done`** do backup.
 ```json
 {
   "status": "deleted",
-  "label":  "notebook-joao"
+  "label":  "notebook-joao",
+  "trashed": true,                          // exclusão de usuário comum → lixeira
+  "purge_after": "2026-10-08T14:03:11"      // null quando trashed = false
 }
 ```
 
@@ -2080,7 +2101,9 @@ Stats agregados refletem a **última versão `done`** do backup.
 {
   "status": "deleted",
   "version_key": "2026-04-10T02:00:00",
-  "files_removed_from_storage": 4   // contents órfãos removidos
+  "files_removed_from_storage": 4,  // contents órfãos removidos (0 quando trashed)
+  "trashed": false,
+  "purge_after": null
 }
 ```
 
@@ -2140,7 +2163,9 @@ A resposta de `/check/batch` é `list[CheckBatchResultItem]` na mesma ordem dos 
 {
   "kept": 5,
   "versions_removed": ["2026-04-10T02:00:00", "2026-04-03T02:00:00"],
-  "storage_files_removed": 4
+  "storage_files_removed": 4,
+  "trashed": false,       // true: versões foram para a lixeira (usuário comum)
+  "purge_after": null
 }
 ```
 

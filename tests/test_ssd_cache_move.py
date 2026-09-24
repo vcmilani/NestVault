@@ -140,3 +140,48 @@ def test_reconcile_recria_pendencia_de_arquivo_preso_so_no_ssd(tmp_path, monkeyp
     assert move is not None
     assert move.ssd_path == str(ssd_file)
     assert move.dest_volume == str(dest_vol)
+
+
+def test_move_esgotado_estaciona_sem_marcar_versoes_failed(tmp_path, monkeypatch):
+    """Regressão: depois de 5 falhas de cópia SSD → HDD, toda versão que citava o
+    sha256 virava 'failed' — e a limpeza noturna apagava essas versões, embora o
+    arquivo continuasse íntegro no SSD. Agora a pendência é só estacionada."""
+    db = _make_session()
+    sha = "d" * 64
+    ssd_dir = tmp_path / "ssd"
+    (ssd_dir / "_content" / "dd").mkdir(parents=True)
+    ssd_file = ssd_dir / "_content" / "dd" / sha
+    ssd_file.write_bytes(b"conteudo")
+    dest_vol = tmp_path / "hdd1"
+    dest_vol.mkdir()
+
+    db.add(db_mod.BackupID(label="b"))
+    v = db_mod.BackupVersion(backup_label="b", version_key="k", status="done")
+    db.add(v)
+    db.add(db_mod.FileContent(sha256=sha, stored_at=str(ssd_file), size=8))
+    db.add(db_mod.FileContentCopy(sha256=sha, stored_at=str(ssd_file), volume_path=str(ssd_dir)))
+    db.flush()
+    db.add(db_mod.VersionFile(version_id=v.id, original_path="/a", sha256=sha, mtime=1.0))
+    db.add(db_mod.SsdCachePendingMove(
+        sha256=sha, ssd_path=str(ssd_file), dest_volume=str(dest_vol),
+        dest_path=str(dest_vol / "_content" / "dd" / sha),
+        retry_count=storage_mod.MAX_SSD_MOVE_RETRIES - 1,
+    ))
+    db.commit()
+
+    def fake_copy_eio(_src, _dst):
+        raise OSError(errno.EIO, "I/O error")
+    monkeypatch.setattr(storage_mod, "_copy_with_sha256", fake_copy_eio)
+
+    assert storage_mod.process_ssd_pending_moves(db) == (0, [])
+
+    assert db.get(db_mod.BackupVersion, v.id).status == "done"
+    move = db.query(db_mod.SsdCachePendingMove).filter_by(sha256=sha).first()
+    assert move is not None and move.retry_count == storage_mod.MAX_SSD_MOVE_RETRIES
+    assert ssd_file.exists()
+    # Estacionada: fora da fila do worker/monitor...
+    assert storage_mod.active_ssd_moves_query(db).count() == 0
+    assert storage_mod.process_ssd_pending_moves(db) == (0, [])
+    # ...e de volta à fila no boot.
+    assert storage_mod.unpark_ssd_moves(db) == 1
+    assert storage_mod.active_ssd_moves_query(db).count() == 1

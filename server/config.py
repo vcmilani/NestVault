@@ -105,6 +105,11 @@ SCHEMA: list[Field] = [
           "Intervalo do rebalanceamento (min)",
           "Frequência da checagem automática de rebalanceamento entre discos.",
           min=5),
+    Field("storage.trash_retention_days", None, "int", 14,
+          "Prazo da lixeira (dias)",
+          "Exclusões feitas por usuários comuns ficam na lixeira por este prazo e podem ser "
+          "restauradas pelo admin; depois a limpeza noturna apaga de vez.",
+          min=1, max=365),
     Field("storage.encryption_enabled", "ENCRYPTION_ENABLED", "bool", False,
           "Criptografia em repouso",
           "Cifra os arquivos com AES-256-GCM. Alterar depois de gravar dados torna o conteúdo existente ilegível.",

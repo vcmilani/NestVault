@@ -80,3 +80,38 @@ def test_admin_can_access_admin_endpoints(two_users, method, path):
     admin, _alice, _bob = two_users
     r = admin.request(method, path)
     assert r.status_code == 200
+
+
+def test_security_headers_on_dashboard_and_api(client):
+    """CSP restringe para onde o painel pode mandar dados (a API key fica em
+    localStorage); os cabeçalhos também saem nas respostas da API."""
+    for path in ("/", "/health"):
+        r = client.get(path)
+        csp = r.headers["content-security-policy"]
+        assert "connect-src 'self'" in csp
+        assert "frame-ancestors 'none'" in csp
+        assert r.headers["x-content-type-options"] == "nosniff"
+
+
+def _user_id(admin_client, username):
+    return next(u["id"] for u in admin_client.get("/users").json() if u["username"] == username)
+
+
+def test_admin_cannot_deactivate_own_account(client):
+    """Regressão: o admin podia se desativar e ficar sem acesso — o bootstrap por
+    BACKUP_API_KEY só roda com a tabela de usuários vazia, então não havia volta."""
+    r = client.patch(f"/users/{_user_id(client, 'admin')}", json={"is_active": False})
+    assert r.status_code == 409
+    assert client.get("/users").status_code == 200  # continua com acesso
+
+
+def test_admin_can_deactivate_another_admin_while_one_remains(client):
+    r = client.post("/users", json={"username": "admin2", "role": "admin"})
+    admin2_key = r.json()["api_key"]
+    admin2_id = r.json()["user"]["id"]
+
+    assert client.patch(f"/users/{admin2_id}", json={"is_active": False}).status_code == 200
+    assert client.get("/users", headers={"X-API-Key": admin2_key}).status_code == 401
+    # Reativar não passa pela trava.
+    assert client.patch(f"/users/{admin2_id}", json={"is_active": True}).status_code == 200
+

@@ -426,7 +426,7 @@
       renderVersions(label, versions);
     } catch(e) {
       document.getElementById(`vinner-${label}`).innerHTML =
-        `<div class="empty">Erro: ${e.message}</div>`;
+        `<div class="empty">Erro: ${esc(e.message)}</div>`;
     }
   }
 
@@ -534,7 +534,7 @@
       renderFiles(vid, files);
     } catch(e) {
       document.getElementById(`finner-${vid}`).innerHTML =
-        `<div class="empty">Erro: ${e.message}</div>`;
+        `<div class="empty">Erro: ${esc(e.message)}</div>`;
     }
   }
 

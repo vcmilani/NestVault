@@ -8,7 +8,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from database import SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob, SsdCachePendingMove, engine
+from database import SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob, SsdCachePendingMove, engine, TRASHED_STATUS
 from sqlalchemy import func, delete, exists
 from cache_state import invalidate_activity
 
@@ -32,6 +32,33 @@ def _delete_versions(db, version_ids: list[int]) -> None:
         db.query(VersionFile).filter(VersionFile.version_id.in_(batch)).delete(synchronize_session=False)
         db.query(BackupVersion).filter(BackupVersion.id.in_(batch)).delete(synchronize_session=False)
         db.commit()
+
+
+def purge_trash(db, cutoff: datetime | None) -> tuple[int, int]:
+    """Apaga de vez o que está na lixeira há mais tempo que `cutoff` (None = tudo).
+
+    Remove só as linhas: os arquivos ficam para _cleanup_orphan_contents, que só
+    apaga conteúdo sem nenhuma outra referência. Um label sai junto com a última
+    versão dele. Retorna (versões, labels) removidos."""
+    q = db.query(BackupVersion.id).filter(BackupVersion.status == TRASHED_STATUS)
+    if cutoff is not None:
+        q = q.filter(BackupVersion.trashed_at < cutoff)
+    version_ids = [r.id for r in q.all()]
+    if version_ids:
+        _delete_versions(db, version_ids)
+
+    lq = db.query(BackupID).filter(BackupID.status == TRASHED_STATUS)
+    if cutoff is not None:
+        lq = lq.filter(BackupID.trashed_at < cutoff)
+    labels_removed = 0
+    for b in lq.all():
+        if db.query(BackupVersion.id).filter(BackupVersion.backup_label == b.label).first() is None:
+            db.delete(b)
+            labels_removed += 1
+    db.commit()
+    if version_ids or labels_removed:
+        log.info(f"[trash] {len(version_ids)} versão(ões) e {labels_removed} label(s) apagados da lixeira")
+    return len(version_ids), labels_removed
 
 
 def orphan_filter():
@@ -652,7 +679,18 @@ def run_nightly_cleanup() -> None:
                 )
                 continue
 
-        total_removed = total_stale + total_day + total_week + total_month + total_unchanged
+        # Lixeira: o que venceu o prazo sai antes da limpeza de órfãos, para os
+        # arquivos serem liberados ainda nesta rodada.
+        import config
+        trash_cutoff = now - timedelta(days=config.get("storage.trash_retention_days"))
+        try:
+            total_trash, trash_labels = purge_trash(db, trash_cutoff)
+        except Exception:
+            db.rollback()
+            log.exception("[nightly-cleanup] erro ao esvaziar a lixeira — seguindo")
+            total_trash, trash_labels = 0, 0
+
+        total_removed = total_stale + total_day + total_week + total_month + total_unchanged + total_trash
 
         # Limpeza de conteúdos órfãos após todas as exclusões
         mj = db.get(MaintenanceJob, mj_id)
@@ -733,6 +771,8 @@ def run_nightly_cleanup() -> None:
             removed_parts.append(f"{total_month} done por mês")
         if total_unchanged:
             removed_parts.append(f"{total_unchanged} sem alteração")
+        if total_trash:
+            removed_parts.append(f"{total_trash} da lixeira (prazo vencido)")
 
         stale_running_note = (
             f"; {total_stale_running} running sem atividade 6h+ → incomplete"

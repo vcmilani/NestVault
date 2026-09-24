@@ -1,5 +1,6 @@
 import base64
 from collections import namedtuple
+from pathlib import Path
 
 import database as db_mod
 import main as m
@@ -398,3 +399,207 @@ def test_storage_disks_counts_copies_per_volume(tmp_path, monkeypatch):
         assert by_path[str(v2)]["content_files"] == 2
         assert by_path[str(v1)]["content_bytes"] == len(b"hello") + len(b"world!")
         assert by_path[str(v2)]["content_bytes"] == len(b"hello") + len(b"world!")
+
+
+# -- Dedup com cópia ilegível: reparar sem apagar nada -------------------------
+
+def _healthy_usage(path):
+    return DiskUsage(total=200_000_000_000, used=100_000_000_000, free=100_000_000_000)
+
+
+def _db_copies(sha):
+    db = m.SessionLocal()
+    try:
+        return {c.volume_path: c.stored_at
+                for c in db.query(db_mod.FileContentCopy).filter_by(sha256=sha).all()}
+    finally:
+        db.close()
+
+
+def test_dedup_primary_missing_keeps_replica_and_repairs(tmp_path, monkeypatch):
+    """Regressão: a cópia primária sumiu do disco e o mesmo conteúdo é enviado de
+    novo. Antes, _purge_corrupted_content apagava do disco TODAS as cópias —
+    inclusive a réplica boa em v2 — e o upload ainda terminava em 500."""
+    v1 = tmp_path / "v1"; v1.mkdir()
+    v2 = tmp_path / "v2"; v2.mkdir()
+
+    for c in _mk_client(monkeypatch, [v1, v2], replication_factor=2):
+        c.post("/backups", json={"label": "b1"})
+        c.post("/backups/b1/versions", json={"version_key": "v1"})
+        sha = _upload(c, "b1", "v1", "/a.txt", b"precious")["sha256"]
+        (v1 / "_content" / sha[:2] / sha).unlink()
+
+        c.post("/backups/b1/versions", json={"version_key": "v2"})
+        r = _upload(c, "b1", "v2", "/a.txt", b"precious")
+
+        assert r["sha256"] == sha
+        assert (v2 / "_content" / sha[:2] / sha).read_bytes() == b"precious"
+        assert set(_db_copies(sha)) == {str(v1), str(v2)}
+        assert c.get(f"/files/{r['file_id']}/download").content == b"precious"
+
+
+def test_dedup_primary_on_degraded_volume_touches_nothing(tmp_path, monkeypatch):
+    """Primária num disco fora do ar: a réplica legível em v2 basta para a dedup.
+    Nada é apagado — nem arquivo nem linha da cópia em v1, que pode voltar."""
+    v1 = tmp_path / "v1"; v1.mkdir()
+    v2 = tmp_path / "v2"; v2.mkdir()
+
+    for c in _mk_client(monkeypatch, [v1, v2], replication_factor=2):
+        c.post("/backups", json={"label": "b1"})
+        c.post("/backups/b1/versions", json={"version_key": "v1"})
+        sha = _upload(c, "b1", "v1", "/a.txt", b"precious")["sha256"]
+        before = _db_copies(sha)
+
+        def fake_usage(path):
+            if path == v1:
+                raise OSError("disco fora do ar")
+            return _healthy_usage(path)
+        monkeypatch.setattr(storage_mod.shutil, "disk_usage", fake_usage)
+        m._degraded_volumes.add(v1)
+        hidden = v1 / "_content" / sha[:2] / sha
+        hidden.rename(hidden.with_suffix(".offline"))  # ilegível enquanto o disco está fora
+
+        c.post("/backups/b1/versions", json={"version_key": "v2"})
+        _upload(c, "b1", "v2", "/a.txt", b"precious")
+
+        assert _db_copies(sha) == before
+        assert (v2 / "_content" / sha[:2] / sha).read_bytes() == b"precious"
+        assert not hidden.exists(), "v1 fora do ar não pode receber escrita de reparo"
+
+
+def test_dedup_all_copies_missing_repairs_from_upload(tmp_path, monkeypatch):
+    """Nenhuma cópia legível: o upload regrava o conteúdo em vez de dar 500,
+    e as versões antigas voltam a ser restauráveis."""
+    v1 = tmp_path / "v1"; v1.mkdir()
+
+    for c in _mk_client(monkeypatch, [v1], replication_factor=1):
+        c.post("/backups", json={"label": "b1"})
+        c.post("/backups/b1/versions", json={"version_key": "v1"})
+        old = _upload(c, "b1", "v1", "/a.txt", b"precious")
+        sha = old["sha256"]
+        (v1 / "_content" / sha[:2] / sha).unlink()
+
+        c.post("/backups/b1/versions", json={"version_key": "v2"})
+        _upload(c, "b1", "v2", "/a.txt", b"precious")
+
+        assert c.get(f"/files/{old['file_id']}/download").content == b"precious"
+        assert set(_db_copies(sha)) == {str(v1)}
+
+
+def test_dedup_truncated_copy_is_repaired(tmp_path, monkeypatch):
+    """Cópia com tamanho errado no disco é regravada no lugar."""
+    v1 = tmp_path / "v1"; v1.mkdir()
+
+    for c in _mk_client(monkeypatch, [v1], replication_factor=1):
+        c.post("/backups", json={"label": "b1"})
+        c.post("/backups/b1/versions", json={"version_key": "v1"})
+        sha = _upload(c, "b1", "v1", "/a.txt", b"precious")["sha256"]
+        stored = v1 / "_content" / sha[:2] / sha
+        stored.write_bytes(b"prec")
+
+        c.post("/backups/b1/versions", json={"version_key": "v2"})
+        _upload(c, "b1", "v2", "/a.txt", b"precious")
+
+        assert stored.read_bytes() == b"precious"
+
+
+def test_dedup_repair_keeps_encrypted_format_and_clears_quarantine(tmp_path, monkeypatch):
+    """O reparo grava no formato do FileContent (cifrado) e tira da quarentena."""
+    import os as _os
+    from datetime import datetime as _dt
+    v1 = tmp_path / "v1"; v1.mkdir()
+    key = _os.urandom(32)
+    monkeypatch.setattr(storage_mod, "ENCRYPTION_ENABLED", True)
+    monkeypatch.setattr(m.crypto, "load_key", lambda: key)  # o lifespan carrega a chave
+
+    for c in _mk_client(monkeypatch, [v1], replication_factor=1):
+        c.post("/backups", json={"label": "b1"})
+        c.post("/backups/b1/versions", json={"version_key": "v1"})
+        old = _upload(c, "b1", "v1", "/a.txt", b"precious")
+        sha = old["sha256"]
+        stored = v1 / "_content" / sha[:2] / sha
+        stored.unlink()
+        db = m.SessionLocal()
+        fc = db.get(db_mod.FileContent, sha)
+        assert fc.encrypted
+        fc.quarantined_at = _dt.now(); fc.quarantine_reason = "sumiu"
+        db.commit(); db.close()
+
+        c.post("/backups/b1/versions", json={"version_key": "v2"})
+        _upload(c, "b1", "v2", "/a.txt", b"precious")
+
+        assert stored.read_bytes() != b"precious"  # cifrado no disco
+        assert c.get(f"/files/{old['file_id']}/download").content == b"precious"
+        db = m.SessionLocal()
+        assert db.get(db_mod.FileContent, sha).quarantined_at is None
+        db.close()
+
+
+# -- Reconciliação: nunca apagar a única cópia legível -------------------------
+
+def test_reconcile_with_degraded_volume_deletes_nothing(tmp_path, monkeypatch):
+    """Regressão: com v1 fora do ar, target_replicas() caía de 2 para 1 e a
+    reconciliação apagava a cópia do disco SAUDÁVEL, mantendo a do disco offline."""
+    v1 = tmp_path / "v1"; v1.mkdir()
+    v2 = tmp_path / "v2"; v2.mkdir()
+
+    for c in _mk_client(monkeypatch, [v1, v2], replication_factor=2):
+        c.post("/backups", json={"label": "b1"})
+        c.post("/backups/b1/versions", json={"version_key": "v1"})
+        sha = _upload(c, "b1", "v1", "/a.txt", b"precious")["sha256"]
+
+        def fake_usage(path):
+            if path == v1:
+                raise OSError("disco fora do ar")
+            return _healthy_usage(path)
+        monkeypatch.setattr(storage_mod.shutil, "disk_usage", fake_usage)
+        m._degraded_volumes.add(v1)
+
+        r = c.post("/maintenance/reconcile-replication")
+        assert r.status_code == 200
+        assert r.json()["cleaned"] == 0
+        assert (v2 / "_content" / sha[:2] / sha).exists()
+        assert set(_db_copies(sha)) == {str(v1), str(v2)}
+
+
+def test_cleanup_excess_never_keeps_unreadable_primary(tmp_path, monkeypatch):
+    """Fator 1 com duas cópias, primária sumida do disco (volume ainda não marcado
+    degraded): a única cópia legível é preservada."""
+    v1 = tmp_path / "v1"; v1.mkdir()
+    v2 = tmp_path / "v2"; v2.mkdir()
+
+    for c in _mk_client(monkeypatch, [v1, v2], replication_factor=2):
+        c.post("/backups", json={"label": "b1"})
+        c.post("/backups/b1/versions", json={"version_key": "v1"})
+        sha = _upload(c, "b1", "v1", "/a.txt", b"precious")["sha256"]
+        (v1 / "_content" / sha[:2] / sha).unlink()
+        monkeypatch.setattr(storage_mod, "REPLICATION_FACTOR", 1)
+
+        db = m.SessionLocal()
+        try:
+            assert storage_mod.cleanup_excess_copies(db) == 0
+        finally:
+            db.close()
+        assert (v2 / "_content" / sha[:2] / sha).read_bytes() == b"precious"
+
+
+def test_cleanup_excess_removes_real_excess(tmp_path, monkeypatch):
+    """Excesso de verdade (duas cópias legíveis, fator 1) continua sendo removido,
+    preservando a primária."""
+    v1 = tmp_path / "v1"; v1.mkdir()
+    v2 = tmp_path / "v2"; v2.mkdir()
+
+    for c in _mk_client(monkeypatch, [v1, v2], replication_factor=2):
+        c.post("/backups", json={"label": "b1"})
+        c.post("/backups/b1/versions", json={"version_key": "v1"})
+        sha = _upload(c, "b1", "v1", "/a.txt", b"precious")["sha256"]
+        monkeypatch.setattr(storage_mod, "REPLICATION_FACTOR", 1)
+
+        db = m.SessionLocal()
+        try:
+            primary = db.get(db_mod.FileContent, sha).stored_at
+            assert storage_mod.cleanup_excess_copies(db) == 1
+        finally:
+            db.close()
+        assert list(_db_copies(sha).values()) == [primary]
+        assert Path(primary).exists()

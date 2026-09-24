@@ -99,7 +99,7 @@ header{padding-inline:max(var(--gutter),calc((100% - var(--content-max))/2 + var
 .badge-failed,.badge-error{background:var(--red-dim);color:var(--red)}
 .badge-running,.badge-partial{background:var(--amber-dim);color:var(--amber)}
 .badge-running::before{content:'⟳ ';display:inline-block;animation:spin .9s linear infinite}
-.badge-incomplete,.badge-unknown{background:var(--bg3);border:1px solid var(--border2);color:var(--text-dim)}
+.badge-incomplete,.badge-unknown,.badge-trashed{background:var(--bg3);border:1px solid var(--border2);color:var(--text-dim)}
 .badge-off{background:var(--bg3);border:1px solid var(--border2);color:var(--text-mute)}
 .badge-absorb{background:color-mix(in srgb,var(--blue) 12%,var(--bg2));color:var(--blue)}
 
