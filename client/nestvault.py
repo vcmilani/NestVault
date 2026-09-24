@@ -1,5 +1,5 @@
 """
-NestVault  v9.2.1
+NestVault  v9.3.0
 Cada execucao de backup cria uma nova versao dentro do label.
 Conteudo identico e armazenado uma unica vez no servidor (deduplicacao por sha256).
 
@@ -12,6 +12,11 @@ Uso:
     nestvault backups --server http://192.168.1.100:8000
 
 Changelog (cliente — histórico completo do sistema no README):
+  v9.3  Restore entende caminhos gravados por clientes Windows (C:\\..., \\\\nas\\...)
+        em qualquer SO — antes, no Windows, todo arquivo era recusado como
+        "caminho inseguro"; a letra do drive vira pasta no destino e o
+        --prefix casa por componente. delete/cleanup avisam quando o servidor
+        (v9.3+) mandou os itens para a lixeira e até quando são restauráveis.
   v7.11 Pipeline de backup sobreposto (hash ∥ check ∥ upload) em vez de fases
         estanques; chunks de /check/batch em paralelo; Smart Skip — quando
         nada mudou desde a última versão "done" (e ela tem no máximo
@@ -50,9 +55,9 @@ Changelog (cliente — histórico completo do sistema no README):
         reconciliação de replicação (reconcile-replication).
 """
 
-VERSION = "v9.2.1"
+VERSION = "v9.3.0"
 
-import os, sys, hashlib, argparse, base64, json, socket, threading, time
+import os, re, sys, hashlib, argparse, base64, json, socket, threading, time
 from pathlib import Path
 from typing import Optional, Callable
 from datetime import datetime
@@ -471,6 +476,14 @@ def _server_version(server: str) -> tuple[int, int]:
         return (int(parts[0]), int(parts[1]))
     except Exception:
         return (0, 0)
+
+
+def _fmt_purge_after(iso: Optional[str]) -> str:
+    """Data de expiração da lixeira (servidor 9.3+) no formato dd/mm/aaaa."""
+    try:
+        return datetime.fromisoformat(iso).strftime("%d/%m/%Y")
+    except (TypeError, ValueError):
+        return "o fim do prazo da lixeira"
 
 
 def delete_label_api(server, label):
@@ -1188,6 +1201,50 @@ def list_versions(label, server=DEFAULT_SERVER):
 
 
 # -- Restore ------------------------------------------------------------------
+_WIN_DRIVE_RE = re.compile(r"^([A-Za-z]):(?=[\\/]|$)")
+
+
+def _path_parts(path: str, windows: bool) -> list[str]:
+    """Componentes de um original_path, para caminhos gravados em qualquer SO.
+
+    O backup grava str(Path) nativo: "/home/ana/x" num cliente POSIX,
+    "C:\\Users\\ana\\x" (ou "docs\\x" com --prefix) num cliente Windows. A barra
+    invertida só é tratada como separador quando o caminho é de Windows — no
+    POSIX ela é um caractere válido de nome de arquivo. A letra do drive vira um
+    diretório ("C:\\Users" → C/Users), para arquivos de drives diferentes não se
+    sobrescreverem no destino."""
+    windows_style = (
+        windows
+        or bool(_WIN_DRIVE_RE.match(path))
+        or path.startswith("\\\\")
+        or ("\\" in path and "/" not in path)
+    )
+    if windows_style:
+        path = _WIN_DRIVE_RE.sub(r"\1", path.replace("\\", "/"))
+    return [p for p in path.split("/") if p not in ("", ".")]
+
+
+def _restore_relative(original_path: str, path_prefix: Optional[str],
+                      windows: bool = os.name == "nt") -> Optional[list[str]]:
+    """Componentes do caminho relativo ao destino do restore, ou None se inseguro.
+
+    Antes o relativo era original_path.lstrip("/"): no Windows, "C:\\Users\\..."
+    continuava absoluto, `dest_root / relative` trocava a raiz inteira e a checagem
+    de path traversal rejeitava TODOS os arquivos. O prefixo agora casa por
+    componente ("docs" não casa com "docs2/x")."""
+    parts = _path_parts(original_path, windows)
+    if path_prefix:
+        prefix = _path_parts(path_prefix, windows)
+        head = parts[:len(prefix)]
+        if windows:  # NTFS não diferencia maiúsculas
+            head, prefix = [x.casefold() for x in head], [x.casefold() for x in prefix]
+        if head == prefix:
+            parts = parts[len(prefix):]
+    if not parts or ".." in parts:
+        return None
+    return parts
+
+
 def restore(destination, label, version_key, server=DEFAULT_SERVER,
             path_prefix=None, dry_run=False, overwrite=False, exclude=None,
             workers=4):
@@ -1228,20 +1285,21 @@ def restore(destination, label, version_key, server=DEFAULT_SERVER,
         sha256        = record["sha256"]
         size          = record["size"]
 
-        relative = (original_path[len(path_prefix):].lstrip("/")
-                    if path_prefix and original_path.startswith(path_prefix)
-                    else original_path.lstrip("/"))
-        dest_file = dest_root / relative
+        parts = _restore_relative(original_path, path_prefix)
+        dest_file = dest_root.joinpath(*parts) if parts else None
 
-        # Defesa contra path traversal (zip-slip): garante que o destino
-        # resolvido permanece dentro de dest_root, mesmo se o servidor enviar
-        # um original_path com segmentos ".." que escapariam do diretorio.
+        # Defesa contra path traversal (zip-slip): ".." é recusado já nos
+        # componentes, e o destino resolvido ainda precisa ficar dentro de
+        # dest_root (cobre symlinks pré-existentes no destino).
         try:
+            if dest_file is None:
+                raise ValueError
             dest_file.resolve().relative_to(dest_root.resolve())
         except ValueError:
             _err(f"Caminho inseguro ignorado: {original_path!r}")
             stats["errors"] += 1
             continue
+        relative = "/".join(parts)
 
         if Path(relative).name in IGNORED_NAMES:
             stats["skipped"] += 1
@@ -1368,12 +1426,15 @@ def _cleanup_label(label, keep, server=DEFAULT_SERVER):
     removed = result.get("versions_removed", [])
     storage = result.get("storage_files_removed", 0)
     kept    = result["kept"]
+    removed_tag = "na lixeira" if result.get("trashed") else "removidas"
     _info(
         f"[{AMBER}][{label}][/{AMBER}]  "
         f"[{GREEN}]mantidas={kept}[/{GREEN}]  "
-        f"[{RED}]removidas={len(removed)}[/{RED}]  "
+        f"[{RED}]{removed_tag}={len(removed)}[/{RED}]  "
         f"[{DIM}]storage={storage}[/{DIM}]"
     )
+    if result.get("trashed") and removed:
+        _dim(f"  Restauraveis pelo admin ate {_fmt_purge_after(result.get('purge_after'))}.")
     for v in removed:
         _dim(f"  - {v}")
     return result
@@ -1443,8 +1504,12 @@ def delete_label(label, server=DEFAULT_SERVER, force=False):
             _info("Operacao cancelada.")
             return
     try:
-        delete_label_api(server, label)
-        _ok(f"Label [{label}] excluido. Limpeza do storage iniciada em background.")
+        result = delete_label_api(server, label)
+        if result.get("trashed"):
+            _ok(f"Label [{label}] enviado a lixeira do servidor — o admin pode restaura-lo "
+                f"ate {_fmt_purge_after(result.get('purge_after'))}.")
+        else:
+            _ok(f"Label [{label}] excluido. Limpeza do storage iniciada em background.")
     except requests.RequestException as e:
         _err(f"Erro ao excluir label: {e}")
         sys.exit(1)

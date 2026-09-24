@@ -297,9 +297,12 @@ def cancel_job(job_id: int, db: Session = Depends(get_db)):
 
     Retorna 409 se o job estiver genuinamente em execução (lock ativo).
     """
+    from cloud.rclone_runner import is_job_running
+
     job = _require_job(job_id, db)
-    lock = _job_locks.get(job_id)
-    if lock and lock.locked():
+    # Antes consultava `_job_locks`, que deixou de existir quando a exclusão
+    # passou a ser por remote no runner — todo clique em ⏹ dava NameError (500).
+    if is_job_running(job_id):
         raise HTTPException(409, "Job está em execução — aguarde a conclusão ou reinicie o servidor")
     if job.last_run_status == "running":
         job.last_run_status  = "error"

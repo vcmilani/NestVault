@@ -4,6 +4,8 @@ client macOS: smart skip, idade de versao e o cache local de hash. Nao cobrem
 rede/subprocessos — so a logica de decisao."""
 from datetime import datetime, timedelta
 
+import pytest
+
 import nestvault
 
 
@@ -89,8 +91,18 @@ def test_chunked_empty_list():
 
 # -- cache local de hash ---------------------------------------------------
 
-def test_local_hash_cache_round_trip(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+@pytest.fixture
+def cache_dir(tmp_path, monkeypatch):
+    """Isola o cache no tmp_path em qualquer SO. Antes os testes só setavam
+    XDG_CACHE_HOME, que o cliente ignora no macOS e no Windows: lá eles gravavam
+    no cache REAL do usuário (~/Library/Caches/nestvault/mylabel.json), e o teste
+    de snapshot vazio falhava ao encontrar o arquivo deixado pelo round trip."""
+    d = tmp_path / "nestvault"
+    monkeypatch.setattr(nestvault, "_local_cache_dir", lambda: d)
+    return d
+
+
+def test_local_hash_cache_round_trip(cache_dir):
     files = {"a.txt": {"original_path": "a.txt", "sha256": "abc", "size": 10, "mtime": 1.0}}
 
     nestvault._save_local_hash_cache("mylabel", "2026-01-01T00:00:00", files)
@@ -98,17 +110,16 @@ def test_local_hash_cache_round_trip(tmp_path, monkeypatch):
 
     assert loaded["version_key"] == "2026-01-01T00:00:00"
     assert loaded["files"] == files
+    assert (cache_dir / "mylabel.json").exists()
 
 
-def test_local_hash_cache_miss_returns_empty_dict(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+def test_local_hash_cache_miss_returns_empty_dict(cache_dir):
     assert nestvault._load_local_hash_cache("never-saved-label") == {}
 
 
-def test_local_hash_cache_skips_saving_empty_snapshot(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+def test_local_hash_cache_skips_saving_empty_snapshot(cache_dir):
     nestvault._save_local_hash_cache("mylabel", "2026-01-01T00:00:00", {})
-    assert not nestvault._local_cache_path("mylabel").exists()
+    assert not (cache_dir / "mylabel.json").exists()
 
 
 # -- diretorio de cache por SO -----------------------------------------------

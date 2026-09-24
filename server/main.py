@@ -1,5 +1,5 @@
 """
-NestVault  v9.2.1
+NestVault  v9.3.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -149,6 +149,7 @@ from fastapi import FastAPI, Request, HTTPException, Depends, Header, Background
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
+from starlette.datastructures import MutableHeaders
 from pydantic import BaseModel, Field
 from typing import Optional, Literal, Iterable
 import asyncio, os, tempfile, hashlib, base64, shutil, logging, time, threading, re, secrets
@@ -156,14 +157,14 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from urllib.parse import quote
 
-from sqlalchemy import func, select, insert, literal, case, exists, and_
+from sqlalchemy import func, select, insert, literal, case, exists, and_, or_
 from sqlalchemy.orm import Session, aliased
 from sqlalchemy.exc import IntegrityError
 
 from database import (
     init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy,
     VersionFile, MaintenanceJob, SsdCachePendingMove, RcloneBackupJob, DiskSnapshot,
-    DiskUsageDaily, User, hash_api_key, bootstrap_admin_user,
+    DiskUsageDaily, User, hash_api_key, bootstrap_admin_user, TRASHED_STATUS,
 )
 import config
 import crypto
@@ -450,8 +451,10 @@ def _process_ssd_moves_worker(*, recovery: bool) -> None:
     job_id = None
     prefix = "Recovery: " if recovery else ""
     try:
+        if recovery:
+            storage.unpark_ssd_moves(db)
         recovered = storage.recover_stuck_ssd_files(db) if recovery else 0
-        total_pending = db.query(SsdCachePendingMove).count()
+        total_pending = storage.active_ssd_moves_query(db).count()
         if not total_pending:
             if not recovery:
                 storage.reconcile_orphaned_ssd_copies(db)
@@ -532,7 +535,9 @@ async def _ssd_space_monitor():
                 continue
             db = SessionLocal()
             try:
-                if db.query(SsdCachePendingMove).count() > 0 and _should_process_ssd_moves(db):
+                # Só as pendências ativas: as estacionadas (ver storage._park_ssd_move)
+                # abririam um job vazio a cada 30s.
+                if storage.active_ssd_moves_query(db).count() > 0 and _should_process_ssd_moves(db):
                     asyncio.get_running_loop().run_in_executor(None, _bg_process_ssd_pending_moves)
             finally:
                 db.close()
@@ -587,11 +592,53 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="9.2.1", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="9.3.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+# Segunda camada contra XSS no painel. O dashboard guarda a API key em
+# localStorage, então um script injetado consegue lê-la; connect-src/img-src
+# 'self' impedem o jeito mais simples de levá-la para fora (fetch ou <img> para
+# outro host). 'unsafe-inline' continua necessário: todas as páginas usam
+# <script> e handlers inline. Nenhuma página carrega recurso externo.
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+        "connect-src 'self'; object-src 'none'; base-uri 'none'; "
+        "form-action 'self'; frame-ancestors 'none'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+
+
+class _SecurityHeadersMiddleware:
+    """ASGI puro, e não @app.middleware("http"): o BaseHTTPMiddleware repassa o
+    corpo por uma fila intermediária, custo pago em todo upload/download."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                for k, v in _SECURITY_HEADERS.items():
+                    headers.setdefault(k, v)
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
+app.add_middleware(_SecurityHeadersMiddleware)
 
 
 # -- Schemas: Requests --------------------------------------------------------
@@ -751,6 +798,10 @@ class BackupCreatedResponse(BaseModel):
 class BackupDeletedResponse(BaseModel):
     status: Literal["deleted"]
     label: str
+    # Exclusão de usuário comum vai para a lixeira (restaurável pelo admin até
+    # purge_after). "status" continua "deleted" para os clientes existentes.
+    trashed: bool = False
+    purge_after: Optional[str] = None
 
 class UserInfo(BaseModel):
     id: int
@@ -788,6 +839,8 @@ class VersionDeletedResponse(BaseModel):
     status: Literal["deleted"]
     version_key: str
     files_removed_from_storage: int
+    trashed: bool = False
+    purge_after: Optional[str] = None
 
 class CheckResponse(BaseModel):
     needs_upload: bool
@@ -816,6 +869,8 @@ class CleanupResponse(BaseModel):
     kept: int
     versions_removed: list[str]
     storage_files_removed: int
+    trashed: bool = False
+    purge_after: Optional[str] = None
 
 class RereplicateResponse(BaseModel):
     replicated: int
@@ -1096,26 +1151,9 @@ def _verify_stored_file(sha256: str, dest: Path, encrypted: bool) -> None:
         raise HTTPException(500, "Corrupção detectada: sha256 do disco não confere com o esperado")
 
 
-def _expected_stored_size(plain_size: int, encrypted: bool) -> int:
-    """Tamanho esperado do arquivo no disco a partir do tamanho do plaintext.
-    Cifrado: base_nonce + 20 bytes de overhead (4 de comprimento + 16 de tag GCM)
-    por chunk de 1 MB — formato definido em crypto.py."""
-    if not encrypted:
-        return plain_size
-    n_chunks = (plain_size + crypto.CHUNK_SIZE - 1) // crypto.CHUNK_SIZE
-    return crypto.NONCE_SIZE + plain_size + n_chunks * 20
-
-
-def _purge_corrupted_content(sha256: str, db: Session) -> None:
-    copies = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).all()
-    for copy in copies:
-        Path(copy.stored_at).unlink(missing_ok=True)
-        db.delete(copy)
-    fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
-    if fc:
-        db.delete(fc)
-    db.flush()
-    log.warning(f"[integrity] {sha256[:8]}… corrompido — {len(copies)} cópia(s) purgadas do disco e banco")
+# Implementação canônica em storage.expected_stored_size (usada também pela
+# limpeza de cópias excedentes).
+_expected_stored_size = storage.expected_stored_size
 
 
 async def _stream_request_to_disk(request: Request, volume: Path) -> tuple[str, int, Path]:
@@ -1143,8 +1181,9 @@ async def _stream_request_to_disk(request: Request, volume: Path) -> tuple[str, 
 
 
 def _get_backup_or_404(label: str, db: Session, user: Optional[User] = None) -> BackupID:
+    """Label vivo (fora da lixeira) — um label na lixeira responde 404 para todos."""
     b = db.query(BackupID).filter(BackupID.label == label).first()
-    if not b:
+    if not b or b.status == TRASHED_STATUS:
         raise HTTPException(404, f"Backup '{label}' nao encontrado")
     if user is not None:
         require_owner_or_admin(b.owner_user_id, user)
@@ -1158,9 +1197,40 @@ def _get_version_or_404(label: str, version_key: str, db: Session, user: Optiona
          .filter(BackupVersion.backup_label == label,
                  BackupVersion.version_key  == version_key)
          .first())
-    if not v:
+    if not v or v.status == TRASHED_STATUS:
         raise HTTPException(404, f"Versao '{version_key}' nao encontrada em '{label}'")
     return v
+
+
+# -- Lixeira ------------------------------------------------------------------
+# Exclusões pedidas por usuário comum (label, versão, cleanup) não apagam nada:
+# marcam status = TRASHED_STATUS e somem para o cliente. O admin lista/restaura
+# em /maintenance/trash e a limpeza noturna apaga de vez depois de
+# storage.trash_retention_days. Motivo: a chave de API mora na máquina cliente —
+# se ela for comprometida (ransomware), a exclusão não pode ser a última palavra.
+# Exclusões feitas pelo admin continuam imediatas.
+
+def _trash_purge_after(now: datetime) -> str:
+    return (now + timedelta(days=config.get("storage.trash_retention_days"))).isoformat(timespec="seconds")
+
+
+def _trash_versions(db: Session, version_ids: list[int], user: User, now: datetime) -> int:
+    """Move versões para a lixeira guardando o status anterior. Não faz commit."""
+    if not version_ids:
+        return 0
+    return (db.query(BackupVersion)
+            .filter(BackupVersion.id.in_(version_ids),
+                    BackupVersion.status != TRASHED_STATUS)
+            .update({"trashed_from_status": BackupVersion.status,
+                     "status": TRASHED_STATUS,
+                     "trashed_at": now,
+                     "trashed_by": user.id},
+                    synchronize_session=False))
+
+
+def _live_label_filter():
+    """BackupID fora da lixeira (status NULL em linhas antigas conta como vivo)."""
+    return or_(BackupID.status.is_(None), BackupID.status != TRASHED_STATUS)
 
 
 def _version_stats(v: BackupVersion, db: Session) -> VersionInfo:
@@ -2699,6 +2769,14 @@ def create_backup(req: BackupCreate, db: Session = Depends(get_db),
     existing = db.query(BackupID).filter(BackupID.label == req.label).first()
     if existing:
         require_owner_or_admin(existing.owner_user_id, user)
+        if existing.status == TRASHED_STATUS:
+            # Novo backup num label que está na lixeira: o label volta a valer,
+            # vazio para o cliente; as versões antigas continuam na lixeira
+            # (restauráveis pelo admin até o prazo).
+            existing.status, existing.trashed_at, existing.trashed_by = "active", None, None
+            db.commit()
+            log.info(f"[trash] Label [{req.label}] reativado por novo backup — versões antigas seguem na lixeira")
+            return BackupCreatedResponse(created=True, backup=_backup_info(existing, db))
         return BackupCreatedResponse(created=False, backup=_backup_info(existing, db))
     b = BackupID(label=req.label, client_name=req.client_name, prefix=req.prefix,
                  owner_user_id=user.id)
@@ -2710,7 +2788,7 @@ def create_backup(req: BackupCreate, db: Session = Depends(get_db),
 def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db),
                   user: User = Depends(get_current_user)):
     """Lista backups com stats — 4 queries fixas independente de N (sem N+1)."""
-    q = db.query(BackupID).order_by(BackupID.created_at.desc())
+    q = db.query(BackupID).filter(_live_label_filter()).order_by(BackupID.created_at.desc())
     if user.role != "admin":
         q = q.filter(BackupID.owner_user_id == user.id)
     if client_name:
@@ -2893,11 +2971,19 @@ def rotate_user_key(user_id: int, db: Session = Depends(get_db)):
     return UserKeyRotatedResponse(user=_user_info(u), api_key=api_key)
 
 
-@app.patch("/users/{user_id}", response_model=UserInfo, dependencies=[Depends(require_admin)])
-def update_user_active(user_id: int, req: UserActiveUpdate, db: Session = Depends(get_db)):
+@app.patch("/users/{user_id}", response_model=UserInfo)
+def update_user_active(user_id: int, req: UserActiveUpdate, db: Session = Depends(get_db),
+                       admin: User = Depends(require_admin)):
     u = db.query(User).filter(User.id == user_id).first()
     if not u:
         raise HTTPException(404, "Usuario nao encontrado")
+    if not req.is_active and u.id == admin.id:
+        # Sem esta trava o admin podia desativar a própria conta — e, sendo o
+        # único, não havia volta pela API: o bootstrap por BACKUP_API_KEY só roda
+        # com a tabela de usuários vazia. Ela basta para nunca zerar os admins
+        # ativos: quem chama é sempre um admin ativo, então desativar OUTRA conta
+        # ainda deixa pelo menos quem chamou.
+        raise HTTPException(409, "Voce nao pode desativar a propria conta — peca a outro admin")
     u.is_active = req.is_active
     db.commit(); db.refresh(u)
     log.info(f"[users] Usuario '{u.username}' {'ativado' if u.is_active else 'desativado'}")
@@ -3005,6 +3091,15 @@ def delete_backup(label: str, background_tasks: BackgroundTasks, db: Session = D
     version_ids = [
         r.id for r in db.query(BackupVersion.id).filter(BackupVersion.backup_label == label).all()
     ]
+    if user.role != "admin":
+        now = datetime.now()
+        n = _trash_versions(db, version_ids, user, now)
+        b.status, b.trashed_at, b.trashed_by = TRASHED_STATUS, now, user.id
+        db.commit()
+        invalidate_activity()
+        log.warning(f"[trash] Label [{label}] ({n} versão(ões)) enviado à lixeira por '{user.username}'")
+        return BackupDeletedResponse(status="deleted", label=label, trashed=True,
+                                     purge_after=_trash_purge_after(now))
     if version_ids:
         db.query(VersionFile).filter(VersionFile.version_id.in_(version_ids)).delete(
             synchronize_session=False
@@ -3074,6 +3169,8 @@ def create_version(label: str, req: VersionCreate, db: Session = Depends(get_db)
                         BackupVersion.version_key  == req.version_key)
                 .first())
     if existing:
+        if existing.status == TRASHED_STATUS:
+            raise HTTPException(409, f"Versao '{req.version_key}' esta na lixeira — use outro version_key")
         return VersionCreatedResponse(created=False, version=_version_stats(existing, db))
     updated = (db.query(BackupVersion)
                .filter(BackupVersion.backup_label == label,
@@ -3093,7 +3190,8 @@ def list_versions(label: str, db: Session = Depends(get_db), user: User = Depend
     """Lista versoes com stats — 2 queries fixas (sem N+1)."""
     _get_backup_or_404(label, db, user)
     versions = (db.query(BackupVersion)
-                .filter(BackupVersion.backup_label == label)
+                .filter(BackupVersion.backup_label == label,
+                        BackupVersion.status != TRASHED_STATUS)
                 .order_by(BackupVersion.created_at.desc())
                 .all())
     if not versions:
@@ -3138,6 +3236,14 @@ def get_version(label: str, version_key: str, db: Session = Depends(get_db),
 def finish_version(label: str, version_key: str, req: VersionFinish, background_tasks: BackgroundTasks,
                     db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     v = _get_version_or_404(label, version_key, db, user)
+    if v.status in ("done", "failed"):
+        # Versão já finalizada é imutável: retry do mesmo status é idempotente,
+        # troca não. Antes dava para marcar uma done antiga como failed — e a
+        # limpeza noturna apaga versões failed —, um jeito de destruir histórico
+        # que contornava a lixeira.
+        if v.status != req.status:
+            raise HTTPException(409, f"Versao ja finalizada como '{v.status}'")
+        return _version_stats(v, db)
     v.status = req.status
     v.finished_at = datetime.now()
     db.commit()
@@ -3198,6 +3304,15 @@ def absorb_version(label: str, version_key: str, req: AbsorbRequest, db: Session
 def delete_version(label: str, version_key: str, background_tasks: BackgroundTasks,
                     db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     v = _get_version_or_404(label, version_key, db, user)
+    if user.role != "admin":
+        now = datetime.now()
+        _trash_versions(db, [v.id], user, now)
+        db.commit()
+        invalidate_activity()
+        log.warning(f"[trash] Versão {label}/{version_key} enviada à lixeira por '{user.username}'")
+        return VersionDeletedResponse(status="deleted", version_key=version_key,
+                                      files_removed_from_storage=0, trashed=True,
+                                      purge_after=_trash_purge_after(now))
     # Bulk delete em vez de db.delete(v): o cascade delete-orphan de
     # BackupVersion.files carregaria e deletaria cada VersionFile individualmente
     # — uma versão com 100k arquivos vira 100k DELETEs. Mesmo par de queries que
@@ -3550,42 +3665,24 @@ def _dedup_or_store_content_sync(
     """Dedup/verificação de integridade e armazenamento de conteúdo novo.
     Bloqueante (queries + stat + I/O) — roda via asyncio.to_thread.
     Retorna replica_source quando as réplicas devem ser criadas após o commit."""
-    replica_source: Optional[Path] = None
     fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
-    if fc:
-        first_copy = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).first()
-        if first_copy:
-            stored = Path(first_copy.stored_at)
-            # Checagem leve: existência + tamanho esperado no disco. A verificação
-            # profunda (decifrar e re-hashear) fica com o job validate-integrity.
-            try:
-                stored_size = stored.stat().st_size
-            except OSError:
-                stored_size = None
-            if stored_size is None:
-                log.warning(f"[integrity] {sha256[:8]}… ausente no disco — purgando e re-enviando")
-                _purge_corrupted_content(sha256, db)
-                fc = None
-            elif stored_size != _expected_stored_size(fc.size, fc.encrypted):
-                log.warning(
-                    f"[integrity] {sha256[:8]}… tamanho no disco ({stored_size}) difere do esperado "
-                    f"({_expected_stored_size(fc.size, fc.encrypted)}) — purgando e re-enviando"
-                )
-                _purge_corrupted_content(sha256, db)
-                fc = None
-            else:
-                log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — dedup sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
-                _ensure_replicas(sha256, stored, db)
-                tmp_path.unlink(missing_ok=True)
-        else:
-            tmp_path.unlink(missing_ok=True)
-
-    if not fc:
+    if fc is None:
         _, replica_source = _store_new_content(
             sha256, size, tmp_path, volume, ssd_dir,
             backup_label, version_key, original_path, db,
         )
-    return replica_source
+        return replica_source
+    # Dedup — ou reparo, se nenhuma cópia estiver legível. Implementação em
+    # storage.dedup_or_repair, compartilhada com a ingestão do rclone.
+    try:
+        return storage.dedup_or_repair(
+            db, fc, tmp_path, volume,
+            what=f"upload {backup_label}/{version_key} ← {original_path!r}",
+        )
+    except storage.ContentRepairUnavailable as e:
+        raise HTTPException(503, str(e)) from e
+    except storage.ContentVerificationFailed as e:
+        raise HTTPException(500, f"Corrupção detectada ao reparar: {e}") from e
 
 
 def _upsert_version_file_sync(version_id: int, original_path: str, sha256: str,
@@ -3770,7 +3867,9 @@ def download_file(file_id: int, db: Session = Depends(get_db), user: User = Depe
     row = (db.query(VersionFile.original_path, VersionFile.sha256, BackupID.owner_user_id)
            .join(BackupVersion, BackupVersion.id == VersionFile.version_id)
            .join(BackupID, BackupID.label == BackupVersion.backup_label)
-           .filter(VersionFile.id == file_id)
+           .filter(VersionFile.id == file_id,
+                   BackupVersion.status != TRASHED_STATUS,
+                   _live_label_filter())
            .first())
     if not row:
         raise HTTPException(404, "Arquivo nao encontrado")
@@ -4090,6 +4189,101 @@ def purge_quarantine(db: Session = Depends(get_db)):
     return {"purged": len(shas), "versions_failed": len(versions)}
 
 
+class TrashRestoreRequest(BaseModel):
+    label: str
+    version_key: Optional[str] = None  # None = o label e todas as versões dele na lixeira
+
+
+@app.get("/maintenance/trash", dependencies=[Depends(require_admin)])
+def list_trash(db: Session = Depends(get_db)):
+    """Conteúdo da lixeira: labels e versões excluídos por usuários comuns."""
+    retention = config.get("storage.trash_retention_days")
+
+    def _purge_at(ts: Optional[datetime]) -> Optional[str]:
+        return (ts + timedelta(days=retention)).isoformat(timespec="seconds") if ts else None
+
+    users = {u.id: u.username for u in db.query(User.id, User.username).all()}
+    labels = db.query(BackupID).filter(BackupID.status == TRASHED_STATUS).all()
+    versions = (db.query(BackupVersion)
+                .filter(BackupVersion.status == TRASHED_STATUS)
+                .order_by(BackupVersion.trashed_at.desc())
+                .all())
+    counts = dict(
+        db.query(VersionFile.version_id, func.count(VersionFile.id))
+        .filter(VersionFile.version_id.in_([v.id for v in versions]))
+        .group_by(VersionFile.version_id)
+        .all()
+    ) if versions else {}
+    trashed_labels = {b.label for b in labels}
+    return {
+        "retention_days": retention,
+        "labels": [{
+            "label": b.label,
+            "owner_username": users.get(b.owner_user_id),
+            "trashed_at": b.trashed_at.isoformat(timespec="seconds") if b.trashed_at else None,
+            "trashed_by": users.get(b.trashed_by),
+            "purge_after": _purge_at(b.trashed_at),
+        } for b in labels],
+        "versions": [{
+            "label": v.backup_label,
+            "version_key": v.version_key,
+            "previous_status": v.trashed_from_status,
+            "file_count": counts.get(v.id, 0),
+            "label_trashed": v.backup_label in trashed_labels,
+            "trashed_at": v.trashed_at.isoformat(timespec="seconds") if v.trashed_at else None,
+            "trashed_by": users.get(v.trashed_by),
+            "purge_after": _purge_at(v.trashed_at),
+        } for v in versions],
+    }
+
+
+@app.post("/maintenance/trash/restore", dependencies=[Depends(require_admin)])
+def restore_trash(req: TrashRestoreRequest, db: Session = Depends(get_db)):
+    """Devolve um label (com todas as versões dele na lixeira) ou uma versão."""
+    b = db.query(BackupID).filter(BackupID.label == req.label).first()
+    if not b:
+        raise HTTPException(404, f"Label '{req.label}' nao encontrado")
+    q = db.query(BackupVersion).filter(BackupVersion.backup_label == req.label,
+                                       BackupVersion.status == TRASHED_STATUS)
+    if req.version_key is not None:
+        q = q.filter(BackupVersion.version_key == req.version_key)
+    versions = q.all()
+    if req.version_key is not None and not versions:
+        raise HTTPException(404, f"Versao '{req.version_key}' nao esta na lixeira")
+    if not versions and b.status != TRASHED_STATUS:
+        raise HTTPException(404, f"Nada de '{req.label}' esta na lixeira")
+
+    for v in versions:
+        # "running" não volta: o cliente que a escrevia já recebeu 404 e desistiu.
+        prev = v.trashed_from_status or "done"
+        v.status = "incomplete" if prev == "running" else prev
+        v.trashed_at = v.trashed_from_status = v.trashed_by = None
+    # Restaurar qualquer parte do label o traz de volta — senão a versão
+    # restaurada continuaria invisível atrás de um label na lixeira.
+    label_restored = b.status == TRASHED_STATUS
+    if label_restored:
+        b.status, b.trashed_at, b.trashed_by = "active", None, None
+    db.commit()
+    invalidate_activity()
+    log.info(f"[trash] Restaurado: label [{req.label}]"
+             + (f" (label reativado)" if label_restored else "")
+             + f" — {len(versions)} versão(ões)")
+    return {"label": req.label, "label_restored": label_restored,
+            "versions_restored": [v.version_key for v in versions]}
+
+
+@app.post("/maintenance/trash/purge", dependencies=[Depends(require_admin)])
+def purge_trash_now(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Esvazia a lixeira inteira agora, sem esperar o prazo. Irreversível."""
+    from nightly_cleanup import purge_trash
+    n_versions, n_labels = purge_trash(db, cutoff=None)
+    invalidate_activity()
+    if n_versions or n_labels:
+        background_tasks.add_task(_bg_cleanup_orphan_contents)
+    log.warning(f"[trash] Lixeira esvaziada pelo admin — {n_versions} versão(ões), {n_labels} label(s)")
+    return {"versions_purged": n_versions, "labels_purged": n_labels}
+
+
 def _bg_run_db_backup() -> None:
     from db_backup import run_db_backup
     run_db_backup()
@@ -4259,7 +4453,8 @@ def cleanup_versions(label: str, req: CleanupRequest, db: Session = Depends(get_
     # Considera TODAS as versoes (done, failed, running) ordenadas por data desc.
     # As `keep` mais recentes sao mantidas independente do status.
     all_versions = (db.query(BackupVersion.id, BackupVersion.version_key)
-                    .filter(BackupVersion.backup_label == label)
+                    .filter(BackupVersion.backup_label == label,
+                            BackupVersion.status != TRASHED_STATUS)
                     .order_by(BackupVersion.version_key.desc())
                     .all())
     to_delete = all_versions[req.keep:]
@@ -4268,6 +4463,17 @@ def cleanup_versions(label: str, req: CleanupRequest, db: Session = Depends(get_
 
     ids_to_delete = [v[0] for v in to_delete]
     keys_removed  = [v[1] for v in to_delete]
+
+    if user.role != "admin":
+        now = datetime.now()
+        _trash_versions(db, ids_to_delete, user, now)
+        db.commit()
+        invalidate_activity()
+        log.warning(f"[trash] {label}: {len(keys_removed)} versão(ões) enviada(s) à lixeira por "
+                    f"'{user.username}' (cleanup keep={req.keep})")
+        return CleanupResponse(kept=req.keep, versions_removed=keys_removed,
+                               storage_files_removed=0, trashed=True,
+                               purge_after=_trash_purge_after(now))
 
     log.info(f"[cleanup] {label}: removendo {len(keys_removed)} versão(ões): {keys_removed}")
 
@@ -4326,7 +4532,7 @@ def cleanup_by_date_preview(before: str, label: Optional[str] = None, db: Sessio
     q = (
         db.query(BackupVersion.backup_label, func.count(BackupVersion.id))
         .filter(BackupVersion.created_at < cutoff)
-        .filter(BackupVersion.status != "running")
+        .filter(BackupVersion.status.notin_(["running", TRASHED_STATUS]))
         .filter(~BackupVersion.id.in_(latest_done))
     )
     if label:
@@ -4352,7 +4558,7 @@ def cleanup_by_date(
     q = (
         db.query(BackupVersion.id, BackupVersion.backup_label)
         .filter(BackupVersion.created_at < cutoff)
-        .filter(BackupVersion.status != "running")
+        .filter(BackupVersion.status.notin_(["running", TRASHED_STATUS]))
         .filter(~BackupVersion.id.in_(latest_done))
     )
     if label:

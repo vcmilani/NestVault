@@ -81,6 +81,10 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
+# Status de BackupID/BackupVersion na lixeira.
+TRASHED_STATUS = "trashed"
+
+
 def hash_api_key(raw: str) -> str:
     """SHA-256 hex — a chave em si nunca é persistida em texto puro."""
     import hashlib
@@ -111,6 +115,10 @@ class BackupID(Base):
     # backfill_backup_owners); usuário comum só enxerga/restaura labels onde
     # owner_user_id == User.id atual (ou é admin).
     owner_user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    # Lixeira: label excluído por usuário comum (status == TRASHED_STATUS). Ver
+    # main._trash_versions; a limpeza noturna apaga de vez após o prazo.
+    trashed_at    = Column(DateTime, nullable=True)
+    trashed_by    = Column(Integer, nullable=True)
 
     versions = relationship("BackupVersion", back_populates="backup",
                             order_by="BackupVersion.version_key.desc()", lazy="dynamic")
@@ -141,6 +149,14 @@ class BackupVersion(Base):
     # versões failed/incomplete, e todo o resto do código filtra status == "done".
     # Marcar a suspeita aqui não muda a visibilidade nem a retenção da versão.
     integrity_status = Column(String, nullable=True)
+    # Lixeira: versão excluída por usuário comum fica com status TRASHED_STATUS
+    # até o prazo vencer. Um status próprio, e não um flag, porque todo o código
+    # que decide o que é "histórico vivo" já filtra status == "done" — e a
+    # retenção/limpeza só apaga "failed"/"incomplete" explicitamente. O status
+    # anterior é guardado para a restauração.
+    trashed_at          = Column(DateTime, nullable=True)
+    trashed_from_status = Column(String, nullable=True)
+    trashed_by          = Column(Integer, nullable=True)
 
     backup = relationship("BackupID", back_populates="versions")
     files  = relationship("VersionFile", back_populates="version", lazy="dynamic",
@@ -394,6 +410,12 @@ def init_db():
         ("file_contents",   "quarantined_at",    "TIMESTAMP"),
         ("file_contents",   "quarantine_reason", "TEXT"),
         ("backup_versions", "integrity_status",  "TEXT"),
+        # Lixeira (exclusões de usuário comum).
+        ("backup_versions", "trashed_at",          "TIMESTAMP"),
+        ("backup_versions", "trashed_from_status", "TEXT"),
+        ("backup_versions", "trashed_by",          "INTEGER"),
+        ("backup_ids",      "trashed_at",          "TIMESTAMP"),
+        ("backup_ids",      "trashed_by",          "INTEGER"),
     ):
         with engine.connect() as conn:
             try:

@@ -5,7 +5,7 @@ Extracted from main.py so that the cloud backup module can reuse
 volume selection, replication, and encryption logic without
 creating a circular import.
 """
-import os, errno, shutil, logging, asyncio, threading, hashlib
+import os, errno, shutil, logging, asyncio, threading, hashlib, tempfile
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -154,6 +154,29 @@ def target_replicas() -> int:
     return min(factor, max(1, n))
 
 
+def configured_replicas() -> int:
+    """Fator de replicação configurado, limitado ao número de volumes declarados.
+
+    Diferente de target_replicas(), NÃO encolhe quando um volume fica degraded.
+    Quem decide o que APAGAR tem de usar este valor: com target_replicas(), um
+    disco fora do ar baixava o alvo (2 → 1) e as cópias do disco saudável
+    passavam a ser "excedentes"."""
+    total = len(STORAGE_VOLUMES)
+    factor = REPLICATION_FACTOR if REPLICATION_FACTOR > 0 else total
+    return max(1, min(factor, total))
+
+
+def expected_stored_size(plain_size: int, encrypted: bool) -> int:
+    """Tamanho esperado do arquivo no disco a partir do tamanho do plaintext.
+    Cifrado: base_nonce + 20 bytes de overhead (4 de comprimento + 16 de tag GCM)
+    por chunk de 1 MB — formato definido em crypto.py."""
+    if not encrypted:
+        return plain_size
+    import crypto
+    n_chunks = (plain_size + crypto.CHUNK_SIZE - 1) // crypto.CHUNK_SIZE
+    return crypto.NONCE_SIZE + plain_size + n_chunks * 20
+
+
 def pick_volume() -> Path:
     hvols_set = set(healthy_volumes())
     if not hvols_set:
@@ -213,8 +236,72 @@ def content_path(sha256: str, volume: Path) -> Path:
     return dest
 
 
-def ensure_replicas(sha256: str, source_path: Path, db) -> None:
+class ReplicaSourceCorrupt(Exception):
+    """A origem de uma cópia não tem o conteúdo esperado — não deve ser propagada."""
+
+
+def copy_verified(src: Path, dest: Path, sha256: str, encrypted: bool,
+                  expected_size: int | None = None) -> None:
+    """Copia src → dest de forma atômica e conferida.
+
+    Grava num temporário _tmp_ ao lado do destino (varrido pela limpeza de
+    temporários) e só renomeia depois de conferir. Antes, as réplicas eram um
+    copy2 direto para o caminho final: um ENOSPC no meio deixava um arquivo
+    parcial no lugar definitivo, e uma origem corrompida era espalhada em
+    silêncio para todas as réplicas.
+
+    Conferência: o que foi gravado (relido do disco) tem de bater com o que foi
+    lido da origem. Sem criptografia, o hash da origem também tem de ser o
+    próprio sha256; com criptografia, confere o tamanho esperado (decifrar para
+    re-hashear fica com o validate-integrity). Levanta ReplicaSourceCorrupt se a
+    origem não confere e OSError em falha de E/S."""
+    src_size = os.stat(src).st_size
+    if expected_size is not None and src_size != expected_size:
+        raise ReplicaSourceCorrupt(
+            f"{src}: {src_size} B no disco, esperado {expected_size} B"
+        )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix="_tmp_")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        src_hash = _copy_with_sha256(src, tmp)
+        if not encrypted and src_hash != sha256:
+            raise ReplicaSourceCorrupt(f"{src}: sha256 da origem não confere")
+        if file_sha256(tmp) != src_hash:
+            raise OSError(errno.EIO, f"cópia gravada em {dest.parent} não confere com a origem")
+        os.replace(tmp, dest)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def insert_copy_row(db, sha256: str, stored_at: str, volume_path: str) -> None:
+    """Registra uma FileContentCopy tolerando o registro concorrente da mesma cópia.
+
+    Duas réplicas do mesmo sha256 para o mesmo volume ao mesmo tempo (upload +
+    /register/batch, dois jobs rclone...) batiam na unique (sha256, volume_path)
+    — e o IntegrityError derrubava a transação inteira de quem chegou depois, que
+    em /register/batch era o lote todo de réplicas. Os dois gravam o mesmo
+    arquivo content-addressed (via os.replace), então basta uma linha."""
     from database import FileContentCopy
+    db.flush()  # o INSERT abaixo não passa pelo autoflush do ORM
+    dialect = db.get_bind().dialect.name
+    if dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as _insert
+    elif dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as _insert
+    else:  # pragma: no cover - backends suportados são só esses dois
+        db.add(FileContentCopy(sha256=sha256, stored_at=stored_at, volume_path=volume_path))
+        return
+    db.execute(
+        _insert(FileContentCopy)
+        .values(sha256=sha256, stored_at=stored_at, volume_path=volume_path)
+        .on_conflict_do_nothing()
+    )
+
+
+def ensure_replicas(sha256: str, source_path: Path, db) -> None:
+    from database import FileContent, FileContentCopy
     target = target_replicas()
     copies = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).all()
     vol_set = {c.volume_path for c in copies}
@@ -229,10 +316,16 @@ def ensure_replicas(sha256: str, source_path: Path, db) -> None:
     if not target_vols:
         return
 
+    fc = db.get(FileContent, sha256)
+    if fc is None:
+        return
+    encrypted = bool(fc.encrypted)
+    expected = expected_stored_size(fc.size, encrypted)
+
     def _copy(vol):
         dest = content_path(sha256, vol)
-        shutil.copy2(str(source_path), str(dest))
-        return vol, dest
+        copy_verified(source_path, dest, sha256, encrypted, expected)
+        return dest
 
     added = []
     with ThreadPoolExecutor(max_workers=len(target_vols)) as pool:
@@ -240,16 +333,136 @@ def ensure_replicas(sha256: str, source_path: Path, db) -> None:
         for future in as_completed(futures):
             vol = futures[future]
             try:
-                _, dest = future.result()
-                copy = FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(vol))
-                db.add(copy)
-                copies.append(copy)
-                added.append(str(vol))
+                dest = future.result()
+            except ReplicaSourceCorrupt as e:
+                log.error(f"[replication] {sha256[:8]}… origem não confere — réplica NÃO criada em {vol}: {e}")
+                continue
             except OSError as e:
                 log.warning(f"[replication] Falha ao replicar {sha256[:8]}… para {vol}: {e}")
+                continue
+            insert_copy_row(db, sha256, str(dest), str(vol))
+            added.append(str(vol))
 
     if added:
         log.info(f"[replication] {sha256[:8]}… → {len(added)} nova(s) cópia(s): {added}")
+
+
+class ContentRepairUnavailable(Exception):
+    """O conteúdo precisa ser regravado, mas está cifrado e a chave não está carregada."""
+
+
+class ContentVerificationFailed(Exception):
+    """O arquivo gravado não decifra/re-hasheia para o sha256 esperado."""
+
+
+def content_matches(path: Path, sha256: str, encrypted: bool, key: bytes | None) -> bool:
+    """Decifra (se preciso) e re-hasheia `path`; True se confere com `sha256`."""
+    import crypto
+    h = hashlib.sha256()
+    try:
+        if encrypted:
+            for chunk in crypto.decrypt_chunks(path, key):
+                h.update(chunk)
+        else:
+            with open(path, "rb") as f:
+                while chunk := f.read(1 << 20):
+                    h.update(chunk)
+    except Exception:
+        return False
+    return h.hexdigest() == sha256
+
+
+def stage_content(src: Path, dest: Path, sha256: str, encrypted: bool,
+                  key: bytes | None) -> None:
+    """Grava `src` (plaintext) em `dest` no formato pedido, conferido e atômico.
+
+    Consome `src`. O destino só é substituído (os.replace) depois de o arquivo
+    temporário decifrar e re-hashear para `sha256`."""
+    import crypto
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, staged_name = tempfile.mkstemp(dir=dest.parent, prefix="_tmp_")
+    os.close(fd)
+    staged = Path(staged_name)
+    try:
+        if encrypted:
+            crypto.encrypt_stream(src, staged, key)
+        else:
+            shutil.move(str(src), str(staged))
+        if not content_matches(staged, sha256, encrypted, key):
+            raise ContentVerificationFailed(
+                f"{sha256[:8]}… gravado em {dest.parent} não confere após "
+                f"{'cifrar' if encrypted else 'gravar'}"
+            )
+        os.replace(staged, dest)
+    finally:
+        staged.unlink(missing_ok=True)
+        src.unlink(missing_ok=True)
+
+
+def dedup_or_repair(db, fc, tmp_path: Path, volume: Path, what: str) -> "Path | None":
+    """Conteúdo recebido cujo sha256 já tem FileContent: deduplica ou repara.
+
+    Dedup exige UMA cópia legível (existência + tamanho esperado; a verificação
+    profunda fica com o validate-integrity). Cópias em volume degraded nem são
+    consultadas — o disco pode só estar fora do ar. Sem nenhuma legível, regrava
+    o conteúdo a partir dos bytes recebidos (mesmo sha256, logo fonte válida) —
+    sem apagar nada: as outras cópias, inclusive as de discos fora do ar, ficam
+    como estão. Grava no formato do FileContent (fc.encrypted), que vale para
+    todas as cópias, e não no da config atual.
+
+    Consome `tmp_path`. Retorna o path a partir do qual criar réplicas depois do
+    commit (None quando deduplicou — aí as réplicas já foram garantidas aqui).
+    Compartilhado por /upload e pela ingestão do rclone."""
+    from database import FileContentCopy
+    sha256 = fc.sha256
+    copies = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).all()
+    degraded = {str(v) for v in _degraded_volumes}
+    expected = expected_stored_size(fc.size, fc.encrypted)
+    unreadable: list[str] = []
+    for c in copies:
+        if c.volume_path in degraded:
+            continue
+        try:
+            stored_size = os.stat(c.stored_at).st_size
+        except OSError:
+            unreadable.append(f"{c.stored_at} (ausente)")
+            continue
+        if stored_size != expected:
+            unreadable.append(f"{c.stored_at} ({stored_size} B, esperado {expected} B)")
+            continue
+        log.info(f"[dedup] {what} — sha256={sha256[:8]}… ({fc.size / 1024 / 1024:.2f} MB)")
+        ensure_replicas(sha256, Path(c.stored_at), db)
+        tmp_path.unlink(missing_ok=True)
+        return None
+
+    log.warning(
+        f"[integrity] {sha256[:8]}… nenhuma cópia legível "
+        f"({len(copies)} registrada(s), {len(unreadable)} ilegível(is) em volume saudável"
+        + (f": {'; '.join(unreadable)}" if unreadable else "")
+        + f") — reparando com os bytes recebidos ({what})"
+    )
+    if fc.encrypted and encryption_key is None:
+        tmp_path.unlink(missing_ok=True)
+        raise ContentRepairUnavailable(
+            f"Conteudo {sha256[:8]}… precisa de reparo, mas esta cifrado e a chave "
+            "de criptografia nao esta carregada"
+        )
+    # Reaproveita a linha do próprio volume, se houver: a constraint (sha256,
+    # volume_path) não permite uma segunda, e o arquivo dela está ilegível.
+    own_row = next((c for c in copies if c.volume_path == str(volume)), None)
+    dest = Path(own_row.stored_at) if own_row else content_path(sha256, volume)
+    stage_content(tmp_path, dest, sha256, bool(fc.encrypted), encryption_key)
+
+    if own_row is None:
+        insert_copy_row(db, sha256, str(dest), str(volume))
+    fc.stored_at = str(dest)
+    # O conteúdo voltou a existir: sai da quarentena, senão o purge da
+    # quarentena apagaria justamente a cópia recém-reparada.
+    fc.quarantined_at = None
+    fc.quarantine_reason = None
+    db.flush()
+    log.warning(f"[integrity] {sha256[:8]}… reparado a partir de {what} → {dest}")
+    return dest
 
 
 def rereplicate_all(db) -> tuple[int, int]:
@@ -288,10 +501,23 @@ def rereplicate_all(db) -> tuple[int, int]:
 
 
 def cleanup_excess_copies(db) -> int:
+    """Remove cópias além do fator de replicação configurado.
+
+    Só apaga o que é comprovadamente redundante: com algum volume degraded a
+    limpeza inteira é adiada, e uma cópia só conta para o alvo se o arquivo está
+    no disco com o tamanho esperado. Uma cópia ausente, truncada ou num disco que
+    sumiu sem ainda ter sido marcado degraded nunca é "mantida" no lugar de uma
+    cópia legível."""
     from database import FileContent, FileContentCopy
     from sqlalchemy import func
     from collections import defaultdict
-    target = target_replicas()
+    if _degraded_volumes:
+        log.warning(
+            f"[cleanup-excess] adiado — volume(s) degraded: "
+            f"{', '.join(sorted(str(v) for v in _degraded_volumes))}"
+        )
+        return 0
+    target = configured_replicas()
     overfilled = (
         db.query(FileContent.sha256, func.count(FileContentCopy.id).label("cnt"))
         .outerjoin(FileContentCopy, FileContentCopy.sha256 == FileContent.sha256)
@@ -311,17 +537,27 @@ def cleanup_excess_copies(db) -> int:
         copies_map[copy.sha256].append(copy)
     for sha256, _ in overfilled:
         primary = fc_map.get(sha256)
-        primary_path = primary.stored_at if primary else None
-        copies = copies_map.get(sha256, [])
+        if primary is None:
+            continue
+        primary_path = primary.stored_at
+        expected = expected_stored_size(primary.size, primary.encrypted)
 
-        def _sort_key(c: FileContentCopy):
-            is_primary = c.stored_at == primary_path
-            is_healthy = Path(c.volume_path) not in _degraded_volumes
-            return (not is_primary, not is_healthy)
+        # Só entram na conta as cópias legíveis. As ausentes/truncadas não são
+        # tocadas aqui (nem arquivo nem linha) — são problema de integridade, não
+        # de excesso, e apagá-las esconderia a evidência do validate-integrity.
+        readable = []
+        for c in copies_map.get(sha256, []):
+            try:
+                if os.stat(c.stored_at).st_size == expected:
+                    readable.append(c)
+            except OSError:
+                pass
+        if len(readable) <= target:
+            continue
 
-        copies.sort(key=_sort_key)
-        kept = copies[:target]
-        for copy in copies[target:]:
+        readable.sort(key=lambda c: c.stored_at != primary_path)
+        kept = readable[:target]
+        for copy in readable[target:]:
             try:
                 Path(copy.stored_at).unlink(missing_ok=True)
             except OSError as e:
@@ -329,7 +565,7 @@ def cleanup_excess_copies(db) -> int:
             db.delete(copy)
             removed += 1
         # Garantir que FileContent.stored_at aponta para uma cópia ainda existente
-        if primary and kept and primary.stored_at not in {c.stored_at for c in kept}:
+        if primary.stored_at not in {c.stored_at for c in kept}:
             primary.stored_at = kept[0].stored_at
     if removed:
         db.commit()
@@ -583,11 +819,16 @@ def rereplicate_to_volume(v: Path) -> None:
                       .first())
             if not source:
                 continue
+            fc = db.get(FileContent, sha256)
             try:
                 dest = content_path(sha256, v)
-                shutil.copy2(source.stored_at, str(dest))
-                db.add(FileContentCopy(sha256=sha256, stored_at=str(dest), volume_path=str(v)))
+                copy_verified(Path(source.stored_at), dest, sha256, bool(fc.encrypted),
+                              expected_stored_size(fc.size, bool(fc.encrypted)))
+                insert_copy_row(db, sha256, str(dest), str(v))
                 count += 1
+            except ReplicaSourceCorrupt as e:
+                log.error(f"[rereplicate] {sha256[:8]}… origem não confere — pulando: {e}")
+                continue
             except OSError as e:
                 log.warning(f"[rereplicate] Erro em {v}: {e} — abortando")
                 break
@@ -748,24 +989,44 @@ def _copy_with_sha256(src: Path, dst: Path) -> str:
     return h.hexdigest()
 
 
-def _mark_versions_failed_for_sha256(sha256: str, db) -> None:
-    from database import VersionFile, BackupVersion
-    version_ids = [
-        r.version_id for r in
-        db.query(VersionFile.version_id)
-        .filter(VersionFile.sha256 == sha256)
-        .distinct()
-        .all()
-    ]
-    if not version_ids:
-        return
-    for v in db.query(BackupVersion).filter(BackupVersion.id.in_(version_ids)).all():
-        v.status = "failed"
-        v.finished_at = datetime.now()
-        log.error(
-            f"[ssd-cache] {v.backup_label}/{v.version_key} marcada como failed "
-            f"— arquivo {sha256[:8]}… não pôde ser movido para HDD após 5 tentativas"
-        )
+# Tentativas de mover um arquivo SSD → HDD antes de estacionar a pendência.
+MAX_SSD_MOVE_RETRIES = 5
+
+
+def _park_ssd_move(move, reason: str) -> None:
+    """Desiste de mover por ora, sem perder nada.
+
+    A pendência fica no banco com retry_count >= MAX_SSD_MOVE_RETRIES: o worker e
+    o monitor passam a ignorá-la, e a reconciliação não a recria (ela ainda
+    existe). O arquivo continua no SSD como cópia registrada e legível — a falha
+    é do destino, não do conteúdo. Antes, este ponto marcava como 'failed' toda
+    versão que referenciava o sha256, e a limpeza noturna apagava essas versões.
+    unpark_ssd_moves() devolve as pendências à fila (chamado no boot)."""
+    log.error(
+        f"[ssd-cache] {move.sha256[:8]}… {reason} após {move.retry_count} tentativa(s) — "
+        f"move estacionado; o arquivo segue no SSD ({move.ssd_path}) e será retentado "
+        f"no próximo reinício do servidor"
+    )
+
+
+def unpark_ssd_moves(db) -> int:
+    """Devolve à fila as pendências estacionadas. Retorna quantas foram reativadas."""
+    from database import SsdCachePendingMove
+    n = (db.query(SsdCachePendingMove)
+         .filter(SsdCachePendingMove.retry_count >= MAX_SSD_MOVE_RETRIES)
+         .update({"retry_count": 0}, synchronize_session=False))
+    if n:
+        db.commit()
+        log.info(f"[ssd-cache] {n} move(s) estacionado(s) devolvido(s) à fila")
+    return n
+
+
+def active_ssd_moves_query(db):
+    """Pendências que o worker ainda deve tentar (exclui as estacionadas)."""
+    from database import SsdCachePendingMove
+    return db.query(SsdCachePendingMove).filter(
+        SsdCachePendingMove.retry_count < MAX_SSD_MOVE_RETRIES
+    )
 
 
 def _create_pending_move_for_ssd_copy(db, ssd_copy) -> bool:
@@ -892,7 +1153,7 @@ def process_ssd_pending_moves(db) -> tuple[int, list[str]]:
     from sqlalchemy.exc import IntegrityError
     # Collect only sha256 keys upfront; commits inside the loop expire session objects,
     # so we re-query each row fresh to avoid "Instance has been deleted" errors.
-    pending_sha256s = [m.sha256 for m in db.query(SsdCachePendingMove).limit(10).all()]
+    pending_sha256s = [m.sha256 for m in active_ssd_moves_query(db).limit(10).all()]
     completed = 0
     moved_sha256s: list[str] = []
     for sha256 in pending_sha256s:
@@ -918,13 +1179,8 @@ def process_ssd_pending_moves(db) -> tuple[int, list[str]]:
                     dest_path.unlink(missing_ok=True)
                     move.retry_count += 1
                     log.warning(f"[ssd-cache] {move.sha256[:8]}… cópia corrompida no HDD — retry {move.retry_count}")
-                    if move.retry_count >= 5:
-                        log.error(f"[ssd-cache] {move.sha256[:8]}… atingiu 5 retries (hash mismatch) — abandonando move")
-                        try:
-                            _mark_versions_failed_for_sha256(move.sha256, db)
-                        except Exception as _ex:
-                            log.error(f"[ssd-cache] erro ao marcar versões como failed: {_ex}")
-                        db.delete(move)
+                    if move.retry_count >= MAX_SSD_MOVE_RETRIES:
+                        _park_ssd_move(move, "cópia no HDD não confere (hash)")
                     db.commit()
                     break
                 fc = db.query(FileContent).filter(FileContent.sha256 == move.sha256).first()
@@ -987,13 +1243,8 @@ def process_ssd_pending_moves(db) -> tuple[int, list[str]]:
                     stale.retry_count += 1
                     log.warning(f"[ssd-cache] {sha256[:8]}… conflito de integridade sem cópia registrada "
                                 f"no destino — retry {stale.retry_count}")
-                    if stale.retry_count >= 5:
-                        log.error(f"[ssd-cache] {sha256[:8]}… atingiu 5 retries (conflito de integridade) — abandonando move")
-                        try:
-                            _mark_versions_failed_for_sha256(sha256, db)
-                        except Exception as _ex:
-                            log.error(f"[ssd-cache] erro ao marcar versões como failed: {_ex}")
-                        db.delete(stale)
+                    if stale.retry_count >= MAX_SSD_MOVE_RETRIES:
+                        _park_ssd_move(stale, "conflito de integridade no destino")
                     db.commit()
                     break
                 # Cópia do destino registrada e verificada: conclui a escrituração
@@ -1040,13 +1291,8 @@ def process_ssd_pending_moves(db) -> tuple[int, list[str]]:
                         continue  # retry imediato com novo destino
                 move.retry_count += 1
                 log.warning(f"[ssd-cache] Erro ao mover {move.sha256[:8]}…: {e} — retry {move.retry_count}")
-                if move.retry_count >= 5:
-                    log.error(f"[ssd-cache] {move.sha256[:8]}… atingiu 5 retries — abandonando move")
-                    try:
-                        _mark_versions_failed_for_sha256(move.sha256, db)
-                    except Exception as _ex:
-                        log.error(f"[ssd-cache] erro ao marcar versões como failed: {_ex}")
-                    db.delete(move)
+                if move.retry_count >= MAX_SSD_MOVE_RETRIES:
+                    _park_ssd_move(move, f"erro de E/S ({e})")
                 db.commit()
                 break
     return completed, moved_sha256s
