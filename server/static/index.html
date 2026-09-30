@@ -144,7 +144,7 @@
 <header>
   <div class="logo">
     <div class="logo-icon">◈</div>
-    <div><div class="logo-text">NestVault</div><div class="logo-sub">v9.1</div></div>
+    <div><div class="logo-text">NestVault</div><div class="logo-sub" id="appVersion"></div></div>
   </div>
   <div class="header-right">
     <div class="status-dot" id="statusDot"></div>
@@ -654,6 +654,11 @@
 
   // Init — a própria carga inicial faz o auth-check (401 → login)
   loadAll();
+
+  // Versão vem do servidor (/health, sem auth) para não ficar escrita à mão no HTML
+  fetch('/health').then(r => r.ok ? r.json() : null).then(h => {
+    if (h?.version) document.getElementById('appVersion').textContent = 'v' + h.version;
+  }).catch(() => {});
 </script>
 <script src="/static/nav.js"></script>
 </body>
