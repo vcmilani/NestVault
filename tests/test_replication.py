@@ -5,23 +5,14 @@ from pathlib import Path
 import database as db_mod
 import main as m
 import storage as storage_mod
+from conftest import _make_engine
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 DiskUsage = namedtuple("DiskUsage", ["total", "used", "free"])
 
 
 # -- Helpers ------------------------------------------------------------------
-
-def _make_engine():
-    return create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-
 
 def _seed_admin(Session):
     """Cria o usuário admin (chave 'testkey') usado por todos os clients deste
@@ -36,7 +27,13 @@ def _seed_admin(Session):
 
 
 def _mk_client(monkeypatch, volumes, replication_factor=2):
-    engine = _make_engine()
+    # Banco em arquivo, uma conexão por sessão (_make_engine do conftest). Era
+    # ":memory:" com StaticPool, que faz todas as sessões compartilharem UMA
+    # conexão: o ROLLBACK que o pool emite ao receber uma conexão de volta
+    # descarta a transação aberta de outra sessão, e o `db.refresh()` do
+    # create_backup falhava com "Could not refresh instance" quando o app roda
+    # no threadpool. Mesma correção que o conftest recebeu na v9.1.2.
+    engine = _make_engine(volumes[0].parent / "test.db")
     db_mod.Base.metadata.create_all(bind=engine)
     Session = sessionmaker(bind=engine)
     _seed_admin(Session)

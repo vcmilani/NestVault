@@ -8,10 +8,9 @@ from pathlib import Path
 
 import database as db_mod
 import main as m
+from conftest import _make_engine
 import storage as storage_mod
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 DiskUsage = namedtuple("DiskUsage", ["total", "used", "free"])
 GB = 1024 ** 3
@@ -19,12 +18,12 @@ GB = 1024 ** 3
 
 # -- Helpers de baixo nível (sem app, direto no storage.py) --------------------
 
-def _make_session():
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+def _make_session(db_path):
+    # Banco em arquivo, uma conexão por sessão (_make_engine do conftest). Era
+    # ":memory:" com StaticPool, que dá UMA conexão para todas as sessões: o
+    # ROLLBACK emitido ao devolver a conexão ao pool descarta a transação aberta
+    # de outra sessão. Mesma correção que o conftest recebeu na v9.1.2.
+    engine = _make_engine(db_path)
     db_mod.Base.metadata.create_all(bind=engine)
     return sessionmaker(bind=engine)()
 
@@ -84,7 +83,7 @@ def test_rebalance_moves_only_enough_to_clear_threshold(tmp_path, monkeypatch):
     apenas os arquivos necessários para atingir a meta devem ser movidos — não os 3."""
     v1 = tmp_path / "v1"; v1.mkdir()
     v2 = tmp_path / "v2"; v2.mkdir()
-    db = _make_session()
+    db = _make_session(tmp_path / "test.db")
 
     v1_free = int(0.5 * GB)
 
@@ -126,7 +125,7 @@ def test_rebalance_fills_higher_priority_destination_first(tmp_path, monkeypatch
     v2 = tmp_path / "v2"; v2.mkdir()
     v3 = tmp_path / "v3"; v3.mkdir()
     v4 = tmp_path / "v4"; v4.mkdir()
-    db = _make_session()
+    db = _make_session(tmp_path / "test.db")
 
     v1_free = int(0.3 * GB)
     v2_free = int(0.3 * GB)
@@ -165,7 +164,7 @@ def test_rebalance_spills_to_next_priority_destination_once_full(tmp_path, monke
     v1 = tmp_path / "v1"; v1.mkdir()
     v3 = tmp_path / "v3"; v3.mkdir()
     v4 = tmp_path / "v4"; v4.mkdir()
-    db = _make_session()
+    db = _make_session(tmp_path / "test.db")
 
     v1_free = int(0.1 * GB)
     v3_free = int(1.5 * GB)   # cabe 1 arquivo de 0.6 GiB antes de cair abaixo do limiar (1 GiB)
@@ -201,7 +200,7 @@ def test_rebalance_spills_to_next_priority_destination_once_full(tmp_path, monke
 def test_rebalance_verifies_sha256_and_leaves_content_readable(tmp_path, monkeypatch):
     v1 = tmp_path / "v1"; v1.mkdir()
     v2 = tmp_path / "v2"; v2.mkdir()
-    db = _make_session()
+    db = _make_session(tmp_path / "test.db")
 
     def fake_usage(path):
         if path == v1:
@@ -224,7 +223,7 @@ def test_rebalance_verifies_sha256_and_leaves_content_readable(tmp_path, monkeyp
 def test_rebalance_dry_run_does_not_modify_anything(tmp_path, monkeypatch):
     v1 = tmp_path / "v1"; v1.mkdir()
     v2 = tmp_path / "v2"; v2.mkdir()
-    db = _make_session()
+    db = _make_session(tmp_path / "test.db")
 
     def fake_usage(path):
         if path == v1:
@@ -245,7 +244,7 @@ def test_rebalance_dry_run_does_not_modify_anything(tmp_path, monkeypatch):
 
 def test_rebalance_no_sources_returns_empty_result(tmp_path, monkeypatch):
     v1 = tmp_path / "v1"; v1.mkdir()
-    db = _make_session()
+    db = _make_session(tmp_path / "test.db")
 
     def fake_usage(_):
         return DiskUsage(total=100 * GB, used=10 * GB, free=90 * GB)
@@ -270,13 +269,14 @@ def _seed_users(Session):
 
 
 def _client_ctx(monkeypatch, volumes, disk_usage_fn, threshold_gb=10.0):
+    db_path = volumes[0].parent / "test.db"
     from fastapi.testclient import TestClient
 
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    # Banco em arquivo, uma conexão por sessão (_make_engine do conftest). Era
+    # ":memory:" com StaticPool, que dá UMA conexão para todas as sessões: o
+    # ROLLBACK emitido ao devolver a conexão ao pool descarta a transação aberta
+    # de outra sessão. Mesma correção que o conftest recebeu na v9.1.2.
+    engine = _make_engine(db_path)
     db_mod.Base.metadata.create_all(bind=engine)
     Session = sessionmaker(bind=engine)
     _seed_users(Session)

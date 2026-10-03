@@ -1,5 +1,5 @@
 """
-NestVault  v9.3.0
+NestVault  v9.3.1
 Cada execucao de backup cria uma nova versao dentro do label.
 Conteudo identico e armazenado uma unica vez no servidor (deduplicacao por sha256).
 
@@ -55,7 +55,7 @@ Changelog (cliente — histórico completo do sistema no README):
         reconciliação de replicação (reconcile-replication).
 """
 
-VERSION = "v9.3.0"
+VERSION = "v9.3.1"
 
 import os, re, sys, hashlib, argparse, base64, json, socket, threading, time
 from pathlib import Path
@@ -1427,11 +1427,15 @@ def _cleanup_label(label, keep, server=DEFAULT_SERVER):
     storage = result.get("storage_files_removed", 0)
     kept    = result["kept"]
     removed_tag = "na lixeira" if result.get("trashed") else "removidas"
+    # Como admin, a remocao roda em background no servidor: storage_files_removed
+    # nao e conhecido na resposta, e dizer "storage=0" seria enganoso.
+    storage_tag = ("storage=em background" if result.get("scheduled")
+                   else f"storage={storage}")
     _info(
         f"[{AMBER}][{label}][/{AMBER}]  "
         f"[{GREEN}]mantidas={kept}[/{GREEN}]  "
         f"[{RED}]{removed_tag}={len(removed)}[/{RED}]  "
-        f"[{DIM}]storage={storage}[/{DIM}]"
+        f"[{DIM}]{storage_tag}[/{DIM}]"
     )
     if result.get("trashed") and removed:
         _dim(f"  Restauraveis pelo admin ate {_fmt_purge_after(result.get('purge_after'))}.")
@@ -1471,24 +1475,30 @@ def cleanup(label=None, keep=5, server=DEFAULT_SERVER):
     console.print()
     total_versions = 0
     total_storage  = 0
+    scheduled      = False
     for lbl in labels:
         try:
             result = _cleanup_label(lbl, keep, server)
             total_versions += len(result.get("versions_removed", []))
             total_storage  += result.get("storage_files_removed", 0)
+            scheduled = scheduled or bool(result.get("scheduled"))
         except requests.RequestException as e:
             _err(f"[{lbl}]: {e}")
 
     if len(labels) > 1:
+        storage_line = ("em background" if scheduled else str(total_storage))
         console.print()
         console.print(Panel(
             f"[{DIM}]Labels processados[/{DIM}]  [{TEXT}]{len(labels)}[/{TEXT}]\n"
             f"[{RED}]Versoes removidas[/{RED}]   [{RED}]{total_versions}[/{RED}]\n"
-            f"[{DIM}]Arquivos storage[/{DIM}]   [{DIM}]{total_storage}[/{DIM}]",
+            f"[{DIM}]Arquivos storage[/{DIM}]   [{DIM}]{storage_line}[/{DIM}]",
             title=f"[bold {AMBER}]◈  cleanup[/bold {AMBER}]",
             border_style=AMBER,
             padding=(0, 2),
         ))
+    if scheduled:
+        _dim("  A limpeza do storage segue em background no servidor "
+             "(acompanhe em Atividade no dashboard).")
     console.print()
 
 

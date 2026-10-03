@@ -7,6 +7,7 @@ import shutil
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Callable
 
 from database import SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob, SsdCachePendingMove, engine, TRASHED_STATUS
 from sqlalchemy import func, delete, exists
@@ -73,7 +74,11 @@ def orphan_filter():
     return ~exists().where(VersionFile.sha256 == FileContent.sha256)
 
 
-def _cleanup_orphan_contents(db, limit: int | None = None) -> tuple[int, int]:
+def _cleanup_orphan_contents(
+    db,
+    limit: int | None = None,
+    on_delete: Callable[[str, str, int], None] | None = None,
+) -> tuple[int, int]:
     """Remove FileContents sem referência e seus arquivos físicos. Retorna (removidos, bytes_liberados).
 
     Implementação canônica, compartilhada com main.py (era duplicada lá).
@@ -83,6 +88,13 @@ def _cleanup_orphan_contents(db, limit: int | None = None) -> tuple[int, int]:
     Usa DELETE condicional por sha256 para eliminar a race condition TOCTOU: o banco
     re-verifica no momento da deleção se o sha256 ainda está sem referência, protegendo
     arquivos que foram re-referenciados por uploads concorrentes após o snapshot inicial.
+
+    `on_delete(sha256, path, size)`, se informado, é chamado uma vez por arquivo
+    que de fato saiu do disco — não para um `FileNotFoundError` (já não existia),
+    não para um `OSError` (continua no disco, com o warning de sempre) e nunca
+    para um sha256 descartado por re-referência concorrente. Serve para o caller
+    logar ou reportar progresso; a função não loga as deleções por conta própria,
+    porque uma limpeza grande passa de centenas de milhares de arquivos.
     """
     q = db.query(FileContent).filter(orphan_filter())
     if limit is not None:
@@ -142,11 +154,15 @@ def _cleanup_orphan_contents(db, limit: int | None = None) -> tuple[int, int]:
             raise
 
         # Deleção física (best-effort): falha deixa arquivo órfão no disco, mas o DB é consistente.
+        size = size_by_sha.get(sha256, 0)
         if sha256 in ssd_moves_by_sha:
             try:
                 Path(ssd_moves_by_sha[sha256]).unlink()
             except (FileNotFoundError, OSError):
                 pass
+            else:
+                if on_delete:
+                    on_delete(sha256, ssd_moves_by_sha[sha256], size)
         for c in copies:
             try:
                 Path(c["stored_at"]).unlink()
@@ -154,6 +170,9 @@ def _cleanup_orphan_contents(db, limit: int | None = None) -> tuple[int, int]:
                 pass
             except OSError as e:
                 log.warning(f"[cleanup-orphans] Não foi possível remover {c['stored_at']}: {e}")
+            else:
+                if on_delete:
+                    on_delete(sha256, c["stored_at"], size)
         if not copies:
             try:
                 Path(stored_by_sha[sha256]).unlink()
@@ -161,8 +180,11 @@ def _cleanup_orphan_contents(db, limit: int | None = None) -> tuple[int, int]:
                 pass
             except OSError as e:
                 log.warning(f"[cleanup-orphans] Não foi possível remover {stored_by_sha[sha256]}: {e}")
+            else:
+                if on_delete:
+                    on_delete(sha256, stored_by_sha[sha256], size)
 
-        bytes_freed += size_by_sha.get(sha256, 0)
+        bytes_freed += size
         removed += 1
 
     return removed, bytes_freed

@@ -4,23 +4,14 @@ from unittest.mock import patch
 
 import database as db_mod
 import main as m
+from conftest import _make_engine
 import storage as storage_mod
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 DiskUsage = namedtuple("DiskUsage", ["total", "used", "free"])
 
 
 # -- Helpers ------------------------------------------------------------------
-
-def _make_engine():
-    return create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-
 
 def _seed_admin(Session):
     """Cria o usuário admin (chave 'testkey') usado por todos os clients deste
@@ -38,7 +29,11 @@ def _client_ctx(monkeypatch, volumes, disk_usage_fn=None):
     """Contexto de TestClient com volumes e disk_usage opcionalmente mockado."""
     from fastapi.testclient import TestClient
 
-    engine = _make_engine()
+    # Banco em arquivo, uma conexão por sessão (_make_engine do conftest). Era
+    # ":memory:" com StaticPool, que dá UMA conexão para todas as sessões: o
+    # ROLLBACK emitido ao devolver a conexão ao pool descarta a transação aberta
+    # de outra sessão. Mesma correção que o conftest recebeu na v9.1.2.
+    engine = _make_engine(volumes[0].parent / "test.db")
     db_mod.Base.metadata.create_all(bind=engine)
     Session = sessionmaker(bind=engine)
     _seed_admin(Session)

@@ -1,19 +1,18 @@
 import errno
 
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 import database as db_mod
+from conftest import _make_engine
 import storage as storage_mod
 
 
-def _make_session():
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+def _make_session(db_path):
+    # Banco em arquivo, uma conexão por sessão (_make_engine do conftest). Era
+    # ":memory:" com StaticPool, que dá UMA conexão para todas as sessões: o
+    # ROLLBACK emitido ao devolver a conexão ao pool descarta a transação aberta
+    # de outra sessão. Mesma correção que o conftest recebeu na v9.1.2.
+    engine = _make_engine(db_path)
     db_mod.Base.metadata.create_all(bind=engine)
     return sessionmaker(bind=engine)()
 
@@ -23,7 +22,7 @@ def test_process_ssd_pending_moves_survives_all_volumes_below_threshold(tmp_path
     do limiar) durante o redirect de ENOSPC, o worker deve tratar como 'sem volume
     disponível' e seguir para o retry normal, em vez de propagar a exceção e abortar
     o lote inteiro (Bug A — regressão do commit d8c109b7)."""
-    db = _make_session()
+    db = _make_session(tmp_path / "test.db")
 
     ssd_path = tmp_path / "ssd_content.bin"
     ssd_path.write_bytes(b"conteudo")
@@ -70,7 +69,7 @@ def test_integrity_error_com_pendencia_viva_conclui_o_move(tmp_path, monkeypatch
     pelo ramo de IntegrityError sem contar retry nem remover a pendência — o
     arquivo ficava preso no SSD para sempre e o monitor abria um job de move a
     cada 30s. Agora o move é concluído a partir da cópia que já existe."""
-    db = _make_session()
+    db = _make_session(tmp_path / "test.db")
 
     sha = "b" * 64
     ssd_dir = tmp_path / "ssd"
@@ -114,7 +113,7 @@ def test_reconcile_recria_pendencia_de_arquivo_preso_so_no_ssd(tmp_path, monkeyp
     reconciliação só emitia um warning e o arquivo ficava parado até o próximo
     reinício (recover_stuck_ssd_files, que conserta o mesmo estado, só roda no
     startup). Agora a pendência é recriada na hora."""
-    db = _make_session()
+    db = _make_session(tmp_path / "test.db")
 
     sha = "c" * 64
     ssd_dir = tmp_path / "ssd"
@@ -146,7 +145,7 @@ def test_move_esgotado_estaciona_sem_marcar_versoes_failed(tmp_path, monkeypatch
     """Regressão: depois de 5 falhas de cópia SSD → HDD, toda versão que citava o
     sha256 virava 'failed' — e a limpeza noturna apagava essas versões, embora o
     arquivo continuasse íntegro no SSD. Agora a pendência é só estacionada."""
-    db = _make_session()
+    db = _make_session(tmp_path / "test.db")
     sha = "d" * 64
     ssd_dir = tmp_path / "ssd"
     (ssd_dir / "_content" / "dd").mkdir(parents=True)

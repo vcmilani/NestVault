@@ -1,12 +1,11 @@
 from collections import namedtuple
 from unittest.mock import patch
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 from fastapi.testclient import TestClient
 
 import database as db_mod
 import main as m
+from conftest import _make_engine
 import storage as storage_mod
 
 DiskUsage = namedtuple("DiskUsage", ["total", "used", "free"])
@@ -25,11 +24,11 @@ def _seed_admin(Session):
 
 
 def _make_client(monkeypatch, volumes, disk_usage_fn):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    # Banco em arquivo, uma conexão por sessão (_make_engine do conftest). Era
+    # ":memory:" com StaticPool, que dá UMA conexão para todas as sessões: o
+    # ROLLBACK emitido ao devolver a conexão ao pool descarta a transação aberta
+    # de outra sessão. Mesma correção que o conftest recebeu na v9.1.2.
+    engine = _make_engine(volumes[0].parent / "test.db")
     db_mod.Base.metadata.create_all(bind=engine)
     Session = sessionmaker(bind=engine)
     _seed_admin(Session)
