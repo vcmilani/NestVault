@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from unittest import mock
 
+import database
 import main as m
 import nightly_cleanup
 from database import BackupVersion, FileContent, MaintenanceJob, VersionFile
@@ -102,8 +103,9 @@ def test_cleanup_by_date_etapa2_reporta_progresso_no_summary(client):
     assert any(s.startswith("Etapa 2/2 — liberando arquivos:") for s in summaries), summaries
 
 
-def test_cleanup_by_date_summary_final_mantem_formato(client):
-    """O backfill _RE_SUMMARY_MB de database.py faz regex sobre esse texto."""
+def test_cleanup_by_date_summary_final_legivel_pelo_backfill(client):
+    """O summary final diz o escopo e continua casando com o _RE_SUMMARY_MB que o
+    backfill de bytes_freed (database.py) aplica sobre jobs de limpeza antigos."""
     _label_with_two_done_versions(client)
     r = client.post("/maintenance/cleanup-by-date", params={"before": "2099-01-01T00:00:00"})
     assert r.status_code == 200
@@ -114,7 +116,9 @@ def test_cleanup_by_date_summary_final_mantem_formato(client):
                  .filter(MaintenanceJob.job_type == "cleanup-by-date")
                  .order_by(MaintenanceJob.id.desc()).first())
         assert job.status == "done"
-        assert re.match(r"^1 versão\(ões\) removidas, 1 arquivo\(s\) liberados \([\d.]+ MB\)$", job.summary), job.summary
+        assert job.summary.startswith("todos os labels: 1 versão(ões) removidas, "
+                                      "1 arquivo(s) liberados ("), job.summary
+        assert re.findall(database._RE_SUMMARY_MB, job.summary), job.summary
         assert job.bytes_freed > 0
     finally:
         db.close()

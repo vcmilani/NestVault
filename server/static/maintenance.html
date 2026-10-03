@@ -305,27 +305,28 @@
           <span class="op-icon">⊟</span>
           <div>
             <div class="op-name">Limpar Versões Antigas</div>
-            <div class="op-endpoint">POST /backups/{label}/cleanup</div>
+            <div class="op-endpoint">POST /maintenance/cleanup-versions</div>
           </div>
         </div>
         <span class="risk-badge medium">Médio risco</span>
       </div>
-      <div class="op-desc">Mantém apenas as N versões mais recentes de um label, removendo as anteriores e limpando arquivos de storage órfãos resultantes.</div>
+      <div class="op-desc">Mantém apenas as N versões mais recentes de cada label, removendo as anteriores e limpando os arquivos de storage que ficarem órfãos. Roda em background em <strong>duas etapas</strong> — primeiro as versões saem do banco, depois os arquivos saem do disco, que é a parte longa. Acompanhe as duas em <a href="/activity">Atividade</a>.</div>
       <div class="op-form">
         <div class="form-row">
           <span class="form-label">Label</span>
-          <select class="op-select" id="cleanup-label">
-            <option value="">— selecione —</option>
+          <select class="op-select" id="cleanup-label" onchange="loadCleanupPreview()">
+            <option value="">Todos os labels</option>
           </select>
         </div>
         <div class="form-row">
           <span class="form-label">Manter</span>
-          <input type="number" class="op-input" id="cleanup-keep" value="5" min="0" max="9999">
-          <span class="form-hint">versões mais recentes</span>
+          <input type="number" class="op-input" id="cleanup-keep" value="5" min="0" max="9999" oninput="loadCleanupPreview()">
+          <span class="form-hint">versões mais recentes por label</span>
         </div>
       </div>
+      <div class="date-preview-wrap" id="cleanup-preview"></div>
       <div class="op-footer">
-        <button class="run-btn" id="btn-cleanup" onclick="runCleanup()">▶ Executar</button>
+        <button class="run-btn" id="btn-cleanup" onclick="runCleanup()" disabled>▶ Executar</button>
         <div class="op-result" id="result-cleanup"></div>
       </div>
     </div>
@@ -963,15 +964,63 @@ async function runRebalance() {
 }
 
 // -- Limpar Versões Antigas ---------------------------------------------------
-async function runCleanup() {
+function cleanupQs() {
   const label = document.getElementById('cleanup-label').value;
   const keep  = parseInt(document.getElementById('cleanup-keep').value, 10);
-  if (!label)            { showError('cleanup', 'Selecione um label.'); return; }
-  if (isNaN(keep) || keep < 0) { showError('cleanup', 'Número de versões inválido.'); return; }
+  if (isNaN(keep) || keep < 0) return null;
+  return `keep=${keep}` + (label ? `&label=${encodeURIComponent(label)}` : '');
+}
+
+async function loadCleanupPreview() {
+  const wrap = document.getElementById('cleanup-preview');
+  const btn  = document.getElementById('btn-cleanup');
+  btn.disabled = true;
+
+  const qs = cleanupQs();
+  if (qs === null) {
+    wrap.innerHTML = '<div class="date-preview-empty" style="color:var(--red)">Número de versões inválido.</div>';
+    return;
+  }
+
+  wrap.innerHTML = '<div class="date-preview-loading">↻ Consultando…</div>';
+  try {
+    const r = await fetch(`/maintenance/cleanup-versions/preview?${qs}`, {headers: H()});
+    if (r.status === 401) { showLogin('API Key inválida.'); wrap.innerHTML = ''; return; }
+    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); wrap.innerHTML = ''; return; }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    if (d.total === 0) {
+      wrap.innerHTML = '<div class="date-preview-empty">Nenhuma versão a remover — nenhum label passa do limite.</div>';
+      return;
+    }
+    const rows = d.per_label.map(row =>
+      `<div class="date-preview-row"><span class="date-preview-lbl">${esc(row.label)}</span><span class="date-preview-cnt">${row.count} versão(ões)</span></div>`
+    ).join('');
+    wrap.innerHTML = `<div class="date-preview-table">${rows}<div class="date-preview-total"><span>Total</span><span>${d.total} versão(ões) a remover</span></div></div>`;
+    btn.disabled = false;
+  } catch(e) {
+    wrap.innerHTML = `<div class="date-preview-empty" style="color:var(--red)">Erro: ${esc(e.message)}</div>`;
+  }
+}
+
+async function runCleanup() {
+  const qs    = cleanupQs();
+  const label = document.getElementById('cleanup-label').value;
+  const keep  = parseInt(document.getElementById('cleanup-keep').value, 10);
+  if (qs === null) { showError('cleanup', 'Número de versões inválido.'); return; }
+
+  // Com "todos os labels" a operação atinge o acervo inteiro, daí a palavra digitada.
+  const scopeMsg = label ? `o label "${label}"` : 'TODOS os labels';
+  const ok = await nvConfirm(
+    'Limpar versões antigas',
+    `Manter apenas as ${keep} versões mais recentes de ${scopeMsg} e remover as anteriores?\n\nOperação IRREVERSÍVEL.`,
+    label ? undefined : { word: 'LIMPAR' }
+  );
+  if (!ok) return;
 
   setRunning('cleanup', true);
   try {
-    const r = await apiCall('POST', `/backups/${encodeURIComponent(label)}/cleanup`, {backup_label: label, keep});
+    const r = await apiCall('POST', `/maintenance/cleanup-versions?${qs}`);
     if (r.status === 401) { showLogin('API Key inválida.'); setRunning('cleanup', false); return; }
     if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); setRunning('cleanup', false); return; }
     if (!r.ok) {
@@ -980,8 +1029,13 @@ async function runCleanup() {
       showError('cleanup', detail);
     } else {
       const d = await r.json();
-      const removed = d.versions_removed.length;
-      showSuccess('cleanup', `${removed} versão(ões) removida(s) · ${d.storage_files_removed} arquivo(s) de storage · ${d.kept} mantida(s)`);
+      if (d.scheduled === 0) {
+        showSuccess('cleanup', 'Nenhuma versão elegível para remoção.');
+      } else {
+        showSuccess('cleanup', `${d.scheduled} versão(ões) agendada(s) para remoção em background — acompanhe em Atividade.`);
+      }
+      // loadLabels() recarrega as contagens de versão e termina chamando
+      // loadCleanupPreview(), que reavalia o botão depois do setRunning abaixo.
       loadLabels();
     }
   } catch(e) {
@@ -1052,8 +1106,15 @@ async function runRenameLabel() {
 
 // -- Carregar lista de labels -------------------------------------------------
 async function loadLabels() {
-  const ids = ['cleanup-label', 'delete-label-select', 'rename-label-select'];
+  const ids = ['delete-label-select', 'rename-label-select'];
+  // Seletores cujo valor vazio significa "todos os labels", não "nada escolhido".
+  const allIds = ['cleanupdate-label', 'cleanup-label'];
+  const ALL_OPT = '<option value="">Todos os labels</option>';
   const ownerSel = document.getElementById('reassign-owner-label');
+  const setAll = (html, disabled) => allIds.forEach(id => {
+    const s = document.getElementById(id); s.innerHTML = html; s.disabled = disabled;
+  });
+
   ids.forEach(id => {
     const s = document.getElementById(id);
     s.innerHTML = '<option value="">Carregando…</option>';
@@ -1061,9 +1122,7 @@ async function loadLabels() {
   });
   ownerSel.innerHTML = '<option value="">Carregando…</option>';
   ownerSel.disabled = true;
-  const cdl = document.getElementById('cleanupdate-label');
-  cdl.innerHTML = '<option value="">Carregando…</option>';
-  cdl.disabled = true;
+  setAll('<option value="">Carregando…</option>', true);
 
   try {
     const r = await fetch('/backups', {headers: H()});
@@ -1071,8 +1130,7 @@ async function loadLabels() {
       ids.forEach(id => { const s = document.getElementById(id); s.disabled = false; s.innerHTML = '<option value="">— selecione —</option>'; });
       ownerSel.disabled = false;
       ownerSel.innerHTML = '<option value="">— selecione —</option>';
-      cdl.disabled = false;
-      cdl.innerHTML = '<option value="">Todos os labels</option>';
+      setAll(ALL_OPT, false);
       showLogin(r.status === 403 ? 'Esta chave não tem permissão de administrador.' : 'API Key inválida.');
       return;
     }
@@ -1087,15 +1145,14 @@ async function loadLabels() {
     ownerSel.disabled = false;
     ownerSel.innerHTML = '<option value="">— selecione —</option>' +
       backups.map(b => `<option value="${esc(b.label)}">${esc(b.label)} (dono atual: ${esc(b.owner_username || '—')})</option>`).join('');
-    cdl.disabled = false;
-    cdl.innerHTML = '<option value="">Todos os labels</option>' +
-      backups.map(b => `<option value="${esc(b.label)}">${esc(b.label)}</option>`).join('');
+    setAll(ALL_OPT + backups.map(b => `<option value="${esc(b.label)}">${esc(b.label)}</option>`).join(''), false);
+    // O escopo padrão já é "todos os labels": mostra de saída o que seria removido.
+    loadCleanupPreview();
   } catch(e) {
     ids.forEach(id => { const s = document.getElementById(id); s.disabled = false; s.innerHTML = '<option value="">Erro ao carregar</option>'; });
     ownerSel.disabled = false;
     ownerSel.innerHTML = '<option value="">Erro ao carregar</option>';
-    cdl.disabled = false;
-    cdl.innerHTML = '<option value="">Todos os labels</option>';
+    setAll(ALL_OPT, false);
   }
 }
 

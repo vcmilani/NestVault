@@ -4,7 +4,7 @@ Mocka a listagem (list_dir_one_level) e o download em lote (_bulk_copy) para
 exercitar a lógica de walk/checkpoint sem rclone nem rede — mas deixa o resto
 do pipeline (staging, hash, dedupe/store/registro via _download_batch/
 _process_file_sync) rodar de verdade contra um volume de storage temporário e
-o banco de teste (sqlite in-memory).
+o banco de teste (sqlite em arquivo temporário).
 """
 import asyncio
 import datetime as _dt
@@ -12,11 +12,10 @@ import json
 from collections import namedtuple
 
 import pytest
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 import database as db_mod
+from conftest import _make_engine
 import storage as storage_mod
 import cloud.rclone_runner as rr
 from cloud.rclone_runner import RcloneFileEntry
@@ -27,11 +26,11 @@ _DiskUsage = namedtuple("DiskUsage", ["total", "used", "free"])
 
 @pytest.fixture
 def session_factory(tmp_path, monkeypatch):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    # Banco em arquivo, uma conexão por sessão (_make_engine do conftest). Era
+    # ":memory:" com StaticPool, que dá UMA conexão para todas as sessões: o
+    # ROLLBACK emitido ao devolver a conexão ao pool descarta a transação aberta
+    # de outra sessão. Mesma correção que o conftest recebeu na v9.1.2.
+    engine = _make_engine(tmp_path / "test.db")
     db_mod.Base.metadata.create_all(bind=engine)
     Session = sessionmaker(bind=engine)
     monkeypatch.setattr(rr, "SessionLocal", Session)
@@ -410,7 +409,12 @@ async def test_stale_checkpoint_with_recently_deleted_is_skipped(session_factory
     monkeypatch.setattr(rr, "list_dir_one_level", fake_list)
 
     # Cria uma versão incompleta com checkpoint já contendo o pendente "sujo".
+    # O label vem antes da versão: backup_versions.backup_label é FK de
+    # backup_ids.label, e o runner só criaria o label ao rodar. Nos outros
+    # testes é ele quem cria; aqui a versão é semeada antes.
     db = Session()
+    db.add(db_mod.BackupID(label="fotos", client_name="icloud"))
+    db.commit()
     ver = BackupVersion(
         backup_label="fotos", version_key="2024-01-01T00:00:00",
         status="incomplete",

@@ -1860,7 +1860,7 @@ As respostas continuam com `"status": "deleted"`, para não quebrar clientes ant
 | `PATCH` | `/backups/{label}/versions/{key}` | Finaliza versão (done/failed). Versão já finalizada não troca de status (`409`) |
 | `DELETE` | `/backups/{label}/versions/{key}` | Remove versão |
 | `POST` | `/backups/{label}/versions/{key}/absorb` | Herda arquivos ausentes de outra versão (modo acumulativo) |
-| `POST` | `/backups/{label}/cleanup` | Mantém apenas `keep` versões mais recentes |
+| `POST` | `/backups/{label}/cleanup` | Mantém apenas `keep` versões mais recentes. Como admin, roda em background e responde `scheduled: true` (acompanhe em Atividade) |
 | `GET` | `/backups/{label}/compare` | Diff de arquivos entre duas versões (`?v1=...&v2=...`) |
 
 ### Arquivos
@@ -1895,6 +1895,8 @@ As respostas continuam com `"status": "deleted"`, para não quebrar clientes ant
 | `POST` | `/maintenance/encrypt-existing` | Cifra arquivos físicos ainda não criptografados (requer `storage.encryption_enabled`) |
 | `GET` | `/maintenance/cleanup-by-date/preview` | Preview de versões elegíveis para remoção antes de uma data (`?before=YYYY-MM-DD[&label=X]`) |
 | `POST` | `/maintenance/cleanup-by-date` | Remove versões anteriores a uma data; preserva última versão `done` por label e versões `running` (`?before=YYYY-MM-DD[&label=X]`) |
+| `GET` | `/maintenance/cleanup-versions/preview` | Preview de versões que sobram ao manter as `keep` mais recentes de cada label (`?keep=N[&label=X]`) |
+| `POST` | `/maintenance/cleanup-versions` | Mantém as `keep` versões mais recentes de um label — ou de todos. Sempre em background (`?keep=N[&label=X]`) |
 | `GET` | `/maintenance/quarantine` | Lista conteúdos em quarentena (ausentes no disco, registros preservados) e as versões marcadas `suspect` |
 | `POST` | `/maintenance/quarantine/purge` | Apaga definitivamente os conteúdos em quarentena e marca as versões afetadas como `failed` |
 | `GET` | `/maintenance/trash` | Lista a [lixeira](#lixeira): labels e versões excluídos por usuários comuns, com quem excluiu e quando serão apagados |
@@ -2281,6 +2283,8 @@ A resposta de `/check/batch` é `list[CheckBatchResultItem]` na mesma ordem dos 
 | `POST /maintenance/encrypt-existing` | — | `EncryptExistingResponse` |
 | `GET /maintenance/cleanup-by-date/preview` | query: `before`, `label` (opcional) | `{ total, per_label: [{label, count}] }` |
 | `POST /maintenance/cleanup-by-date` | query: `before`, `label` (opcional) | `{ total_deleted, per_label: [{label, deleted}], storage_files_removed, bytes_freed }` |
+| `GET /maintenance/cleanup-versions/preview` | query: `keep`, `label` (opcional) | `{ total, per_label: [{label, count}] }` |
+| `POST /maintenance/cleanup-versions` | query: `keep`, `label` (opcional) | `{ scheduled, per_label: [{label, count}] }` |
 
 ---
 
