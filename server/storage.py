@@ -646,7 +646,7 @@ def _remove_rebalance_source_copy(db, copy_id: int, stored_at: str, sha256: str,
 _REBALANCE_BATCH = 50
 
 
-def rebalance_disks(db, dry_run: bool = False) -> dict:
+def rebalance_disks(db, dry_run: bool = False, on_progress=None) -> dict:
     """Move o necessário (não necessariamente tudo) dos volumes abaixo do
     limiar de espaço livre para volumes com espaço sobrando, até cada origem
     atingir STORAGE_FALLBACK_THRESHOLD_GB * REBALANCE_TARGET_FACTOR de folga.
@@ -657,6 +657,8 @@ def rebalance_disks(db, dry_run: bool = False) -> dict:
     mais espaço livre agora".
 
     dry_run=True calcula o mesmo plano sem copiar/apagar nada — usado pelo preview.
+    on_progress(msg), se informado, é chamado no início de cada origem e a cada lote
+    commitado — é o que alimenta o resumo do MaintenanceJob na Atividade.
     """
     from database import FileContent, FileContentCopy
     from sqlalchemy import and_, or_
@@ -710,6 +712,12 @@ def rebalance_disks(db, dry_run: bool = False) -> dict:
                 yield page
 
         src_moved = src_bytes = src_skipped = 0
+        if not dry_run:
+            log.info(f"[rebalance] origem {source_str}: {fmt_bytes(free)} livres, "
+                     f"alvo {fmt_bytes(target_bytes)}")
+            if on_progress:
+                on_progress(f"Origem {source_str}: liberando espaço "
+                            f"({fmt_bytes(free)} livres, alvo {fmt_bytes(target_bytes)})")
 
         for copy in (c for page in _candidate_pages() for c in page):
             size = copy.size
@@ -733,6 +741,8 @@ def rebalance_disks(db, dry_run: bool = False) -> dict:
                     continue
                 src_path = Path(copy.stored_at)
                 if not src_path.exists():
+                    if not dry_run:
+                        log.warning(f"[rebalance] arquivo físico ausente na origem: {src_path} — pulando")
                     src_skipped += 1
                     continue
                 if not dry_run:
@@ -740,6 +750,8 @@ def rebalance_disks(db, dry_run: bool = False) -> dict:
                     try:
                         shutil.copy2(str(src_path), str(dest_path))
                         if file_sha256(dest_path) != sha256:
+                            log.warning(f"[rebalance] SHA-256 inválido após cópia de {sha256[:8]}… "
+                                        f"para {best_dest} — pulando")
                             dest_path.unlink(missing_ok=True)
                             src_skipped += 1
                             continue
@@ -759,6 +771,9 @@ def rebalance_disks(db, dry_run: bool = False) -> dict:
                 src_moved += 1
                 if src_moved % _REBALANCE_BATCH == 0:
                     db.commit()
+                    if on_progress:
+                        on_progress(f"Origem {source_str}: {src_moved} arquivo(s) movido(s) "
+                                    f"({fmt_bytes(src_bytes + size)})")
             else:
                 src_moved += 1
 
@@ -794,11 +809,24 @@ def rebalance_disks(db, dry_run: bool = False) -> dict:
 
 
 def rereplicate_to_volume(v: Path) -> None:
-    from database import SessionLocal, FileContent, FileContentCopy
+    """Re-replica para um volume que voltou de degraded. Roda no executor, disparado
+    pelo volume_health_monitor sem ninguém aguardar o resultado — por isso registra
+    um MaintenanceJob (senão a execução era invisível na Atividade) e captura toda
+    exceção (senão ela sumia no Future descartado, sem chegar ao log)."""
+    from database import SessionLocal, FileContent, FileContentCopy, MaintenanceJob
     from sqlalchemy import func
+    from cache_state import invalidate_activity
     db = SessionLocal()
+    mj_id = None
     try:
         log.info(f"[rereplicate] Iniciando re-replicação para {v}")
+        mj = MaintenanceJob(job_type="rereplicate", status="running",
+                            summary=f"Volume {v} recuperado — re-replicando...")
+        db.add(mj)
+        db.commit()
+        mj_id = mj.id
+        invalidate_activity()
+
         shas_on_v = {r.sha256 for r in db.query(FileContentCopy.sha256)
                      .filter(FileContentCopy.volume_path == str(v)).all()}
         t = target_replicas()
@@ -810,6 +838,8 @@ def rereplicate_to_volume(v: Path) -> None:
             .all()
         )
         count = 0
+        skipped = 0
+        aborted = None
         for (sha256, _) in underfilled:
             if sha256 in shas_on_v:
                 continue
@@ -817,9 +847,10 @@ def rereplicate_to_volume(v: Path) -> None:
                       .filter(FileContentCopy.sha256 == sha256,
                               ~FileContentCopy.volume_path.in_([str(d) for d in _degraded_volumes]))
                       .first())
-            if not source:
-                continue
             fc = db.get(FileContent, sha256)
+            if not source or fc is None:
+                skipped += 1
+                continue
             try:
                 dest = content_path(sha256, v)
                 copy_verified(Path(source.stored_at), dest, sha256, bool(fc.encrypted),
@@ -828,16 +859,37 @@ def rereplicate_to_volume(v: Path) -> None:
                 count += 1
             except ReplicaSourceCorrupt as e:
                 log.error(f"[rereplicate] {sha256[:8]}… origem não confere — pulando: {e}")
+                skipped += 1
                 continue
             except OSError as e:
                 log.warning(f"[rereplicate] Erro em {v}: {e} — abortando")
+                aborted = str(e)
                 break
         if count:
             db.commit()
-            log.info(f"[rereplicate] {count} arquivo(s) re-replicados para {v}")
+            log.info(f"[rereplicate] {count} arquivo(s) re-replicados para {v}"
+                     + (f", {skipped} pulado(s)" if skipped else ""))
         else:
-            log.info(f"[rereplicate] Nenhum arquivo sub-replicado encontrado para {v}")
+            log.info(f"[rereplicate] Nenhum arquivo sub-replicado encontrado para {v}"
+                     + (f" ({skipped} pulado(s))" if skipped else ""))
+        mj = db.get(MaintenanceJob, mj_id)
+        if mj:
+            mj.status = "error" if aborted else "done"
+            mj.finished_at = datetime.now()
+            mj.summary = (f"{v}: {count} re-replicado(s), {skipped} pulado(s) — fator alvo: {t}"
+                          + (f" — abortado: {aborted}" if aborted else ""))
+            db.commit()
+    except Exception as e:
+        log.exception(f"[rereplicate] erro inesperado ao re-replicar para {v}")
+        db.rollback()
+        mj = db.get(MaintenanceJob, mj_id) if mj_id is not None else None
+        if mj:
+            mj.status = "error"
+            mj.finished_at = datetime.now()
+            mj.summary = f"{v}: erro — {e}"
+            db.commit()
     finally:
+        invalidate_activity()
         db.close()
 
 
@@ -881,8 +933,8 @@ def backfill_content_copies() -> None:
             log.info(f"[backfill] {count} entrada(s) migradas para file_content_copies")
         else:
             log.info("[backfill] Nenhuma entrada para migrar — file_content_copies já atualizado")
-    except Exception as e:
-        log.error(f"[backfill] Erro: {e}")
+    except Exception:
+        log.exception("[backfill] Erro ao migrar entradas para file_content_copies")
     finally:
         db.close()
 

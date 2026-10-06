@@ -92,6 +92,22 @@ def run_db_backup() -> dict:
     db = SessionLocal()
     try:
         return _run_db_backup(db)
+    except Exception as e:
+        # Sem isto o MaintenanceJob ficava "running" até o próximo reinício.
+        log.exception("[db-backup] erro inesperado")
+        try:
+            db.rollback()
+            for mj in db.query(MaintenanceJob).filter(
+                MaintenanceJob.job_type == "db-backup", MaintenanceJob.status == "running"
+            ).all():
+                mj.status = "error"
+                mj.finished_at = datetime.now()
+                mj.summary = f"Erro: {e.__class__.__name__}: {e} — ver logs do servidor"
+            db.commit()
+        except Exception:
+            log.exception("[db-backup] não foi possível marcar o job como erro")
+        invalidate_activity()
+        raise
     finally:
         db.close()
 
@@ -107,6 +123,7 @@ def _run_db_backup(db) -> dict:
     db.refresh(mj)
     mj_id = mj.id
     invalidate_activity()
+    log.info(f"[db-backup] job #{mj_id} iniciado")
 
     is_postgres = bool(DATABASE_URL)
     db_type     = "postgresql" if is_postgres else "sqlite"

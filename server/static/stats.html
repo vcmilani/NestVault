@@ -392,6 +392,9 @@
     'encrypt-existing':      'Cifragem de arquivos',
     'rereplicate':           'Replicação',
     'reconcile-replication': 'Reconciliação de réplicas',
+    'disk-rebalance':        'Rebalanceamento de discos',
+    'db-backup':             'Backup do banco',
+    'rclone-backup':         'Backup rclone',
   };
 
   async function load() {
@@ -770,7 +773,9 @@
       </tr>`).join('') : '<tr><td colspan="4" class="td-dim" style="text-align:center;padding:20px">Nenhuma execução registrada</td></tr>';
 
     const lastRows = lastJobs.map(j => {
-      const cls = j.status === 'done' ? 'done' : j.status === 'error' ? 'error' : 'running';
+      const cls = j.status === 'done' ? 'done'
+        : (j.status === 'error' || j.status === 'failed') ? 'error'
+        : j.status === 'running' ? 'running' : j.status;
       const summary = j.summary ? j.summary.split('\n').filter(Boolean).pop() : '';
       return `<tr>
         <td>${esc(JOB_TYPE_LABELS[j.job_type] || j.job_type)}</td>
