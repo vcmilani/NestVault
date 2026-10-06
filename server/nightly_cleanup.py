@@ -550,6 +550,14 @@ def validate_latest_versions_integrity(db, log_fn=None, untrusted=None) -> dict:
             "files_removed": 0, "labels": labels, "skipped": False, "untrusted": []}
 
 
+def _version_keys(versions, ids: list[int], shown: int = 5) -> str:
+    """Amostra das version_keys removidas, para a linha de log por label."""
+    wanted = set(ids)
+    keys = [v.version_key for v in versions if v.id in wanted]
+    rest = len(keys) - shown
+    return ", ".join(keys[:shown]) + (f" … (+{rest})" if rest > 0 else "")
+
+
 def run_nightly_cleanup() -> None:
     """Executa a limpeza noturna de versões conforme política de retenção."""
     db = SessionLocal()
@@ -590,13 +598,16 @@ def run_nightly_cleanup() -> None:
         )
         total_stale_running = len(stale_running)
         if stale_running:
+            stale_names = [f"{v.backup_label}/{v.version_key}" for v in stale_running]
             for v in stale_running:
                 v.status = "incomplete"
                 v.finished_at = now
             db.commit()
             log.info(
                 f"[nightly-cleanup] {total_stale_running} versão(ões) 'running' "
-                f"sem atividade de arquivos há 6h+ marcada(s) como 'incomplete'"
+                f"sem atividade de arquivos há 6h+ marcada(s) como 'incomplete': "
+                + ", ".join(stale_names[:10])
+                + (f" … (+{len(stale_names) - 10})" if len(stale_names) > 10 else "")
             )
 
         labels = [row[0] for row in db.query(BackupID.label).all()]
@@ -649,9 +660,11 @@ def run_nightly_cleanup() -> None:
                         stale_to_delete.append(v.id)
 
                 if stale_to_delete:
+                    _keys = _version_keys(versions, stale_to_delete)
                     _delete_versions(db, stale_to_delete)
                     total_stale += len(stale_to_delete)
-                    log.debug(f"[nightly-cleanup] {label}: {len(stale_to_delete)} versão(ões) stale removida(s)")
+                    log.info(f"[nightly-cleanup] {label}: {len(stale_to_delete)} versão(ões) "
+                             f"stale removida(s) — {_keys}")
 
                 # 2. Aplicar política de retenção nas versões done
                 if not done_versions:
@@ -675,16 +688,20 @@ def run_nightly_cleanup() -> None:
                             else:
                                 total_day += 1
 
+                    _keys = _version_keys(done_versions, done_to_delete)
                     _delete_versions(db, done_to_delete)
-                    log.debug(f"[nightly-cleanup] {label}: {len(done_to_delete)} versão(ões) done removida(s) por retenção")
+                    log.info(f"[nightly-cleanup] {label}: {len(done_to_delete)} versão(ões) "
+                             f"done removida(s) por retenção — {_keys}")
 
                 # 3. Podar versões done sem alteração de conteúdo em relação à anterior
                 # (preserva a primeira de cada bloco idêntico e sempre a última done do label)
                 unchanged_to_delete = _prune_unchanged_versions(db, survivors)
                 if unchanged_to_delete:
+                    _keys = _version_keys(survivors, unchanged_to_delete)
                     _delete_versions(db, unchanged_to_delete)
                     total_unchanged += len(unchanged_to_delete)
-                    log.debug(f"[nightly-cleanup] {label}: {len(unchanged_to_delete)} versão(ões) sem alteração removida(s)")
+                    log.info(f"[nightly-cleanup] {label}: {len(unchanged_to_delete)} versão(ões) "
+                             f"sem alteração removida(s) — {_keys}")
 
                 if stale_to_delete or done_to_delete or unchanged_to_delete:
                     labels_touched += 1
@@ -720,7 +737,10 @@ def run_nightly_cleanup() -> None:
             mj.summary = "Limpando arquivos órfãos..."
             db.commit()
             invalidate_activity()
+        log.info("[nightly-cleanup] limpando conteúdos órfãos")
         orphans_removed, bytes_freed = _cleanup_orphan_contents(db)
+        log.info(f"[nightly-cleanup] {orphans_removed} conteúdo(s) órfão(s) removido(s) "
+                 f"({round(bytes_freed/1024/1024, 1)} MB)")
 
         # Limpeza de arquivos temporários órfãos (mais de 24h)
         mj = db.get(MaintenanceJob, mj_id)
@@ -827,27 +847,30 @@ def run_nightly_cleanup() -> None:
                        + _tmp_note + _integrity_note + stale_running_note + failed_note)
             log.info(f"[nightly-cleanup] {summary}")
 
+        # O job só fecha depois do VACUUM (abaixo): ele pode travar o SQLite por
+        # minutos, e antes rodava com o job já "done" — invisível na Atividade.
+        final_summary = summary
+        final_bytes = bytes_freed + tmp_bytes
         mj = db.get(MaintenanceJob, mj_id)
         if mj:
-            mj.status = "done"
-            mj.finished_at = datetime.now()
-            mj.summary = summary
-            mj.bytes_freed = bytes_freed + tmp_bytes
+            mj.summary = ("Compactando o banco de dados (VACUUM)..."
+                          if engine.dialect.name == "sqlite" else summary)
             db.commit()
         invalidate_activity()
 
-    except Exception:
+    except Exception as e:
         log.exception("[nightly-cleanup] Erro durante limpeza noturna")
         try:
+            db.rollback()
             mj = db.get(MaintenanceJob, mj_id)
             if mj:
-                mj.status = "failed"
+                mj.status = "error"
                 mj.finished_at = datetime.now()
-                mj.summary = "Erro durante execução — ver logs do servidor"
+                mj.summary = f"Erro: {e.__class__.__name__}: {e} — ver logs do servidor"
                 db.commit()
             invalidate_activity()
         except Exception:
-            pass
+            log.exception("[nightly-cleanup] não foi possível marcar o job como erro")
         raise
     finally:
         db.close()
@@ -866,8 +889,25 @@ def run_nightly_cleanup() -> None:
             # rodava sem transação — commit/rollback viravam no-op, inclusive o
             # rollback de proteção de _cleanup_orphan_contents. execution_options
             # restaura o nível original ao devolver a conexão ao pool.
+            log.info("[nightly-cleanup] iniciando VACUUM")
+            _t0 = time.monotonic()
             with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
                 conn.exec_driver_sql("VACUUM")
-            log.info("[nightly-cleanup] VACUUM concluído — espaço em disco liberado")
+            log.info(f"[nightly-cleanup] VACUUM concluído em {time.monotonic() - _t0:.0f}s "
+                     f"— espaço em disco liberado")
         except Exception as exc:
             log.warning("[nightly-cleanup] Falha ao executar VACUUM (não crítico): %s", exc)
+            final_summary += f"; VACUUM falhou ({exc.__class__.__name__}) — ver logs"
+
+    db = SessionLocal()
+    try:
+        mj = db.get(MaintenanceJob, mj_id)
+        if mj:
+            mj.status = "done"
+            mj.finished_at = datetime.now()
+            mj.summary = final_summary
+            mj.bytes_freed = final_bytes
+            db.commit()
+    finally:
+        db.close()
+        invalidate_activity()

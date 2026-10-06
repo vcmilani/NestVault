@@ -49,8 +49,9 @@ import shutil
 import config
 import storage
 from cache_state import invalidate_activity, mark_backup_activity
+from sqlalchemy import func
 from database import (
-    BackupID, BackupVersion, FileContent, FileContentCopy,
+    BackupID, BackupVersion, FileContent, FileContentCopy, MaintenanceJob,
     RcloneBackupJob, SessionLocal, VersionFile, TRASHED_STATUS,
 )
 
@@ -937,6 +938,35 @@ async def _consumer(
 # Entry point principal
 # ---------------------------------------------------------------------------
 
+def _record_run_without_version(db, status: str, summary: str) -> None:
+    """Registra na Atividade um run rclone que terminou sem criar BackupVersion
+    (pulado por remote ocupado, ou falha antes da versão). A Atividade só mostra
+    versões e MaintenanceJobs — sem este registro o run não aparecia lá."""
+    now = datetime.now().astimezone().replace(tzinfo=None)
+    db.add(MaintenanceJob(job_type="rclone-backup", status=status,
+                          started_at=now, finished_at=now, summary=summary))
+    db.commit()
+    invalidate_activity()
+
+
+def _supersede_running_versions(db, label: str) -> int:
+    """Marca como incomplete as versões 'running' do label (run anterior
+    interrompido). Não faz commit.
+
+    finished_at é gravado junto: a tela de atividade filtra versões recentes por
+    finished_at, e sem ele a versão interrompida nunca aparecia lá."""
+    n = db.query(BackupVersion).filter(
+        BackupVersion.backup_label == label,
+        BackupVersion.status == "running",
+    ).update({
+        "status": "incomplete",
+        "finished_at": datetime.now().astimezone().replace(tzinfo=None),
+    }, synchronize_session=False)
+    if n:
+        log.info(f"[rclone-runner] {label}: {n} versão(ões) running de run anterior → incomplete")
+    return n
+
+
 async def run_rclone_backup_job(job_id: int) -> None:
     """Entry point: detecta o backend e despacha para a estratégia adequada.
 
@@ -946,6 +976,7 @@ async def run_rclone_backup_job(job_id: int) -> None:
     """
     db = SessionLocal()
     job: RcloneBackupJob | None = None
+    last_version_id: int | None = None
     try:
         job = db.get(RcloneBackupJob, job_id)
         if not job:
@@ -956,13 +987,17 @@ async def run_rclone_backup_job(job_id: int) -> None:
         # agendado que espera horas pelo manual dispararia fora da janela e,
         # pior, em cima do run seguinte. O cron volta no próximo horário.
         if is_remote_busy(job.remote_name):
-            log.warning(
-                f"[rclone-runner] Job {job_id} ignorado — já há um backup em "
-                f"andamento no remote {job.remote_name!r}"
-            )
+            msg = (f"Job {job_id} ({job.display_name}) ignorado — já há um backup em "
+                   f"andamento no remote {job.remote_name!r}")
+            log.warning(f"[rclone-runner] {msg}")
+            # Sem versão criada, o run pulado não apareceria na Atividade.
+            _record_run_without_version(db, "skipped", msg)
             return
 
         with _remote_slot(job.remote_name, job_id):
+            # Maior id de versão antes do run: se ele falhar sem criar versão
+            # nenhuma (ex.: _remote_config), o except registra um MaintenanceJob.
+            last_version_id = db.query(func.max(BackupVersion.id)).scalar() or 0
             log.info(
                 f"[rclone-runner] Iniciando job {job_id}: "
                 f"{job.remote_name}:{job.remote_path} → {job.target_label}"
@@ -1008,9 +1043,18 @@ async def run_rclone_backup_job(job_id: int) -> None:
                 job.last_run_status  = "error"
                 job.last_run_message = str(e)
                 db.commit()
+                # Falha antes de criar a versão (config do remote, BackupID...):
+                # sem isto o erro só aparecia na página do rclone, não na Atividade.
+                if last_version_id is not None and not db.query(BackupVersion.id).filter(
+                    BackupVersion.backup_label == job.target_label,
+                    BackupVersion.id > last_version_id,
+                ).first():
+                    _record_run_without_version(
+                        db, "error", f"Job {job_id} ({job.display_name}) falhou antes de "
+                                     f"criar a versão: {e}")
                 invalidate_activity()
             except Exception:
-                pass
+                log.exception(f"[rclone-runner] Job {job_id}: falha ao registrar o erro")
     finally:
         db.close()
 
@@ -1021,10 +1065,7 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
     try:
         # Marca 'running' órfãos como incomplete ANTES de selecionar o resume,
         # para que um run anterior interrompido (com checkpoint) seja retomável.
-        db.query(BackupVersion).filter(
-            BackupVersion.backup_label == job.target_label,
-            BackupVersion.status == "running",
-        ).update({"status": "incomplete"}, synchronize_session=False)
+        _supersede_running_versions(db, job.target_label)
         db.commit()
 
         # Resume na MESMA versão se houver checkpoint pendente; senão cria nova.
@@ -1450,10 +1491,7 @@ async def _run_fast_strategy(job: RcloneBackupJob, db) -> None:
     try:
         # Cria BackupVersion; marca running anteriores como incomplete
         version_key = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S")
-        db.query(BackupVersion).filter(
-            BackupVersion.backup_label == job.target_label,
-            BackupVersion.status == "running",
-        ).update({"status": "incomplete"}, synchronize_session=False)
+        _supersede_running_versions(db, job.target_label)
         version = BackupVersion(
             backup_label=job.target_label, version_key=version_key, status="running"
         )

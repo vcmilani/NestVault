@@ -1,5 +1,5 @@
 """
-NestVault  v9.3.1
+NestVault  v9.3.2
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -495,10 +495,10 @@ def _process_ssd_moves_worker(*, recovery: bool) -> None:
             job.finished_at = datetime.now()
             job.summary = (f"{prefix}{processed} arquivo(s) movidos SSD → HDD "
                             f"({storage.fmt_bytes(total_bytes)}) — backups: {label_str}")
-        if recovery:
-            log.info(f"[ssd-cache] recovery concluída — {processed} arquivo(s) movidos para HDD")
+        log.info(f"[ssd-cache] {prefix.lower()}{processed} arquivo(s) movidos SSD → HDD "
+                 f"({storage.fmt_bytes(total_bytes)}) — backups: {label_str}")
     except Exception as e:
-        log.error(f"[ssd-cache] Erro no worker de move{' (recovery)' if recovery else ''}: {e}")
+        log.exception(f"[ssd-cache] Erro no worker de move{' (recovery)' if recovery else ''}")
         job = db.get(MaintenanceJob, job_id) if job_id is not None else None
         if job:
             job.status = "error"
@@ -592,7 +592,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="9.3.1", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="9.3.2", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 
 if STATIC_DIR.exists():
@@ -1448,6 +1448,7 @@ def _bg_cleanup_orphan_contents(job_id: int | None = None) -> None:
             db.commit()
             db.refresh(mj)
             job_id = mj.id
+        invalidate_activity()  # mostra o job "running" antes da contagem e do 1º lote
 
         total = db.query(func.count(FileContent.sha256)).filter(_orphan_filter()).scalar() or 0
 
@@ -1485,34 +1486,62 @@ def _bg_cleanup_orphan_contents(job_id: int | None = None) -> None:
             db.commit()
     except Exception as e:
         log.exception("[bg-cleanup] erro inesperado")
-        mj = db.get(MaintenanceJob, job_id) if job_id else None
-        if mj:
-            mj.status = "failed"
-            mj.finished_at = datetime.now()
-            mj.summary = f"Erro: {e}"
-            db.commit()
+        _mark_job_error(db, job_id, e)
     finally:
         invalidate_activity()
         db.close()
+
+
+def _auto_cleanup_with_job(db: Session, exclude_version_id: Optional[int] = None,
+                           origin: str = "") -> tuple[str | None, int]:
+    """Roda _auto_cleanup_if_needed registrando um MaintenanceJob "auto-cleanup".
+
+    O job nasce "running" ANTES da limpeza (antes só era gravado no fim, já "done",
+    então a execução nunca aparecia como em andamento) e termina "error" se a limpeza
+    estourar no meio — versões já apagadas antes do erro não somem sem registro.
+    Não cria job quando não há pressão de espaço (o caso comum, a cada finish_version).
+    Exceções são relançadas depois de registradas."""
+    if _volumes_with_free_space() >= _target_replicas():
+        return None, 0
+    mj = MaintenanceJob(job_type="auto-cleanup", status="running",
+                        summary=f"Pouco espaço livre{origin} — removendo versões antigas...")
+    db.add(mj)
+    db.commit()
+    mj_id = mj.id
+    invalidate_activity()
+    try:
+        summary, bytes_freed = _auto_cleanup_if_needed(db, exclude_version_id)
+    except Exception as e:
+        log.exception(f"[auto-cleanup] erro durante a limpeza automática{origin}")
+        db.rollback()
+        mj = db.get(MaintenanceJob, mj_id)
+        if mj:
+            mj.status = "error"
+            mj.finished_at = datetime.now()
+            mj.summary = f"Erro: {e} — versões removidas antes do erro continuam removidas; ver logs"
+            db.commit()
+        invalidate_activity()
+        raise
+    mj = db.get(MaintenanceJob, mj_id)
+    if mj:
+        mj.status = "done"
+        mj.finished_at = datetime.now()
+        # summary None: o espaço voltou entre a checagem acima e a limpeza.
+        mj.summary = summary or "Nenhuma limpeza necessária — espaço livre recuperado"
+        mj.bytes_freed = bytes_freed
+        db.commit()
+    invalidate_activity()
+    return summary, bytes_freed
 
 
 def _bg_auto_cleanup() -> None:
     """Background task: cria sua propria sessao DB e executa auto-cleanup se necessario."""
     db = SessionLocal()
     try:
-        log.info("[bg-auto-cleanup] verificando necessidade de limpeza automática")
-        summary, bytes_freed = _auto_cleanup_if_needed(db)
-        if summary:
-            mj = MaintenanceJob(
-                job_type="auto-cleanup",
-                status="done",
-                finished_at=datetime.now(),
-                summary=summary,
-                bytes_freed=bytes_freed,
-            )
-            db.add(mj)
-            db.commit()
-            invalidate_activity()
+        log.debug("[bg-auto-cleanup] verificando necessidade de limpeza automática")
+        _auto_cleanup_with_job(db, origin=" após fim de backup")
+    except Exception:
+        pass  # já registrado no log e no MaintenanceJob por _auto_cleanup_with_job
     finally:
         db.close()
 
@@ -1550,6 +1579,7 @@ def _bg_bulk_delete_versions(
         db.add(mj)
         db.commit()
         mj_id = mj.id
+        invalidate_activity()
 
         try:
             # -- Etapa 1/2: linhas do banco ----------------------------------
@@ -1645,16 +1675,34 @@ def _bg_bulk_delete_versions(
             mj.bytes_freed = bytes_total
             db.commit()
             invalidate_activity()
-        except Exception:
-            mj = db.get(MaintenanceJob, mj_id)
-            if mj:
-                mj.status = "failed"
-                mj.finished_at = datetime.now()
-                db.commit()
-                invalidate_activity()
+        except Exception as e:
+            log.exception(f"{tag} erro — job #{mj_id} interrompido")
+            _mark_job_error(db, mj_id, e)
             raise
     finally:
         db.close()
+
+
+def _mark_job_error(db: Session, job_id: int | None, exc: Exception) -> None:
+    """Fecha um MaintenanceJob como "error" com o motivo no resumo. Chamado no except
+    dos workers em background: antes o status ia para "failed" (que as Estatísticas
+    não contam) e o resumo ficava com o último progresso ("Etapa 2/2 — 40%"),
+    sem dizer o que deu errado. Nunca lança — já estamos tratando um erro."""
+    if job_id is None:
+        return
+    try:
+        db.rollback()
+        mj = db.get(MaintenanceJob, job_id)
+        if mj:
+            mj.status = "error"
+            mj.finished_at = datetime.now()
+            last = (mj.summary or "").strip()
+            mj.summary = f"Erro: {exc.__class__.__name__}: {exc}" + (f" — parou em: {last}" if last else "")
+            db.commit()
+    except Exception:
+        log.exception(f"[maintenance] não foi possível marcar o job #{job_id} como erro")
+    finally:
+        invalidate_activity()
 
 
 _MIGRATE_BATCH = 50
@@ -1694,7 +1742,8 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
             .filter(FileContentCopy.volume_path == source)
             .scalar() or 0
         )
-        log.info(f"[migrate-disk] {source} → {destinations}: {total} cópia(s) a processar")
+        log.info(f"[migrate-disk] job #{job_id} {source} → {destinations}: {total} cópia(s) a processar")
+        invalidate_activity()  # o job "running" já existe — mostra na Atividade agora
 
         dest_set = set(destinations)
 
@@ -1782,9 +1831,11 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
             pct = round(done / total * 100) if total else 0
             mj = db.get(MaintenanceJob, job_id)
             if mj:
-                mj.summary = f"Copiando: {done} / {total} arquivos ({pct}%)"
+                mj.summary = f"Etapa 1/2 — copiando: {done} / {total} arquivos ({pct}%)"
                 db.commit()
-            log.debug(f"[migrate-disk] lote: {done}/{total}")
+                invalidate_activity()
+            log.info(f"[migrate-disk] etapa 1/2: {done}/{total} ({pct}%) — "
+                     f"{copied} copiado(s), {already_on_dest} já no destino, {skipped} pulado(s)")
 
         db.commit()
 
@@ -1793,6 +1844,8 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
         # novo sem carregar tudo. O DELETE é em lote por id; o unlink continua
         # arquivo a arquivo porque cada um pode falhar por conta própria.
         removed_physical = 0
+        log.info(f"[migrate-disk] etapa 1/2 concluída — iniciando etapa 2/2: "
+                 f"removendo cópias de {source} ({len(failed_sha256s)} mantida(s) por falha na cópia)")
         for page in _source_pages():
             to_delete_ids = []
             for src_copy in page:
@@ -1809,6 +1862,12 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
                 db.query(FileContentCopy).filter(
                     FileContentCopy.id.in_(to_delete_ids)
                 ).delete(synchronize_session=False)
+            mj = db.get(MaintenanceJob, job_id)
+            if mj:
+                mj.summary = f"Etapa 2/2 — removendo da origem: {removed_physical} / {total} arquivo(s)"
+                db.commit()
+                invalidate_activity()
+            log.info(f"[migrate-disk] etapa 2/2: {removed_physical}/{total} arquivo(s) removido(s) da origem")
 
         # Atualiza FileContent.stored_at que ainda apontam para o volume de origem.
         # startswith() (não like(f"{source}%")) escapa % e _ do path automaticamente —
@@ -1848,17 +1907,9 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
             db.commit()
             invalidate_activity()
 
-    except Exception:
-        log.exception("[migrate-disk] erro inesperado")
-        try:
-            mj = db.get(MaintenanceJob, job_id)
-            if mj:
-                mj.status = "failed"
-                mj.finished_at = datetime.now()
-                db.commit()
-                invalidate_activity()
-        except Exception:
-            pass
+    except Exception as e:
+        log.exception(f"[migrate-disk] job #{job_id}: erro inesperado")
+        _mark_job_error(db, job_id, e)
         raise
     finally:
         db.close()
@@ -1871,8 +1922,18 @@ def _bg_rebalance_disks(job_id: int) -> None:
     periódica automática (_process_rebalance_check, direto — já roda fora do loop
     de eventos, na thread do scheduler)."""
     db = SessionLocal()
+
+    def _progress(msg: str) -> None:
+        mj = db.get(MaintenanceJob, job_id)
+        if mj:
+            mj.summary = msg
+            db.commit()
+            invalidate_activity()
+
     try:
-        result = storage.rebalance_disks(db)
+        log.info(f"[rebalance] job #{job_id} iniciado")
+        invalidate_activity()  # o job "running" já existe — mostra na Atividade agora
+        result = storage.rebalance_disks(db, on_progress=_progress)
         if not result["sources"]:
             summary = "Nenhum disco abaixo do limiar de espaço livre — nada a fazer"
         else:
@@ -1889,17 +1950,9 @@ def _bg_rebalance_disks(job_id: int) -> None:
             db.commit()
             invalidate_activity()
         log.info(f"[rebalance] job #{job_id} concluído — {summary}")
-    except Exception:
-        log.exception("[rebalance] erro inesperado")
-        try:
-            mj = db.get(MaintenanceJob, job_id)
-            if mj:
-                mj.status = "failed"
-                mj.finished_at = datetime.now()
-                db.commit()
-                invalidate_activity()
-        except Exception:
-            pass
+    except Exception as e:
+        log.exception(f"[rebalance] job #{job_id}: erro inesperado")
+        _mark_job_error(db, job_id, e)
         raise
     finally:
         db.close()
@@ -2187,7 +2240,8 @@ def _build_stats_data(db: Session) -> StatsResponse:
     maint_stats = db.query(
         MaintenanceJob.job_type,
         func.sum(case((MaintenanceJob.status == "done",  1), else_=0)).label("done_count"),
-        func.sum(case((MaintenanceJob.status == "error", 1), else_=0)).label("error_count"),
+        # "failed": status de erro gravado por alguns workers até a v9.3.1 — hoje é sempre "error".
+        func.sum(case((MaintenanceJob.status.in_(["error", "failed"]), 1), else_=0)).label("error_count"),
         func.max(MaintenanceJob.started_at).label("last_run_at"),
     ).group_by(MaintenanceJob.job_type).all()
 
@@ -3256,7 +3310,8 @@ def create_version(label: str, req: VersionCreate, db: Session = Depends(get_db)
     updated = (db.query(BackupVersion)
                .filter(BackupVersion.backup_label == label,
                        BackupVersion.status == "running")
-               .update({"status": "incomplete"}, synchronize_session=False))
+               .update({"status": "incomplete", "finished_at": datetime.now()},
+                       synchronize_session=False))
     if updated:
         log.info(f"[versao] {label}: {updated} versão(ões) running → incomplete")
     v = BackupVersion(backup_label=label, version_key=req.version_key)
@@ -3541,6 +3596,7 @@ def _bg_ensure_replicas_batch(sha256s: list[str]) -> None:
     fator de replicação, sem nenhum I/O — que é o caso comum."""
     target = _target_replicas()
     db = SessionLocal()
+    attempted = 0
     try:
         for i in range(0, len(sha256s), _REPLICA_BATCH_CHUNK):
             chunk = sha256s[i:i + _REPLICA_BATCH_CHUNK]
@@ -3560,9 +3616,16 @@ def _bg_ensure_replicas_batch(sha256s: list[str]) -> None:
                 if stored_at is None or counts.get(sha, 0) >= target:
                     continue
                 _ensure_replicas(sha, Path(stored_at), db)
+                attempted += 1
             db.commit()
-    except Exception as e:
-        log.warning(f"[register/batch] réplicas em background falharam: {e}")
+        # Cada cópia criada já é logada por ensure_replicas; aqui só o fechamento
+        # do lote, e só quando houve trabalho (o caso comum é tudo já replicado).
+        if attempted:
+            log.info(f"[register/batch] réplicas em background: {attempted} de "
+                     f"{len(sha256s)} conteúdo(s) abaixo do fator {target} processado(s)")
+    except Exception:
+        log.exception(f"[register/batch] réplicas em background falharam "
+                      f"({attempted} de {len(sha256s)} processado(s) antes do erro)")
     finally:
         db.close()
 
@@ -3849,20 +3912,9 @@ async def upload_file(
                 f"{_exc}\n\n"
                 f"Iniciando limpeza automática de versões antigas..."
             )
-            _cl_summary, _cl_bytes = await asyncio.to_thread(_auto_cleanup_if_needed, db, version_id)
-            if _cl_summary:
-                # Registra o job para que a limpeza por pressão de disco apareça na
-                # Atividade e conte no gráfico de espaço liberado — antes ela era
-                # totalmente invisível.
-                db.add(MaintenanceJob(
-                    job_type="auto-cleanup",
-                    status="done",
-                    finished_at=datetime.now(),
-                    summary=_cl_summary,
-                    bytes_freed=_cl_bytes,
-                ))
-                db.commit()
-                invalidate_activity()
+            # O helper registra o MaintenanceJob (running → done/error) para que a
+            # limpeza por pressão de disco apareça na Atividade enquanto roda.
+            await asyncio.to_thread(_auto_cleanup_with_job, db, version_id, " durante upload")
             try:
                 volume = _pick_volume()
             except storage.StorageThresholdExceeded:
@@ -4072,42 +4124,68 @@ def force_cleanup_orphans(background_tasks: BackgroundTasks, db: Session = Depen
     db.add(mj)
     db.commit()
     db.refresh(mj)
+    invalidate_activity()  # job "running" visível na Atividade já ao agendar
     background_tasks.add_task(_bg_cleanup_orphan_contents, mj.id)
     return {"scheduled": True, "job_id": mj.id}
+
+
+def _start_sync_job(db: Session, job_type: str, summary: str) -> int:
+    """Cria o MaintenanceJob "running" de uma manutenção que roda dentro do request.
+    Antes estes jobs só eram gravados no fim, já "done": enquanto rodavam (pode levar
+    minutos com muitos arquivos) não apareciam na Atividade, e se falhassem não
+    sobrava registro nenhum."""
+    mj = MaintenanceJob(job_type=job_type, status="running", summary=summary)
+    db.add(mj)
+    db.commit()
+    invalidate_activity()
+    log.info(f"[{job_type}] job #{mj.id} iniciado")
+    return mj.id
+
+
+def _finish_sync_job(db: Session, job_id: int, summary: str) -> None:
+    mj = db.get(MaintenanceJob, job_id)
+    if mj:
+        mj.status = "done"
+        mj.finished_at = datetime.now()
+        mj.summary = summary
+        db.commit()
+    invalidate_activity()
 
 
 @app.post("/maintenance/rereplicate", response_model=RereplicateResponse, dependencies=[Depends(require_admin)])
 def force_rereplicate(db: Session = Depends(get_db)):
     """Re-replica conteúdos com menos cópias que storage.replication_factor. Útil após adicionar um disco novo."""
-    replicated, skipped = _rereplicate_all(db)
+    job_id = _start_sync_job(db, "rereplicate", "Re-replicando conteúdos sub-replicados...")
+    try:
+        replicated, skipped = _rereplicate_all(db)
+    except Exception as e:
+        log.exception(f"[rereplicate] job #{job_id}: erro")
+        _mark_job_error(db, job_id, e)
+        raise
     target = _target_replicas()
-    mj = MaintenanceJob(
-        job_type="rereplicate",
-        status="done",
-        finished_at=datetime.now(),
-        summary=f"{replicated} replicado(s), {skipped} pulado(s) — fator alvo: {target}",
-    )
-    db.add(mj)
-    db.commit()
-    invalidate_activity()
+    _finish_sync_job(db, job_id, f"{replicated} replicado(s), {skipped} pulado(s) — fator alvo: {target}")
     return RereplicateResponse(replicated=replicated, skipped=skipped, target_copies=target)
 
 
 @app.post("/maintenance/reconcile-replication", response_model=ReconcileResponse, dependencies=[Depends(require_admin)])
 def reconcile_replication(db: Session = Depends(get_db)):
     """Remove cópias excedentes e preenche arquivos sub-replicados conforme storage.replication_factor."""
-    cleaned = _cleanup_excess_copies(db)
-    replicated, skipped = _rereplicate_all(db)
+    job_id = _start_sync_job(db, "reconcile-replication", "Removendo cópias excedentes...")
+    try:
+        cleaned = _cleanup_excess_copies(db)
+        mj = db.get(MaintenanceJob, job_id)
+        if mj:
+            mj.summary = f"{cleaned} cópia(s) excedente(s) removida(s) — re-replicando sub-replicados..."
+            db.commit()
+            invalidate_activity()
+        replicated, skipped = _rereplicate_all(db)
+    except Exception as e:
+        log.exception(f"[reconcile-replication] job #{job_id}: erro")
+        _mark_job_error(db, job_id, e)
+        raise
     target = _target_replicas()
-    mj = MaintenanceJob(
-        job_type="reconcile-replication",
-        status="done",
-        finished_at=datetime.now(),
-        summary=f"{replicated} replicado(s), {cleaned} cópia(s) excedente(s) removida(s), {skipped} pulado(s) — fator alvo: {target}",
-    )
-    db.add(mj)
-    db.commit()
-    invalidate_activity()
+    _finish_sync_job(db, job_id, f"{replicated} replicado(s), {cleaned} cópia(s) excedente(s) removida(s), "
+                                 f"{skipped} pulado(s) — fator alvo: {target}")
     return ReconcileResponse(
         replicated=replicated,
         skipped=skipped,
@@ -4174,6 +4252,7 @@ def validate_integrity(background_tasks: BackgroundTasks, db: Session = Depends(
     db.add(mj)
     db.commit()
     db.refresh(mj)
+    invalidate_activity()  # job "running" visível na Atividade já ao agendar
     background_tasks.add_task(_bg_validate_integrity, mj.id)
     return {"scheduled": True, "job_id": mj.id}
 
@@ -4338,6 +4417,8 @@ def restore_trash(req: TrashRestoreRequest, db: Session = Depends(get_db)):
         # "running" não volta: o cliente que a escrevia já recebeu 404 e desistiu.
         prev = v.trashed_from_status or "done"
         v.status = "incomplete" if prev == "running" else prev
+        if v.status != "running" and v.finished_at is None:
+            v.finished_at = datetime.now()  # senão fica fora da tela de atividade
         v.trashed_at = v.trashed_from_status = v.trashed_by = None
     # Restaurar qualquer parte do label o traz de volta — senão a versão
     # restaurada continuaria invisível atrás de um label na lixeira.
@@ -4522,6 +4603,7 @@ def encrypt_existing_files(background_tasks: BackgroundTasks, db: Session = Depe
     db.add(mj)
     db.commit()
     db.refresh(mj)
+    invalidate_activity()  # job "running" visível na Atividade já ao agendar
     background_tasks.add_task(_bg_encrypt_existing, mj.id)
     return {"scheduled": True, "job_id": mj.id}
 
@@ -4852,6 +4934,7 @@ def migrate_disk(
     db.refresh(mj)
     job_id = mj.id
 
+    invalidate_activity()  # job "running" visível na Atividade já ao agendar
     background_tasks.add_task(_bg_migrate_disk, req.source, req.destinations, job_id)
     log.info(f"[migrate-disk] job #{job_id} agendado")
     return {"scheduled": True, "job_id": job_id}
@@ -4895,6 +4978,7 @@ def rebalance_disks_run(background_tasks: BackgroundTasks, db: Session = Depends
     db.refresh(mj)
     job_id = mj.id
 
+    invalidate_activity()  # job "running" visível na Atividade já ao agendar
     background_tasks.add_task(_bg_rebalance_disks, job_id)
     log.info(f"[rebalance] job #{job_id} agendado manualmente")
     return {"scheduled": True, "job_id": job_id}
