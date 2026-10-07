@@ -296,7 +296,7 @@ def test_only_owner_toggles_and_cookie_cannot_write(two_users):
 
 
 def test_photos_enabled_column_migrates_existing_db(tmp_path, monkeypatch):
-    """Banco anterior à v9.4 (sem a coluna) ganha photos_enabled = true no init_db."""
+    """Banco anterior à v10.0 (sem a coluna) ganha photos_enabled = true no init_db."""
     import sqlalchemy as sa
     eng = sa.create_engine(f"sqlite:///{tmp_path / 'old.db'}")
     with eng.begin() as c:

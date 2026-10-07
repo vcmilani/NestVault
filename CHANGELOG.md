@@ -4,7 +4,7 @@ Histórico de versões do NestVault. Veja o [README](README.md) para instalaçã
 
 ---
 
-**v9.4.0** — front "cloud": duas páginas novas para **navegar nos backups como num drive e ver as fotos como numa galeria**, direto no navegador. As duas funcionam para usuário comum (cada um vê só os próprios backups), diferente do painel administrativo.
+**v10.0.0** — front "cloud": duas páginas novas para **navegar nos backups como num drive e ver as fotos como numa galeria**, direto no navegador. As duas funcionam para usuário comum (cada um vê só os próprios backups), diferente do painel administrativo.
 
 **`/cloud` — o drive.** A raiz lista os backups do usuário como pastas; dentro de cada um, a navegação é por pasta, em grade ou lista, com busca por nome, ordenação e "carregar mais" para pastas com milhares de arquivos. Os caminhos começam no prefixo comum do backup: um label de `/Users/fulano/Pictures/...` abre direto em `2024/`, `2025/`, sem a cadeia de pastas do computador de origem. O prefixo é calculado sobre todas as versões `done`, então o mesmo caminho aponta para o mesmo arquivo em qualquer versão. Por padrão o drive mostra a última versão `done`; o seletor troca para qualquer versão anterior, e o painel **⟲ Versões** de cada arquivo lista as versões em que ele existe e em quais o conteúdo mudou. O visualizador abre imagem, vídeo, áudio, PDF e texto, com setas e swipe entre os arquivos da pasta.
 

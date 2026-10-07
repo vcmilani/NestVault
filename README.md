@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v9.4.0`
+# 🗄️ NestVault  `v10.0.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **backup por usuário** — cada conta só cria, lista e restaura seus próprios backups.
 
@@ -287,7 +287,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Opcionais para a página **[Fotos](#-cloud-e--fotos)** *(v9.4)*:
+Opcionais para a página **[Fotos](#-cloud-e--fotos)** *(v10.0)*:
 
 ```bash
 pip install pillow-heif        # miniaturas de HEIC/HEIF (fotos de iPhone)
@@ -1112,8 +1112,8 @@ pytest tests/ --cov=server --cov-report=term-missing
 | `test_user_isolation.py` *(v7.9)* | Backup por usuário: listagem escopada por dono, bloqueio de leitura/escrita/download cruzado entre usuários, admin com acesso irrestrito |
 | `test_replication.py` | `/maintenance/rereplicate` e `/maintenance/reconcile-replication` — sub-replicação e sobre-replicação |
 | `test_disks.py` | `GET /storage/disks` — status de volumes, contagem de cópias físicas por volume |
-| `test_cloud_drive.py` *(v9.4)* | `/cloud`: raiz por usuário, prefixo comum, pastas/paginação, versões e histórico, busca, lixeira, cookie de sessão (adulterado, chave rotacionada), Range em arquivo plano e cifrado, HTML servido como texto |
-| `test_cloud_photos.py` *(v9.4)* | Indexação: backfill, EXIF e rotação, dedup entre backups, miniatura cifrada, limite de tentativas, órfãos; timeline paginada, meses e isolamento entre usuários; escolha de quais backups entram (só o dono, não por cookie) e migração da coluna |
+| `test_cloud_drive.py` *(v10.0)* | `/cloud`: raiz por usuário, prefixo comum, pastas/paginação, versões e histórico, busca, lixeira, cookie de sessão (adulterado, chave rotacionada), Range em arquivo plano e cifrado, HTML servido como texto |
+| `test_cloud_photos.py` *(v10.0)* | Indexação: backfill, EXIF e rotação, dedup entre backups, miniatura cifrada, limite de tentativas, órfãos; timeline paginada, meses e isolamento entre usuários; escolha de quais backups entram (só o dono, não por cookie) e migração da coluna |
 | `test_rclone_walk.py` | Walk incremental do rclone — conclusão + limpeza de checkpoint, resume de diretório falho, falha de listagem isolada, skip por mtime, dispatch por backend, override de `strategy`, `_MAX_RESUMES`, batching cross-directory, pastas protegidas |
 
 ---
@@ -1405,12 +1405,12 @@ Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Par
 - **Configurações** *(v8.0)* — página `/settings`, ver abaixo
 - **Discos** — página `/disks` com painel de volumes: espaço total/livre/usado, arquivos físicos por volume e status (ok/degraded)
 - **Explorer de arquivos** — navegação e download de arquivos de uma versão específica via `/explorer`
-- **Cloud e Fotos** *(v9.4)* — `/cloud` e `/photos`, ver abaixo. Ao contrário do resto do painel, funcionam com chave de **usuário comum**
+- **Cloud e Fotos** *(v10.0)* — `/cloud` e `/photos`, ver abaixo. Ao contrário do resto do painel, funcionam com chave de **usuário comum**
 - **Backups em tempo real** — indicador no cabeçalho com contagem de backups em andamento; polling automático a cada 3 s com botão ⏸ para pausar
 
 ### ☁ Cloud e ▣ Fotos
 
-*(v9.4)* Duas páginas para usar os backups como um serviço de nuvem, pelo navegador ou pelo celular. Cada usuário vê **só os próprios backups** — inclusive o admin, para quem o `/explorer` continua sendo a visão de todos.
+*(v10.0)* Duas páginas para usar os backups como um serviço de nuvem, pelo navegador ou pelo celular. Cada usuário vê **só os próprios backups** — inclusive o admin, para quem o `/explorer` continua sendo a visão de todos.
 
 **`/cloud` — drive (estilo OneDrive)**
 
