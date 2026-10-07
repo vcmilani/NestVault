@@ -1999,7 +1999,9 @@ def _process_rebalance_check() -> None:
 
 
 # -- Dashboard ----------------------------------------------------------------
-@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+# Página inicial = Fotos, para qualquer perfil. O dashboard administrativo fica
+# em /admin, atrás da credencial de admin (ver static/app.js, nvGuardAdmin).
+@app.get("/admin", response_class=HTMLResponse, include_in_schema=False)
 def dashboard():
     index = STATIC_DIR / "index.html"
     if not index.exists():
@@ -2031,6 +2033,7 @@ def cloud_page():
     return HTMLResponse(page.read_text(encoding="utf-8"))
 
 
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
 @app.get("/photos", response_class=HTMLResponse, include_in_schema=False)
 def photos_page():
     page = STATIC_DIR / "photos.html"

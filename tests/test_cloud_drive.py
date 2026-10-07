@@ -276,10 +276,21 @@ def test_me_reports_role_via_header_and_cookie(two_users):
 
 
 def test_admin_pages_are_marked_for_the_guard(client):
-    for path in ("/", "/disks", "/explorer", "/maintenance", "/activity", "/rclone-jobs",
+    for path in ("/admin", "/disks", "/explorer", "/maintenance", "/activity", "/rclone-jobs",
                  "/stats", "/manage-users", "/settings"):
         html = client.get(path).text
         assert "<body data-admin-page>" in html, path
         assert "permissão de administrador" not in html, path
-    for path in ("/cloud", "/photos"):
-        assert "data-admin-page" not in client.get(path).text, path
+        # Dentro da área admin, "voltar" leva ao dashboard (/admin), não às fotos
+        assert 'href="/"' not in html.replace('href="/" title="Fotos"', "").replace('<a href="/">▣ Fotos</a>', ""), path
+    for path in ("/", "/cloud", "/photos"):
+        html = client.get(path).text
+        assert "data-admin-page" not in html, path
+        assert 'href="/admin"' in html, path  # ⚙ Admin para qualquer perfil
+
+
+def test_home_is_photos_and_dashboard_moved_to_admin(client):
+    assert "NestVault — Fotos" in client.get("/").text
+    assert "NestVault — Fotos" in client.get("/photos").text
+    admin = client.get("/admin").text
+    assert "data-admin-page" in admin and "NestVault — Fotos" not in admin

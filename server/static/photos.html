@@ -16,9 +16,6 @@
 <link rel="stylesheet" href="/static/nav.css">
 <script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
 <style>
-  /* Usuário comum só navega entre Fotos e Cloud; os links de admin aparecem
-     quando o POST /cloud/session confirma role=admin (body.is-admin). */
-  body:not(.is-admin) .admin-only{display:none !important}
   .top{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
   .top h1{font-size:13px;font-weight:500;letter-spacing:.12em;text-transform:uppercase;color:var(--text);margin:0;flex:1}
   .count{font-size:11px;color:var(--text-mute)}
@@ -107,20 +104,18 @@
   </div>
   <div class="header-right">
     <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
-    <a class="hbtn admin-only" href="/" title="Dashboard">←<span class="hbtn-label"> Dashboard</span></a>
-    <a class="hbtn active" href="/photos" title="Fotos">▣<span class="hbtn-label"> Fotos</span></a>
+    <a class="hbtn active" href="/" title="Fotos">▣<span class="hbtn-label"> Fotos</span></a>
     <a class="hbtn" href="/cloud" title="Cloud">☁<span class="hbtn-label"> Cloud</span></a>
-    <a class="hbtn admin-only" href="/activity" title="Atividade">◎<span class="hbtn-label"> Atividade</span></a>
+    <a class="hbtn" href="/admin" title="Área do administrador (pede chave de admin)">⚙<span class="hbtn-label"> Admin</span></a>
     <button class="hbtn always-visible" id="logoutBtn" title="Sair">⎋<span class="hbtn-label"> Sair</span></button>
     <button class="nav-hamburger"></button>
   </div>
 </header>
 
 <nav class="mobile-nav">
-  <a class="admin-only" href="/">← Dashboard</a>
-  <a class="active" href="/photos">▣ Fotos</a>
+  <a class="active" href="/">▣ Fotos</a>
   <a href="/cloud">☁ Cloud</a>
-  <a class="admin-only" href="/activity">◎ Atividade</a>
+  <a href="/admin">⚙ Admin</a>
 </nav>
 <div class="mobile-nav-backdrop"></div>
 
@@ -199,14 +194,6 @@
     if (r.status === 401) { showLogin(API_KEY ? 'API Key inválida' : ''); throw new Error('401'); }
     if (!r.ok) throw new Error('Falha ao abrir sessão (' + r.status + ')');
     sessionReady = true;
-    try {
-      if ((await r.json()).role === 'admin') {
-        document.body.classList.add('is-admin');
-        // Admin mantém o rótulo de sempre: ele troca de chave por aqui.
-        document.getElementById('logoutBtn').innerHTML = '⌀<span class="hbtn-label"> API Key</span>';
-        document.getElementById('logoutBtn').title = 'API Key';
-      }
-    } catch (_) {}
   }
 
   async function loadAll() {
@@ -572,8 +559,6 @@
   document.getElementById('logoutBtn').addEventListener('click', () => {
     sessionReady = false;
     fetch('/cloud/session', {method: 'DELETE', credentials: 'same-origin'}).catch(() => {});
-    document.body.classList.remove('is-admin');
-    document.getElementById('logoutBtn').innerHTML = '⎋<span class="hbtn-label"> Sair</span>';
   });
 
   loadAll();

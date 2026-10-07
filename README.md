@@ -1374,14 +1374,15 @@ Deixar o campo vazio desabilita o agendamento (execução manual apenas).
 Acessível pelo browser, servido diretamente pelo FastAPI:
 
 ```
-http://<ip-da-pi>:8000/
+http://<ip-da-pi>:8000/        # Fotos (página inicial)
+http://<ip-da-pi>:8000/admin   # área do administrador
 ```
 
 Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Para trocar, clique em **⌀ API Key** no header.
 
 > **v7.9 — dashboard é admin-only.** O painel web (stats, discos, manutenção, atividade, rclone, usuários) exige uma chave com `role=admin`; uma chave de usuário comum recebe a tela de login novamente com "Esta chave não tem permissão de administrador." O caminho de backup/restore do usuário comum é o CLI (`nestvault.py`), cuja API (`/backups`, `/files`, etc.) já é escopada por dono.
 
-> **v10.0 — usuário comum no navegador.** Quem entra com chave de usuário comum em `/` (ou abre o app instalado no celular) é levado direto para **[Fotos](#-cloud-e--fotos)**, e navega só entre Fotos e Cloud: os links de Dashboard e Atividade não aparecem para ele, e qualquer página administrativa aberta pela URL redireciona para Fotos em vez de pedir outra chave.
+> **v10.0 — página inicial é Fotos; painel em `/admin`.** Para qualquer perfil, `/` (e o app instalado no celular) abre **[Fotos](#-cloud-e--fotos)**, com **Cloud** ao lado. O dashboard passou para **`/admin`**, a entrada da **área do administrador** (botão **⚙ Admin**), que dá acesso a todos os painéis desta seção. A área exige uma **chave de administrador**: se a chave com que você entrou já é de admin, entra direto; se não, ela pede uma, guardada à parte (`localStorage.nvAdminKey`), sem trocar a chave que você usa nas fotos. **⎋ Sair do admin** apaga só a chave de admin e volta para as fotos. Chave de admin revogada ou rotacionada faz a área pedir a credencial de novo. As URLs das outras páginas (`/disks`, `/activity`, `/explorer`...) não mudaram.
 
 > **v9.1.1 — layout e leitura.** Todas as telas usam a mesma coluna centrada, em duas larguras: 1440px nas páginas de dados e 960px em Configurações e Usuários, que são formulários. O cabeçalho ocupa a largura toda mas alinha os botões com a borda do conteúdo, então a coluna não muda de posição ao navegar. As cores foram calibradas para atender WCAG AA em texto pequeno nos dois temas — inclusive os badges de status, que antes não passavam em nenhum —, e a navegação por `Tab` passa a mostrar um anel de foco visível.
 
@@ -2351,7 +2352,8 @@ Endpoints que usam headers customizados:
 ## 📊 Documentação automática
 
 Com o servidor rodando:
-- **Dashboard**: `http://<ip-da-pi>:8000/`
+- **Fotos (página inicial)**: `http://<ip-da-pi>:8000/`
+- **Área do administrador (dashboard)**: `http://<ip-da-pi>:8000/admin`
 - **Swagger UI**: `http://<ip-da-pi>:8000/docs`
 - **ReDoc**: `http://<ip-da-pi>:8000/redoc`
 
