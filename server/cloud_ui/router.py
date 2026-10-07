@@ -7,13 +7,16 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from auth import (SESSION_COOKIE, SESSION_TTL, get_current_user, get_user_header_or_cookie,
                   make_session_token, require_owner_or_admin)
-from database import (BackupID, BackupVersion, FileContent, User, VersionFile, get_db,
+import crypto
+import storage
+from database import (BackupID, BackupVersion, FileContent, MediaInfo, User, VersionFile, get_db,
                       TRASHED_STATUS)
-from . import content, tree
+from . import content, media, tree
 
 router = APIRouter()
 
@@ -121,3 +124,58 @@ def get_content(file_id: int, request: Request, download: bool = False,
     require_owner_or_admin(row.owner_user_id, user)
     return content.stream(request, db, sha256=row.sha256, name=Path(row.original_path).name,
                           size=row.size, encrypted=bool(row.encrypted), download=download)
+
+
+# -- Fotos --------------------------------------------------------------------
+
+@router.get("/photos")
+def get_photos(before_ts: Optional[float] = None, before_id: Optional[int] = None,
+               limit: int = Query(200, ge=1, le=1000),
+               db: Session = Depends(get_db),
+               user: User = Depends(get_user_header_or_cookie)):
+    """Timeline de fotos e vídeos de todos os backups do usuário (última versão de
+    cada um), mais recentes primeiro. Paginação keyset por (before_ts, before_id)."""
+    items = media.timeline(db, user)
+    chunk = media.page(items, before_ts, before_id, limit)
+    nxt = None
+    if chunk and len(chunk) == limit:
+        nxt = {"before_ts": chunk[-1]["ts"], "before_id": chunk[-1]["id"]}
+    return {"items": chunk, "next": nxt, "total": len(items)}
+
+
+@router.get("/photos/months")
+def get_photo_months(db: Session = Depends(get_db),
+                     user: User = Depends(get_user_header_or_cookie)):
+    return media.months(media.timeline(db, user))
+
+
+@router.get("/photos/indexing")
+def get_indexing(db: Session = Depends(get_db),
+                 user: User = Depends(get_user_header_or_cookie)):
+    return media.indexing_status(media.timeline(db, user))
+
+
+@router.get("/thumb/{sha256}")
+def get_thumb(sha256: str, request: Request, size: Literal["sm", "lg"] = "sm",
+              db: Session = Depends(get_db),
+              user: User = Depends(get_user_header_or_cookie)):
+    # 404 (e não 403) para conteúdo alheio: não confirma que o sha256 existe.
+    mi = db.get(MediaInfo, sha256)
+    path = (mi.thumb_sm if size == "sm" else mi.thumb_lg) if mi else None
+    if not path or not media.thumb_visible_to(db, user, sha256):
+        raise HTTPException(404, "Miniatura nao encontrada")
+    p = Path(path)
+    if not p.exists():
+        # Volume trocado/limpo: descarta o registro para o indexador refazer.
+        db.delete(mi)
+        db.commit()
+        media.bump_generation()
+        media.indexer.wake()
+        raise HTTPException(404, "Miniatura nao encontrada")
+    headers = {"Cache-Control": "private, max-age=604800", "ETag": f'"{sha256}-{size}"'}
+    if request.headers.get("if-none-match") == headers["ETag"]:
+        return Response(status_code=304, headers=headers)
+    if mi.thumb_encrypted:
+        return StreamingResponse(crypto.decrypt_chunks(p, storage.encryption_key),
+                                 media_type="image/jpeg", headers=headers)
+    return FileResponse(p, media_type="image/jpeg", headers=headers)

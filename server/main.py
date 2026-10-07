@@ -1,5 +1,5 @@
 """
-NestVault  v9.3.2
+NestVault  v9.4.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -178,6 +178,7 @@ from nightly_cleanup import orphan_filter as _orphan_filter
 from auth import get_current_user, require_admin, require_owner_or_admin
 from cloud.rclone_router import router as rclone_router
 from cloud_ui import router as cloud_ui_router
+from cloud_ui import media as cloud_media
 import scheduler as sched
 from cache_state import (_activity_wake, activity_generation, invalidate_activity,
                           mark_backup_activity, seconds_since_backup_activity)
@@ -577,6 +578,9 @@ async def lifespan(_: FastAPI):
     # Aquece o cache de stats fora do request, para que o primeiro acesso à página
     # depois do boot já encontre os dados prontos.
     _refresh_stats_async()
+    if cloud_media.AUTOSTART:
+        # lambda, e não SessionLocal direto: resolve o global na hora (os testes o trocam)
+        cloud_media.indexer.start(lambda: SessionLocal())
     log.info(f"Servidor iniciado — {len(storage.STORAGE_VOLUMES)} volume(s): {[str(v) for v in storage.STORAGE_VOLUMES]}")
     if storage.SSD_CACHE_ENABLED and storage.SSD_CACHE_DIR:
         log.info(f"SSD cache: habilitado — {storage.SSD_CACHE_DIR} (max {storage.SSD_CACHE_MAX_GB} GB)")
@@ -590,10 +594,11 @@ async def lifespan(_: FastAPI):
     ssd_monitor.cancel()
     activity_refresh.cancel()
     system_metrics.cancel()
+    cloud_media.indexer.stop()
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="9.3.2", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="9.4.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 app.include_router(cloud_ui_router, prefix="/cloud", tags=["cloud"])
 
@@ -2026,6 +2031,14 @@ def cloud_page():
     return HTMLResponse(page.read_text(encoding="utf-8"))
 
 
+@app.get("/photos", response_class=HTMLResponse, include_in_schema=False)
+def photos_page():
+    page = STATIC_DIR / "photos.html"
+    if not page.exists():
+        return HTMLResponse("<h1>Página não encontrada</h1>", status_code=404)
+    return HTMLResponse(page.read_text(encoding="utf-8"))
+
+
 @app.get("/maintenance", response_class=HTMLResponse, include_in_schema=False)
 def maintenance_page():
     page = STATIC_DIR / "maintenance.html"
@@ -3398,6 +3411,7 @@ def finish_version(label: str, version_key: str, req: VersionFinish, background_
     log.info(f"[versao] {label}/{version_key} → {req.status}")
     if req.status == "done":
         background_tasks.add_task(_bg_auto_cleanup)
+        cloud_media.indexer.wake()  # fotos novas entram na timeline
         if _should_process_ssd_moves(db):
             background_tasks.add_task(_bg_process_ssd_pending_moves)
         # Caso contrário, o _ssd_space_monitor dispara quando ficar ocioso.

@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#e8a940">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="NestVault">
+<link rel="icon" type="image/png" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<link rel="manifest" href="/static/manifest.json">
+<title>NestVault — Fotos</title>
+<link rel="stylesheet" href="/static/theme.css">
+<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/nav.css">
+<script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
+<style>
+  .top{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+  .top h1{font-size:13px;font-weight:500;letter-spacing:.12em;text-transform:uppercase;color:var(--text);margin:0;flex:1}
+  .count{font-size:11px;color:var(--text-mute)}
+  .sel{background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:11px;padding:7px 8px;outline:none;cursor:pointer}
+  .sel:focus{border-color:var(--amber)}
+  .hidden{display:none !important}
+
+  .idx{border:1px solid var(--border);background:var(--bg2);padding:10px 14px;margin-bottom:16px;font-size:11px;color:var(--text-dim)}
+  .idx-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .idx-row strong{color:var(--text);font-weight:500}
+  .idx-bar{height:3px;background:var(--bg3);margin-top:8px;overflow:hidden}
+  .idx-bar span{display:block;height:100%;background:var(--amber);transition:width .4s}
+  .idx button{background:none;border:none;color:var(--amber);font-family:var(--mono);font-size:11px;text-decoration:underline;cursor:pointer;padding:0}
+
+  .month-h{font-size:15px;color:var(--text);margin:26px 0 4px;font-weight:500;letter-spacing:.02em}
+  .month-h:first-child{margin-top:4px}
+  .day-h{font-size:11px;color:var(--text-dim);margin:14px 0 6px;letter-spacing:.02em}
+  .row{display:flex;gap:4px;margin-bottom:4px}
+  .ph{position:relative;background:var(--bg3);overflow:hidden;cursor:pointer;border:none;padding:0;flex:none;display:block}
+  .ph img{width:100%;height:100%;object-fit:cover;display:block;transition:opacity .2s;opacity:0}
+  .ph img.ok{opacity:1}
+  .ph:hover img,.ph:focus-visible img{filter:brightness(1.08)}
+  .ph:focus-visible{outline:2px solid var(--amber);outline-offset:-2px}
+  .ph-ph{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;color:var(--text-mute);font-size:9px;padding:6px;text-align:center;overflow:hidden}
+  .ph-ph svg{width:26px;height:26px}
+  .ph-name{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ph-vid{position:absolute;bottom:5px;right:6px;color:#fff;font-size:10px;text-shadow:0 1px 3px rgba(0,0,0,.8);display:flex;gap:4px;align-items:center}
+  .sentinel{height:1px}
+  .end{padding:30px;text-align:center;color:var(--text-mute);font-size:11px}
+  .empty{padding:60px 20px;text-align:center;color:var(--text-mute);font-size:12px;line-height:1.9}
+  .empty a{color:var(--amber)}
+
+  /* Visualizador */
+  .viewer{position:fixed;inset:0;background:#070808;z-index:50;display:flex;flex-direction:column}
+  .v-head{display:flex;align-items:center;gap:8px;padding:10px 14px;color:#e8ecea;border-bottom:1px solid rgba(255,255,255,.1);flex-wrap:wrap}
+  .v-title{flex:1;min-width:0}
+  .v-name{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .v-sub{font-size:10px;color:#9fb0ad;margin-top:2px}
+  .vbtn{background:none;border:1px solid rgba(255,255,255,.25);color:#cfd8d6;padding:5px 10px;font-family:var(--mono);font-size:11px;cursor:pointer;min-height:34px;display:inline-flex;align-items:center;gap:6px;text-decoration:none;white-space:nowrap}
+  .vbtn:hover,.vbtn.on{color:#e8a940;border-color:#e8a940}
+  .v-main{flex:1;display:flex;min-height:0;position:relative}
+  .v-stage{flex:1;position:relative;display:flex;align-items:center;justify-content:center;min-width:0;padding:12px}
+  .v-stage img,.v-stage video{max-width:100%;max-height:100%;object-fit:contain}
+  .v-none{color:#9fb0ad;font-size:12px;text-align:center;line-height:2}
+  .v-nav{position:absolute;top:50%;transform:translateY(-50%);background:rgba(0,0,0,.5);color:#fff;border:1px solid rgba(255,255,255,.2);width:44px;height:64px;font-size:20px;cursor:pointer;font-family:var(--mono)}
+  .v-nav:hover{border-color:#e8a940;color:#e8a940}
+  .v-prev{left:10px}.v-next{right:10px}
+  .v-info{width:300px;border-left:1px solid rgba(255,255,255,.1);overflow-y:auto;color:#cfd8d6;flex-shrink:0;background:#0d0f0f;padding:14px;font-size:11px;line-height:1.7}
+  .v-info dt{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:#8a9b98;margin-top:12px}
+  .v-info dt:first-child{margin-top:0}
+  .v-info dd{margin:2px 0 0;word-break:break-all}
+  .v-info a{color:#e8a940}
+
+  @media(max-width:768px){
+    .v-info{position:absolute;right:0;top:0;bottom:0;width:min(300px,85vw)}
+    .v-nav{width:36px;height:52px}
+    .month-h{font-size:14px}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">◈</div>
+    <div><div class="logo-text">NestVault</div><div class="logo-sub">Fotos</div></div>
+  </div>
+  <div class="header-right">
+    <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
+    <a class="hbtn" href="/" title="Dashboard">←<span class="hbtn-label"> Dashboard</span></a>
+    <a class="hbtn" href="/cloud" title="Cloud">☁<span class="hbtn-label"> Cloud</span></a>
+    <a class="hbtn active" href="/photos" title="Fotos">▣<span class="hbtn-label"> Fotos</span></a>
+    <button class="hbtn always-visible" id="logoutBtn" title="API Key">⌀<span class="hbtn-label"> API Key</span></button>
+    <button class="nav-hamburger"></button>
+  </div>
+</header>
+
+<nav class="mobile-nav">
+  <a href="/">← Dashboard</a>
+  <a href="/cloud">☁ Cloud</a>
+  <a class="active" href="/photos">▣ Fotos</a>
+</nav>
+<div class="mobile-nav-backdrop"></div>
+
+<main>
+  <div class="error-bar" id="errorBar"></div>
+  <div class="top">
+    <h1>Fotos</h1>
+    <span class="count" id="count"></span>
+    <select class="sel hidden" id="monthSel" title="Ir para o mês"></select>
+  </div>
+  <div class="idx hidden" id="idx"></div>
+  <div id="grid"><div class="loading">Carregando</div></div>
+  <div class="sentinel" id="sentinel"></div>
+  <div class="end hidden" id="end"></div>
+</main>
+
+<div class="viewer hidden" id="viewer" role="dialog" aria-modal="true" aria-labelledby="vName">
+  <div class="v-head">
+    <div class="v-title"><div class="v-name" id="vName"></div><div class="v-sub" id="vSub"></div></div>
+    <button class="vbtn" id="vInfoBtn" title="Detalhes">ⓘ Info</button>
+    <a class="vbtn" id="vOrig" target="_blank" rel="noopener" title="Abrir o arquivo original">↗ Original</a>
+    <a class="vbtn" id="vDl" title="Baixar">↓</a>
+    <button class="vbtn" id="vClose" title="Fechar (Esc)">✕</button>
+  </div>
+  <div class="v-main">
+    <div class="v-stage" id="vStage"></div>
+    <aside class="v-info hidden" id="vInfo"></aside>
+  </div>
+</div>
+
+<div class="login-overlay" id="loginOverlay" style="display:none">
+  <div class="login-box">
+    <div class="login-title">◈ NestVault</div>
+    <div class="login-sub">Informe a API Key para continuar</div>
+    <form id="loginForm">
+      <label class="login-label" for="apiKeyInput">API Key</label>
+      <input class="login-input" id="apiKeyInput" type="password" placeholder="sua-api-key-aqui" autocomplete="off">
+      <button class="login-btn" type="submit">Entrar →</button>
+      <div class="login-error" id="loginError"></div>
+    </form>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+  const PAGE = 300, GAP = 4;
+  const st = {items: [], seen: new Set(), next: undefined, loading: false, total: 0, months: [], indexed: -1};
+  let sessionReady = false;
+
+  const ICON_IMG  = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="1.5"/><circle cx="9" cy="10" r="1.6"/><path d="M4 17l5-4.5 4 3.5 3-2.5 4 3.5"/></svg>';
+  const ICON_PLAY = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" width="11" height="11"><path d="M7 4.5v15l12-7.5z"/></svg>';
+  const BROWSER_IMG = ['jpg','jpeg','png','gif','webp','avif','bmp'];
+
+  const dayKey   = ts => { const d = new Date(ts * 1000); return d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate(); };
+  const monthKey = ts => { const d = new Date(ts * 1000); return d.getFullYear() + '-' + d.getMonth(); };
+  const fmtDay   = ts => new Date(ts * 1000).toLocaleDateString('pt-BR', {weekday: 'short', day: 'numeric', month: 'short', year: 'numeric'});
+  const fmtMonth = ts => { const s = new Date(ts * 1000).toLocaleDateString('pt-BR', {month: 'long', year: 'numeric'}); return s[0].toUpperCase() + s.slice(1); };
+  const fmtFull  = ts => new Date(ts * 1000).toLocaleString('pt-BR', {dateStyle: 'full', timeStyle: 'short'});
+  const fmtDur   = s => s ? Math.floor(s / 60) + ':' + String(Math.round(s % 60)).padStart(2, '0') : '';
+  const thumbUrl = (it, size) => `/cloud/thumb/${it.sha256}?size=${size}`;
+  const contentUrl = (it, dl) => `/cloud/content/${it.id}` + (dl ? '?download=true' : '');
+  const ext = n => (n.split('.').pop() || '').toLowerCase();
+
+  // ── API / sessão ──────────────────────────────────────────────────────────
+  async function api(path, params) {
+    const r = await fetch(path + (params ? '?' + new URLSearchParams(params) : ''), {headers: H(), credentials: 'same-origin'});
+    if (r.status === 401) { sessionReady = false; showLogin('Sessão expirada — informe a API Key'); throw new Error('401'); }
+    if (!r.ok) { let m = r.status + ''; try { m = (await r.json()).detail || m; } catch (_) {} throw new Error(m); }
+    return r.json();
+  }
+  async function ensureSession() {
+    if (sessionReady) return;
+    const r = await fetch('/cloud/session', {method: 'POST', headers: H(), credentials: 'same-origin'});
+    if (r.status === 401) { showLogin(API_KEY ? 'API Key inválida' : ''); throw new Error('401'); }
+    if (!r.ok) throw new Error('Falha ao abrir sessão (' + r.status + ')');
+    sessionReady = true;
+  }
+
+  async function loadAll() {
+    if (!API_KEY) { showLogin(); return; }
+    try { await ensureSession(); } catch (_) { return; }
+    reset();
+    loadMonths();
+    pollIndexing();
+    await loadMore();
+  }
+
+  function reset(cursor) {
+    st.items = []; st.seen = new Set(); st.next = cursor || null; st.done = false;
+    document.getElementById('grid').innerHTML = '';
+    document.getElementById('end').classList.add('hidden');
+  }
+
+  async function loadMore() {
+    if (st.loading || st.done) return;
+    st.loading = true;
+    try {
+      const params = {limit: PAGE};
+      if (st.next) Object.assign(params, st.next);
+      const d = await api('/cloud/photos', params);
+      st.total = d.total;
+      // O mesmo conteúdo pode estar em dois backups; a página já vem sem repetição,
+      // mas a fronteira entre páginas pode repetir.
+      for (const it of d.items) if (!st.seen.has(it.sha256)) { st.seen.add(it.sha256); st.items.push(it); }
+      st.next = d.next;
+      st.done = !d.next;
+      render();
+    } catch (e) {
+      if (e.message !== '401') showError(e.message);
+    } finally {
+      st.loading = false;
+    }
+    // Página curta que não enche a tela: o sentinela continua visível e o
+    // observer não dispara de novo — puxa a próxima aqui.
+    if (!st.done && sentinelVisible()) loadMore();
+  }
+
+  async function loadMonths() {
+    try {
+      st.months = await api('/cloud/photos/months');
+      const sel = document.getElementById('monthSel');
+      sel.classList.toggle('hidden', st.months.length < 2);
+      sel.innerHTML = '<option value="">Ir para…</option><option value="top">↑ Mais recentes</option>' +
+        st.months.map((m, i) => `<option value="${i}">${esc(fmtMonth(m.ts))} · ${m.count}</option>`).join('');
+    } catch (_) {}
+  }
+
+  let idxTimer = null;
+  async function pollIndexing() {
+    clearTimeout(idxTimer);
+    let s;
+    try { s = await api('/cloud/photos/indexing'); } catch (_) { return; }
+    const box = document.getElementById('idx');
+    const busy = s.pending > 0;
+    box.classList.toggle('hidden', !busy && !s.failed);
+    if (busy || s.failed) {
+      const pct = s.total ? Math.round(100 * (s.indexed + s.failed) / s.total) : 100;
+      const why = !s.enabled ? 'indexação desligada em Config'
+                : !s.in_window ? 'fora da janela de horário configurada'
+                : s.running ? 'em andamento' : 'na fila';
+      const changed = st.indexed >= 0 && s.indexed > st.indexed;
+      box.innerHTML = `<div class="idx-row">${busy
+          ? `<span>Indexando fotos: <strong>${s.indexed.toLocaleString('pt-BR')}</strong> de ${s.total.toLocaleString('pt-BR')} · ${why}</span>`
+          : '<span>Indexação concluída</span>'}
+        ${s.failed ? `<span>· ${s.failed} sem miniatura (formato não suportado ou arquivo com erro)</span>` : ''}
+        ${changed ? '<button id="idxRefresh">atualizar a grade</button>' : ''}</div>
+        ${busy ? `<div class="idx-bar"><span style="width:${pct}%"></span></div>
+        <div style="margin-top:6px">Datas e miniaturas aparecem conforme cada foto é processada.</div>` : ''}`;
+    }
+    if (st.indexed < 0) st.indexed = s.indexed;
+    if (busy) idxTimer = setTimeout(pollIndexing, 15000);
+  }
+  document.getElementById('idx').addEventListener('click', e => {
+    if (e.target.id === 'idxRefresh') { st.indexed = -1; loadAll(); }
+  });
+
+  // ── Layout justificado ────────────────────────────────────────────────────
+  function rowHeight() { return window.innerWidth <= 768 ? 110 : 190; }
+  const ratio = it => (it.w && it.h) ? Math.min(3, Math.max(0.4, it.w / it.h)) : 1;
+
+  function tileHtml(it, idx, w, h) {
+    const vid = it.kind === 'video'
+      ? `<span class="ph-vid">${ICON_PLAY}${esc(fmtDur(it.duration))}</span>` : '';
+    const inner = it.thumb
+      ? `<img loading="lazy" decoding="async" alt="" src="${thumbUrl(it, 'sm')}">`
+      : `<span class="ph-ph">${it.kind === 'video' ? ICON_PLAY.replace('width="11" height="11"', '') : ICON_IMG}<span class="ph-name">${esc(it.name)}</span></span>`;
+    return `<button class="ph" data-i="${idx}" style="width:${w.toFixed(1)}px;height:${h.toFixed(1)}px" title="${esc(it.name)}">${inner}${vid}</button>`;
+  }
+
+  function layoutGroup(group, W) {
+    const H0 = rowHeight();
+    let html = '', row = [], sum = 0;
+    const flush = (last) => {
+      if (!row.length) return;
+      const gaps = GAP * (row.length - 1);
+      let h = (W - gaps) / sum;
+      if (last && h > H0) h = H0;  // última linha não estica
+      html += '<div class="row">' + row.map(([it, i]) => tileHtml(it, i, ratio(it) * h, h)).join('') + '</div>';
+      row = []; sum = 0;
+    };
+    for (const [it, i] of group) {
+      row.push([it, i]); sum += ratio(it);
+      if (sum * H0 + GAP * (row.length - 1) >= W) flush(false);
+    }
+    flush(true);
+    return html;
+  }
+
+  function render() {
+    const grid = document.getElementById('grid');
+    document.getElementById('count').textContent = st.total ? st.total.toLocaleString('pt-BR') + ' itens' : '';
+    if (!st.items.length) {
+      grid.innerHTML = st.done
+        ? '<div class="empty">Nenhuma foto ou vídeo nos seus backups ainda.<br>Os arquivos de imagem e vídeo dos backups aparecem aqui, organizados por data. Veja também o <a href="/cloud">Cloud</a>.</div>'
+        : '<div class="loading">Carregando</div>';
+      return;
+    }
+    const W = grid.clientWidth;
+    let html = '', lastMonth = null, group = [], groupDay = null;
+    const flushDay = () => {
+      if (!group.length) return;
+      html += `<div class="day-h">${esc(fmtDay(group[0][0].ts))}</div>` + layoutGroup(group, W);
+      group = [];
+    };
+    st.items.forEach((it, i) => {
+      const mk = monthKey(it.ts), dk = dayKey(it.ts);
+      if (dk !== groupDay) { flushDay(); groupDay = dk; }
+      if (mk !== lastMonth) { html += `<div class="month-h">${esc(fmtMonth(it.ts))}</div>`; lastMonth = mk; }
+      group.push([it, i]);
+    });
+    flushDay();
+    grid.innerHTML = html;
+    const end = document.getElementById('end');
+    end.classList.toggle('hidden', !st.done);
+    end.textContent = st.done ? 'Fim · ' + st.items.length.toLocaleString('pt-BR') + ' itens' : '';
+  }
+  // Fade-in só depois de carregar ('load' não borbulha: captura)
+  document.getElementById('grid').addEventListener('load', e => { if (e.target.tagName === 'IMG') e.target.classList.add('ok'); }, true);
+  document.getElementById('grid').addEventListener('error', e => {
+    const img = e.target;
+    if (img.tagName === 'IMG') img.replaceWith(document.createRange().createContextualFragment(`<span class="ph-ph">${ICON_IMG}</span>`));
+  }, true);
+
+  let resizeTimer = null, lastW = 0;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      const w = document.getElementById('grid').clientWidth;
+      if (w !== lastW) { lastW = w; render(); }
+    }, 150);
+  });
+
+  const sentinel = document.getElementById('sentinel');
+  const sentinelVisible = () => sentinel.getBoundingClientRect().top < window.innerHeight + 1500;
+  new IntersectionObserver(es => { if (es.some(e => e.isIntersecting)) loadMore(); },
+                           {rootMargin: '1500px 0px'}).observe(sentinel);
+
+  document.getElementById('monthSel').addEventListener('change', async e => {
+    const v = e.target.value;
+    e.target.value = '';
+    if (!v) return;
+    // +1 no id: o cursor é exclusivo e o primeiro item do mês tem de entrar.
+    reset(v === 'top' ? null : {before_ts: st.months[+v].ts, before_id: st.months[+v].id + 1});
+    window.scrollTo(0, 0);
+    await loadMore();
+  });
+
+  // ── Visualizador ──────────────────────────────────────────────────────────
+  const vw = {idx: -1, info: false};
+
+  document.getElementById('grid').addEventListener('click', e => {
+    const b = e.target.closest('[data-i]');
+    if (b) openViewer(+b.dataset.i);
+  });
+
+  function openViewer(i) {
+    vw.idx = i;
+    show();
+    document.getElementById('viewer').classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+  }
+  function closeViewer() {
+    const stage = document.getElementById('vStage');
+    stage.querySelectorAll('video').forEach(v => v.pause());
+    stage.innerHTML = '';
+    document.getElementById('viewer').classList.add('hidden');
+    document.body.style.overflow = '';
+  }
+  function dirOf(p) { const i = p.lastIndexOf('/'); return i > 0 ? p.slice(0, i) : ''; }
+
+  function show() {
+    const it = st.items[vw.idx];
+    document.getElementById('vName').textContent = it.name;
+    document.getElementById('vSub').textContent = fmtFull(it.ts) + (it.dated ? '' : ' (data do arquivo)');
+    document.getElementById('vOrig').href = contentUrl(it);
+    document.getElementById('vDl').href = contentUrl(it, true);
+    const stage = document.getElementById('vStage');
+    stage.querySelectorAll('video').forEach(v => v.pause());
+    let media;
+    if (it.kind === 'video') {
+      media = `<video controls autoplay playsinline preload="metadata" ${it.thumb ? `poster="${thumbUrl(it, 'lg')}"` : ''} src="${contentUrl(it)}"></video>`;
+    } else if (it.thumb) {
+      media = `<img alt="${esc(it.name)}" src="${thumbUrl(it, 'lg')}">`;
+    } else if (BROWSER_IMG.includes(ext(it.name))) {
+      media = `<img alt="${esc(it.name)}" src="${contentUrl(it)}">`;
+    } else {
+      media = `<div class="v-none">Miniatura ainda não gerada para este formato.<br><a class="vbtn" href="${contentUrl(it, true)}">↓ Baixar original</a></div>`;
+    }
+    stage.innerHTML = media +
+      (vw.idx > 0 ? '<button class="v-nav v-prev" id="vPrev" aria-label="Anterior">‹</button>' : '') +
+      (vw.idx < st.items.length - 1 || !st.done ? '<button class="v-nav v-next" id="vNext" aria-label="Próxima">›</button>' : '');
+    const drive = `/cloud?label=${encodeURIComponent(it.label)}` + (dirOf(it.path) ? `&path=${encodeURIComponent(dirOf(it.path))}` : '');
+    document.getElementById('vInfo').innerHTML = `<dl>
+      <dt>Data</dt><dd>${esc(fmtFull(it.ts))}${it.dated ? '' : '<br><span style="color:#8a9b98">sem data de captura — usando a data do arquivo</span>'}</dd>
+      ${it.w ? `<dt>Dimensões</dt><dd>${it.w} × ${it.h}</dd>` : ''}
+      ${it.duration ? `<dt>Duração</dt><dd>${esc(fmtDur(it.duration))}</dd>` : ''}
+      <dt>Backup</dt><dd>${esc(it.label)}</dd>
+      <dt>Caminho</dt><dd>${esc(it.path)}</dd>
+      <dt>No drive</dt><dd><a href="${drive}">abrir a pasta no Cloud →</a></dd></dl>`;
+  }
+
+  async function step(d) {
+    const n = vw.idx + d;
+    if (n < 0) return;
+    if (n >= st.items.length) {
+      if (st.done) return;
+      await loadMore();
+      if (n >= st.items.length) return;
+    }
+    vw.idx = n;
+    show();
+  }
+
+  document.getElementById('vClose').addEventListener('click', closeViewer);
+  document.getElementById('vInfoBtn').addEventListener('click', () => {
+    vw.info = !vw.info;
+    document.getElementById('vInfo').classList.toggle('hidden', !vw.info);
+    document.getElementById('vInfoBtn').classList.toggle('on', vw.info);
+  });
+  document.getElementById('vStage').addEventListener('click', e => {
+    if (e.target.id === 'vPrev') step(-1);
+    else if (e.target.id === 'vNext') step(1);
+  });
+  document.addEventListener('keydown', e => {
+    if (document.getElementById('viewer').classList.contains('hidden')) return;
+    if (e.key === 'Escape') closeViewer();
+    else if (e.key === 'ArrowLeft') step(-1);
+    else if (e.key === 'ArrowRight') step(1);
+  });
+  (function () {
+    let x0 = null;
+    const stage = document.getElementById('vStage');
+    stage.addEventListener('touchstart', e => { x0 = e.touches[0].clientX; }, {passive: true});
+    stage.addEventListener('touchend', e => {
+      if (x0 === null) return;
+      const dx = e.changedTouches[0].clientX - x0; x0 = null;
+      if (Math.abs(dx) > 60) step(dx < 0 ? 1 : -1);
+    }, {passive: true});
+  })();
+
+  document.getElementById('logoutBtn').addEventListener('click', () => {
+    sessionReady = false;
+    fetch('/cloud/session', {method: 'DELETE', credentials: 'same-origin'}).catch(() => {});
+  });
+
+  loadAll();
+</script>
+<script src="/static/nav.js"></script>
+</body>
+</html>

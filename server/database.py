@@ -216,6 +216,33 @@ class VersionFile(Base):
     content = relationship("FileContent", back_populates="refs")
 
 
+class MediaInfo(Base):
+    """Metadados e miniaturas de foto/vídeo do front cloud — um registro por
+    CONTEÚDO (sha256): com dedup, a mesma foto em 100 versões é processada uma vez.
+
+    Sem FK para file_contents de propósito: com foreign_keys=ON ela travaria a
+    limpeza de órfãos, que apaga FileContent sem saber desta tabela. O indexador
+    (cloud_ui/media.py) varre e remove as linhas órfãs e suas miniaturas."""
+    __tablename__ = "media_info"
+    __table_args__ = (Index("idx_media_status", "status"),)
+
+    sha256       = Column(String(64), primary_key=True)
+    kind         = Column(String, nullable=False)                 # "image" | "video"
+    status       = Column(String, nullable=False, default="done") # "done" | "failed"
+    attempts     = Column(Integer, nullable=False, default=0)
+    error        = Column(Text, nullable=True)
+    width        = Column(Integer, nullable=True)                 # já com a rotação EXIF aplicada
+    height       = Column(Integer, nullable=True)
+    # Momento da captura (epoch, hora local) — EXIF DateTimeOriginal ou creation_time
+    # do vídeo. NULL = sem data confiável; a timeline cai para o mtime do arquivo.
+    taken_ts     = Column(Float, nullable=True)
+    duration     = Column(Float, nullable=True)
+    thumb_sm     = Column(String, nullable=True)
+    thumb_lg     = Column(String, nullable=True)
+    thumb_encrypted = Column(Boolean, nullable=False, default=False)
+    processed_at = Column(DateTime, nullable=True)
+
+
 class MaintenanceJob(Base):
     __tablename__ = "maintenance_jobs"
 

@@ -1,0 +1,253 @@
+"""Front cloud — fotos: indexação (backfill, EXIF, miniaturas, falhas, órfãos),
+timeline por usuário e miniaturas com isolamento."""
+import io
+import os
+from datetime import datetime
+
+import pytest
+from PIL import Image
+
+import database as db_mod
+import main as m
+import storage as storage_mod
+from cloud_ui import media
+from conftest import make_backup, make_version, finish_version, upload_file
+
+V1 = "2026-01-01T00:00:00"
+
+
+def jpeg(color=(200, 10, 10), size=(400, 200), taken=None, orientation=None):
+    im = Image.new("RGB", size, color)
+    ex = Image.Exif()
+    if orientation:
+        ex[274] = orientation
+    if taken:
+        ex.get_ifd(0x8769)[36867] = taken
+    buf = io.BytesIO()
+    im.save(buf, "JPEG", exif=ex)
+    return buf.getvalue()
+
+
+def png_rgba():
+    buf = io.BytesIO()
+    Image.new("RGBA", (50, 80), (0, 0, 255, 0)).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def backup(c, label, files, version=V1):
+    make_backup(c, label=label)
+    make_version(c, label=label, version_key=version)
+    for path, (data, mtime) in files.items():
+        upload_file(c, label, version, path=path, content=data, mtime=mtime)
+    finish_version(c, label, version)
+
+
+def index():
+    return media.indexer.run_once(lambda: m.SessionLocal(), should_continue=lambda: True)
+
+
+def photos(c, **params):
+    r = c.get("/cloud/photos", params=params)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def session():
+    return m.SessionLocal()
+
+
+TS_2023 = datetime(2023, 7, 14, 10, 30).timestamp()
+
+
+def test_backfill_existing_backup_and_timeline(client):
+    backup(client, "fotos", {
+        "/Users/a/Pictures/velha.jpg": (jpeg(taken="2023:07:14 10:30:00", orientation=6), 1_700_000_000),
+        "/Users/a/Pictures/sem-exif.jpg": (jpeg((0, 200, 0)), 1_750_000_000),
+        "/Users/a/Pictures/logo.png": (png_rgba(), 1_600_000_000),
+        "/Users/a/Pictures/notas.txt": (b"nao e foto", 1_760_000_000),
+    })
+    # Antes de indexar: tudo pendente, com mtime como data provisória
+    st = client.get("/cloud/photos/indexing").json()
+    assert st["total"] == 3 and st["pending"] == 3 and st["indexed"] == 0
+    assert all(i["state"] == "pending" and not i["thumb"] for i in photos(client)["items"])
+
+    assert index() == 3
+
+    items = photos(client)["items"]
+    assert [i["name"] for i in items] == ["sem-exif.jpg", "velha.jpg", "logo.png"]
+    velha = items[1]
+    assert velha["ts"] == pytest.approx(TS_2023) and velha["dated"] is True
+    assert (velha["w"], velha["h"]) == (200, 400)  # orientação 6 gira 90°
+    assert items[0]["dated"] is False and items[0]["ts"] == 1_750_000_000
+    assert all(i["state"] == "done" and i["thumb"] for i in items)
+    assert client.get("/cloud/photos/indexing").json()["indexed"] == 3
+
+    # Miniatura é JPEG de verdade, já girada, e respeita a caixa
+    r = client.get(f"/cloud/thumb/{velha['sha256']}")
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
+    t = Image.open(io.BytesIO(r.content))
+    assert t.size[1] <= media.SM_BOX[1] and t.size[0] < t.size[1]
+    lg = Image.open(io.BytesIO(client.get(f"/cloud/thumb/{velha['sha256']}", params={"size": "lg"}).content))
+    assert lg.size == (200, 400)
+
+    # Já indexado: nova rodada não reprocessa
+    assert index() == 0
+
+
+def test_same_photo_in_two_labels_appears_once(client):
+    data = jpeg(taken="2022:01:01 00:00:00")
+    backup(client, "celular", {"/DCIM/a.jpg": (data, 1)})
+    backup(client, "notebook", {"/home/x/copia.jpg": (data, 1)})
+    assert index() == 1  # um conteúdo, processado uma vez
+    assert len(photos(client)["items"]) == 1
+
+
+def test_pagination_and_months(client):
+    files = {f"/p/{i}.jpg": (jpeg((i * 20 % 255, 0, 0)), 1_700_000_000 + i * 86400 * 40) for i in range(6)}
+    backup(client, "fotos", files)
+    index()
+    first = photos(client, limit=4)
+    assert len(first["items"]) == 4 and first["total"] == 6
+    rest = photos(client, limit=4, **first["next"])
+    assert rest["next"] is None
+    names = [i["name"] for i in first["items"] + rest["items"]]
+    assert names == [f"{i}.jpg" for i in range(5, -1, -1)]
+    ms = client.get("/cloud/photos/months").json()
+    assert sum(x["count"] for x in ms) == 6
+    # O cursor do mês aponta para o primeiro item dele
+    jump = photos(client, before_ts=ms[1]["ts"], before_id=ms[1]["id"] + 1, limit=1)["items"][0]
+    assert jump["id"] == ms[1]["id"]
+
+
+def test_isolation_timeline_and_thumbs(two_users):
+    _admin, alice, bob = two_users
+    backup(alice, "alice-fotos", {"/a/1.jpg": (jpeg(), 1)})
+    backup(bob, "bob-fotos", {"/b/1.jpg": (jpeg((0, 0, 255)), 1)})
+    index()
+    a_items = photos(alice)["items"]
+    b_items = photos(bob)["items"]
+    assert [i["label"] for i in a_items] == ["alice-fotos"]
+    assert [i["label"] for i in b_items] == ["bob-fotos"]
+    assert bob.get(f"/cloud/thumb/{a_items[0]['sha256']}").status_code == 404
+    assert alice.get(f"/cloud/thumb/{a_items[0]['sha256']}").status_code == 200
+
+
+def test_trashed_label_leaves_timeline_and_thumb(two_users):
+    _admin, alice, _bob = two_users
+    backup(alice, "alice-fotos", {"/a/1.jpg": (jpeg(), 1)})
+    index()
+    sha = photos(alice)["items"][0]["sha256"]
+    assert alice.delete("/backups/alice-fotos").status_code == 200
+    assert photos(alice)["items"] == []
+    assert alice.get(f"/cloud/thumb/{sha}").status_code == 404
+
+
+def test_encrypted_source_gets_encrypted_thumbs(client, monkeypatch):
+    monkeypatch.setattr(storage_mod, "ENCRYPTION_ENABLED", True, raising=False)
+    monkeypatch.setattr(storage_mod, "encryption_key", os.urandom(32), raising=False)
+    backup(client, "enc", {"/e/foto.jpg": (jpeg(taken="2021:05:05 05:05:05"), 1)})
+    assert index() == 1
+    db = session()
+    mi = db.query(db_mod.MediaInfo).one()
+    db.close()
+    assert mi.thumb_encrypted is True
+    with open(mi.thumb_sm, "rb") as f:
+        assert f.read(2) != b"\xff\xd8"  # no disco não é JPEG legível
+    r = client.get(f"/cloud/thumb/{mi.sha256}")
+    assert r.status_code == 200 and r.content[:2] == b"\xff\xd8"
+    assert Image.open(io.BytesIO(r.content)).size[1] <= media.SM_BOX[1]
+    assert photos(client)["items"][0]["ts"] == pytest.approx(datetime(2021, 5, 5, 5, 5, 5).timestamp())
+
+
+def test_corrupt_image_fails_with_retry_limit(client, monkeypatch):
+    backup(client, "fotos", {"/p/quebrada.jpg": (b"isto nao e um jpeg", 1)})
+    assert index() == 1
+    db = session()
+    mi = db.query(db_mod.MediaInfo).one()
+    assert mi.status == "failed" and mi.attempts == 1 and mi.error
+    db.close()
+    # Falha recente não é retentada no mesmo ciclo/na hora
+    media.indexer._scanned.clear()
+    assert index() == 0
+    assert photos(client)["items"][0]["state"] == "pending"
+
+    # Depois do intervalo, retenta até MAX_ATTEMPTS e desiste
+    monkeypatch.setattr(media, "RETRY_AFTER", media.timedelta(seconds=-1))
+    for _ in range(5):
+        media.indexer._scanned.clear()
+        index()
+    db = session()
+    assert db.query(db_mod.MediaInfo).one().attempts == media.MAX_ATTEMPTS
+    db.close()
+    assert photos(client)["items"][0]["state"] == "failed"
+    assert client.get("/cloud/photos/indexing").json()["failed"] == 1
+
+
+def test_orphan_media_info_is_swept(client, tmp_vol):
+    thumb = tmp_vol / "_thumbs" / "ab" / "orfa_sm.jpg"
+    thumb.parent.mkdir(parents=True)
+    thumb.write_bytes(b"x")
+    db = session()
+    db.add(db_mod.MediaInfo(sha256="ab" * 32, kind="image", status="done", attempts=1,
+                            thumb_sm=str(thumb)))
+    db.commit()
+    db.close()
+    index()
+    db = session()
+    assert db.query(db_mod.MediaInfo).count() == 0
+    db.close()
+    assert not thumb.exists()
+
+
+def test_missing_thumb_file_resets_for_reindex(client):
+    backup(client, "fotos", {"/p/a.jpg": (jpeg(), 1)})
+    index()
+    item = photos(client)["items"][0]
+    db = session()
+    os.remove(db.query(db_mod.MediaInfo).one().thumb_sm)
+    db.close()
+    assert client.get(f"/cloud/thumb/{item['sha256']}").status_code == 404
+    media.indexer._scanned.clear()
+    assert index() == 1
+    assert client.get(f"/cloud/thumb/{item['sha256']}").status_code == 200
+
+
+def test_video_without_ffmpeg_is_listed_without_thumb(client, monkeypatch):
+    monkeypatch.setattr(media.shutil, "which", lambda _: None)
+    backup(client, "v", {"/v/clip.mp4": (b"\x00\x00\x00\x18ftypmp42", 1_700_000_000)})
+    assert index() == 1
+    it = photos(client)["items"][0]
+    assert it["kind"] == "video" and it["state"] == "done" and it["thumb"] is False
+
+
+def test_video_meta_from_probe():
+    meta = media.video_meta_from_probe({
+        "format": {"duration": "12.5", "tags": {"creation_time": "2024-07-01T12:00:00.000000Z"}},
+        "streams": [{"codec_type": "audio"},
+                    {"codec_type": "video", "width": 1920, "height": 1080,
+                     "side_data_list": [{"rotation": -90}]}],
+    })
+    assert (meta["width"], meta["height"]) == (1080, 1920)
+    assert meta["duration"] == 12.5
+    assert meta["taken_ts"] == datetime.fromisoformat("2024-07-01T12:00:00+00:00").timestamp()
+
+
+@pytest.mark.parametrize("start,end,hour,expected", [
+    (0, 0, 13, True), (1, 7, 3, True), (1, 7, 7, False), (22, 6, 23, True), (22, 6, 5, True), (22, 6, 12, False),
+])
+def test_window(monkeypatch, start, end, hour, expected):
+    vals = {"photos.window_start_hour": start, "photos.window_end_hour": end}
+    monkeypatch.setattr(media.config, "get", lambda k: vals[k])
+    assert media.in_window(datetime(2026, 1, 1, hour)) is expected
+
+
+def test_finishing_a_version_wakes_indexer(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(media.indexer, "wake", lambda: calls.append(1))
+    backup(client, "fotos", {"/p/a.jpg": (jpeg(), 1)})
+    assert calls == [1]
+
+
+def test_photos_page_served(client):
+    r = client.get("/photos")
+    assert r.status_code == 200 and "NestVault" in r.text

@@ -1,5 +1,5 @@
 """
-NestVault  v9.3.2
+NestVault  v9.4.0
 Cada execucao de backup cria uma nova versao dentro do label.
 Conteudo identico e armazenado uma unica vez no servidor (deduplicacao por sha256).
 
@@ -55,7 +55,7 @@ Changelog (cliente — histórico completo do sistema no README):
         reconciliação de replicação (reconcile-replication).
 """
 
-VERSION = "v9.3.2"
+VERSION = "v9.4.0"
 
 import os, re, sys, hashlib, argparse, base64, json, socket, threading, time
 from pathlib import Path
