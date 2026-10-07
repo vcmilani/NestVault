@@ -1113,7 +1113,7 @@ pytest tests/ --cov=server --cov-report=term-missing
 | `test_replication.py` | `/maintenance/rereplicate` e `/maintenance/reconcile-replication` — sub-replicação e sobre-replicação |
 | `test_disks.py` | `GET /storage/disks` — status de volumes, contagem de cópias físicas por volume |
 | `test_cloud_drive.py` *(v9.4)* | `/cloud`: raiz por usuário, prefixo comum, pastas/paginação, versões e histórico, busca, lixeira, cookie de sessão (adulterado, chave rotacionada), Range em arquivo plano e cifrado, HTML servido como texto |
-| `test_cloud_photos.py` *(v9.4)* | Indexação: backfill, EXIF e rotação, dedup entre backups, miniatura cifrada, limite de tentativas, órfãos; timeline paginada, meses e isolamento entre usuários |
+| `test_cloud_photos.py` *(v9.4)* | Indexação: backfill, EXIF e rotação, dedup entre backups, miniatura cifrada, limite de tentativas, órfãos; timeline paginada, meses e isolamento entre usuários; escolha de quais backups entram (só o dono, não por cookie) e migração da coluna |
 | `test_rclone_walk.py` | Walk incremental do rclone — conclusão + limpeza de checkpoint, resume de diretório falho, falha de listagem isolada, skip por mtime, dispatch por backend, override de `strategy`, `_MAX_RESUMES`, batching cross-directory, pastas protegidas |
 
 ---
@@ -1424,6 +1424,7 @@ Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Par
 
 - Fotos e vídeos da última versão de **todos** os seus backups numa linha do tempo, por data de captura (EXIF), agrupados por dia e mês; a mesma foto em dois backups aparece uma vez
 - Rolagem infinita, **Ir para…** um mês, visualizador com setas/swipe, data, dimensões, backup de origem e atalho para a pasta no `/cloud`
+- **▤ Backups** escolhe quais backups entram na galeria (todos, por padrão), com a contagem de fotos e vídeos de cada um. Um backup desmarcado também **não é indexado** — bom para backups de documentos com PDFs escaneados em JPG, por exemplo. A escolha é por backup e só o dono a altera
 
 **Indexação.** Miniaturas e datas são geradas por um processo em segundo plano no servidor, que pega também os backups que já existiam antes da atualização — não é preciso refazer backup. Ele processa um arquivo por vez, das versões mais novas para as mais antigas; enquanto isso, as fotos já aparecem com a data do arquivo, e a página mostra o progresso. Novos backups entram assim que a versão termina. Em Configurações, grupo **Fotos**:
 

@@ -8,6 +8,7 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from auth import (SESSION_COOKIE, SESSION_TTL, get_current_user, get_user_header_or_cookie,
@@ -153,6 +154,35 @@ def get_photo_months(db: Session = Depends(get_db),
 def get_indexing(db: Session = Depends(get_db),
                  user: User = Depends(get_user_header_or_cookie)):
     return media.indexing_status(media.timeline(db, user))
+
+
+@router.get("/photos/labels")
+def get_photo_labels(db: Session = Depends(get_db),
+                     user: User = Depends(get_user_header_or_cookie)):
+    """Backups do usuário e se cada um entra na galeria."""
+    return media.photo_labels(db, user)
+
+
+class PhotoLabelUpdate(BaseModel):
+    enabled: bool
+
+
+@router.put("/photos/labels/{label}")
+def set_photo_label(label: str, req: PhotoLabelUpdate, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    """Liga/desliga um backup na galeria. Escrita: exige o header X-API-Key — o
+    cookie de sessão só vale para leitura. A galeria é pessoal, então só o dono
+    escolhe (nem o admin mexe na de outro usuário)."""
+    b = db.query(BackupID).filter(BackupID.label == label, tree.live_label_filter()).first()
+    if not b:
+        raise HTTPException(404, f"Backup '{label}' nao encontrado")
+    if b.owner_user_id != user.id:
+        raise HTTPException(403, "Voce nao tem permissao sobre este backup")
+    b.photos_enabled = req.enabled
+    db.commit()
+    if req.enabled:
+        media.indexer.wake()  # fotos que nunca foram indexadas entram agora
+    return {"label": label, "enabled": req.enabled}
 
 
 @router.get("/thumb/{sha256}")

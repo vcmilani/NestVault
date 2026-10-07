@@ -378,8 +378,13 @@ class Indexer:
         self.running = True
         try:
             sweep_orphans(db)
+            # Só backups marcados para Fotos: não gasta CPU do Pi com, por exemplo,
+            # os JPGs escaneados de um backup de documentos.
             version_ids = [vid for (vid,) in db.query(BackupVersion.id)
-                           .filter(BackupVersion.status == "done")
+                           .join(BackupID, BackupID.label == BackupVersion.backup_label)
+                           .filter(BackupVersion.status == "done",
+                                   BackupID.photos_enabled.is_(True),
+                                   tree.live_label_filter())
                            .order_by(BackupVersion.id.desc()).all()]
             for vid in version_ids:
                 if vid in self._scanned:
@@ -419,10 +424,12 @@ _timeline_lock = threading.Lock()
 
 
 def _latest_versions(db: Session, user: User) -> dict[str, tuple[BackupVersion, str]]:
-    """label → (última versão done, raiz do label) dos labels do próprio usuário."""
+    """label → (última versão done, raiz do label) dos labels do próprio usuário
+    marcados para aparecer em Fotos."""
     out = {}
     labels = [b.label for b in db.query(BackupID.label)
-              .filter(BackupID.owner_user_id == user.id, tree.live_label_filter()).all()]
+              .filter(BackupID.owner_user_id == user.id, BackupID.photos_enabled.is_(True),
+                      tree.live_label_filter()).all()]
     for label in labels:
         versions = tree.done_versions(db, label)
         if versions:
@@ -525,3 +532,21 @@ def thumb_visible_to(db: Session, user: User, sha256: str) -> bool:
         BackupID.owner_user_id == user.id,
         tree.live_label_filter(),
     ))).scalar()
+
+
+def photo_labels(db: Session, user: User) -> list[dict]:
+    """Os backups do usuário com a escolha de entrar ou não em Fotos e quantas
+    fotos/vídeos a última versão de cada um tem (para decidir com informação)."""
+    out = []
+    for b in (db.query(BackupID)
+              .filter(BackupID.owner_user_id == user.id, tree.live_label_filter())
+              .order_by(BackupID.label).all()):
+        versions = tree.done_versions(db, b.label)
+        count = 0
+        if versions:
+            count = (db.query(func.count(func.distinct(VersionFile.sha256)))
+                     .filter(VersionFile.version_id == versions[0].id, media_path_filter())
+                     .scalar()) or 0
+        out.append({"label": b.label, "client_name": b.client_name,
+                    "enabled": bool(b.photos_enabled), "media_count": count})
+    return out

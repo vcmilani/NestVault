@@ -119,6 +119,9 @@ class BackupID(Base):
     # main._trash_versions; a limpeza noturna apaga de vez após o prazo.
     trashed_at    = Column(DateTime, nullable=True)
     trashed_by    = Column(Integer, nullable=True)
+    # Front cloud: o dono escolhe quais backups entram na galeria /photos (e são
+    # indexados). Ligado por padrão — um backup de fotos não deveria precisar de opt-in.
+    photos_enabled = Column(Boolean, nullable=False, default=True, server_default="1")
 
     versions = relationship("BackupVersion", back_populates="backup",
                             order_by="BackupVersion.version_key.desc()", lazy="dynamic")
@@ -443,6 +446,8 @@ def init_db():
         ("backup_versions", "trashed_by",          "INTEGER"),
         ("backup_ids",      "trashed_at",          "TIMESTAMP"),
         ("backup_ids",      "trashed_by",          "INTEGER"),
+        # Fotos: default constante, então o ALTER continua O(1) (SQLite e PG 11+).
+        ("backup_ids",      "photos_enabled",      "BOOLEAN NOT NULL DEFAULT TRUE"),
     ):
         with engine.connect() as conn:
             try:

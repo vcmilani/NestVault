@@ -22,6 +22,17 @@
   .sel{background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:11px;padding:7px 8px;outline:none;cursor:pointer}
   .sel:focus{border-color:var(--amber)}
   .hidden{display:none !important}
+  .lbtn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 10px;font-family:var(--mono);font-size:11px;cursor:pointer;min-height:34px}
+  .lbtn:hover,.lbtn.on{border-color:var(--amber);color:var(--amber)}
+  .labels{border:1px solid var(--border);background:var(--bg2);margin-bottom:16px}
+  .labels-h{padding:10px 14px;font-size:11px;color:var(--text-dim);border-bottom:1px solid var(--border);line-height:1.6}
+  .lab{display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--border);cursor:pointer;font-size:12px;color:var(--text)}
+  .lab:last-child{border-bottom:none}
+  .lab:hover{background:var(--bg3)}
+  .lab input{accent-color:var(--amber);width:16px;height:16px;margin:0;flex-shrink:0}
+  .lab-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .lab-count{font-size:11px;color:var(--text-mute);white-space:nowrap}
+  .lab.off .lab-name{color:var(--text-mute)}
 
   .idx{border:1px solid var(--border);background:var(--bg2);padding:10px 14px;margin-bottom:16px;font-size:11px;color:var(--text-dim)}
   .idx-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
@@ -106,7 +117,9 @@
     <h1>Fotos</h1>
     <span class="count" id="count"></span>
     <select class="sel hidden" id="monthSel" title="Ir para o mês"></select>
+    <button class="lbtn" id="labelsBtn" aria-expanded="false" aria-controls="labels" title="Escolher quais backups aparecem aqui">▤ Backups</button>
   </div>
+  <div class="labels hidden" id="labels"></div>
   <div class="idx hidden" id="idx"></div>
   <div id="grid"><div class="loading">Carregando</div></div>
   <div class="sentinel" id="sentinel"></div>
@@ -179,6 +192,7 @@
     if (!API_KEY) { showLogin(); return; }
     try { await ensureSession(); } catch (_) { return; }
     reset();
+    loadLabels();
     loadMonths();
     pollIndexing();
     await loadMore();
@@ -223,6 +237,55 @@
         st.months.map((m, i) => `<option value="${i}">${esc(fmtMonth(m.ts))} · ${m.count}</option>`).join('');
     } catch (_) {}
   }
+
+  // ── Quais backups entram ──────────────────────────────────────────────────
+  st.labels = [];
+  async function loadLabels() {
+    try { st.labels = await api('/cloud/photos/labels'); } catch (_) { return; }
+    renderLabels();
+  }
+  function renderLabels() {
+    const on = st.labels.filter(l => l.enabled).length;
+    document.getElementById('labelsBtn').textContent = `▤ Backups · ${on}/${st.labels.length}`;
+    document.getElementById('labels').innerHTML =
+      '<div class="labels-h">Escolha quais backups aparecem em Fotos. Os desmarcados também deixam de ser indexados — útil para backups de documentos.</div>' +
+      (st.labels.length ? st.labels.map(l => `
+        <label class="lab ${l.enabled ? '' : 'off'}">
+          <input type="checkbox" data-label="${esc(l.label)}" ${l.enabled ? 'checked' : ''}>
+          <span class="lab-name">${esc(l.label)}</span>
+          <span class="lab-count">${l.media_count.toLocaleString('pt-BR')} foto(s)/vídeo(s)</span>
+        </label>`).join('') : '<div class="labels-h">Você ainda não tem backups.</div>');
+  }
+  document.getElementById('labelsBtn').addEventListener('click', () => {
+    const box = document.getElementById('labels');
+    const open = box.classList.toggle('hidden') === false;
+    document.getElementById('labelsBtn').classList.toggle('on', open);
+    document.getElementById('labelsBtn').setAttribute('aria-expanded', String(open));
+  });
+  document.getElementById('labels').addEventListener('change', async e => {
+    const cb = e.target.closest('[data-label]');
+    if (!cb) return;
+    cb.disabled = true;
+    try {
+      // Escrita vai com o header — o cookie de sessão só vale para leitura.
+      const r = await fetch('/cloud/photos/labels/' + encodeURIComponent(cb.dataset.label), {
+        method: 'PUT', headers: {...H(), 'Content-Type': 'application/json'},
+        body: JSON.stringify({enabled: cb.checked}),
+      });
+      if (r.status === 401) { showLogin('Sessão expirada — informe a API Key'); return; }
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status);
+      const l = st.labels.find(x => x.label === cb.dataset.label);
+      if (l) l.enabled = cb.checked;
+      renderLabels();
+      reset(); st.indexed = -1;
+      loadMonths(); pollIndexing();
+      await loadMore();
+    } catch (err) {
+      cb.checked = !cb.checked;
+      cb.disabled = false;
+      showError('Não foi possível salvar: ' + err.message);
+    }
+  });
 
   let idxTimer = null;
   async function pollIndexing() {
@@ -289,9 +352,10 @@
     const grid = document.getElementById('grid');
     document.getElementById('count').textContent = st.total ? st.total.toLocaleString('pt-BR') + ' itens' : '';
     if (!st.items.length) {
-      grid.innerHTML = st.done
-        ? '<div class="empty">Nenhuma foto ou vídeo nos seus backups ainda.<br>Os arquivos de imagem e vídeo dos backups aparecem aqui, organizados por data. Veja também o <a href="/cloud">Cloud</a>.</div>'
-        : '<div class="loading">Carregando</div>';
+      const noneOn = st.labels.length && !st.labels.some(l => l.enabled);
+      grid.innerHTML = !st.done ? '<div class="loading">Carregando</div>'
+        : noneOn ? '<div class="empty">Nenhum backup selecionado para Fotos.<br>Escolha quais entram em <strong>▤ Backups</strong>, acima.</div>'
+        : '<div class="empty">Nenhuma foto ou vídeo nos seus backups ainda.<br>Os arquivos de imagem e vídeo dos backups aparecem aqui, organizados por data. Veja também o <a href="/cloud">Cloud</a>.</div>';
       return;
     }
     const W = grid.clientWidth;

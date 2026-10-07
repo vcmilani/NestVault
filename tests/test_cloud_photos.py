@@ -251,3 +251,59 @@ def test_finishing_a_version_wakes_indexer(client, monkeypatch):
 def test_photos_page_served(client):
     r = client.get("/photos")
     assert r.status_code == 200 and "NestVault" in r.text
+
+
+# -- Escolha de quais backups entram -----------------------------------------
+
+def _set(c, label, enabled):
+    return c.put(f"/cloud/photos/labels/{label}", json={"enabled": enabled})
+
+
+def test_labels_default_enabled_with_counts(client):
+    backup(client, "fotos", {"/p/a.jpg": (jpeg(), 1), "/p/b.mp4": (b"v", 1), "/p/n.txt": (b"t", 1)})
+    assert client.get("/cloud/photos/labels").json() == [
+        {"label": "fotos", "client_name": None, "enabled": True, "media_count": 2}]
+
+
+def test_disabled_label_leaves_timeline_and_is_not_indexed(client):
+    backup(client, "fotos", {"/p/a.jpg": (jpeg(), 1)})
+    backup(client, "docs", {"/d/scan.jpg": (jpeg((0, 0, 255)), 2)})
+    assert _set(client, "docs", False).status_code == 200
+
+    assert [i["label"] for i in photos(client)["items"]] == ["fotos"]
+    assert client.get("/cloud/photos/indexing").json()["total"] == 1
+    assert index() == 1  # só a foto de "fotos"; o scan de "docs" não é processado
+
+    # Religar traz de volta e indexa o que faltava
+    assert _set(client, "docs", True).status_code == 200
+    assert {i["label"] for i in photos(client)["items"]} == {"fotos", "docs"}
+    assert index() == 1
+
+
+def test_only_owner_toggles_and_cookie_cannot_write(two_users):
+    from fastapi.testclient import TestClient
+    admin, alice, bob = two_users
+    backup(alice, "alice-fotos", {"/a/1.jpg": (jpeg(), 1)})
+    assert _set(bob, "alice-fotos", False).status_code == 403
+    assert _set(admin, "alice-fotos", False).status_code == 403  # galeria é pessoal
+    assert _set(alice, "nao-existe", False).status_code == 404
+
+    browser = TestClient(m.app)
+    browser.post("/cloud/session", headers={"X-API-Key": "alice-key"})
+    assert browser.get("/cloud/photos/labels").status_code == 200  # leitura por cookie ok
+    assert browser.put("/cloud/photos/labels/alice-fotos", json={"enabled": False}).status_code == 401
+    assert [l["enabled"] for l in alice.get("/cloud/photos/labels").json()] == [True]
+
+
+def test_photos_enabled_column_migrates_existing_db(tmp_path, monkeypatch):
+    """Banco anterior à v9.4 (sem a coluna) ganha photos_enabled = true no init_db."""
+    import sqlalchemy as sa
+    eng = sa.create_engine(f"sqlite:///{tmp_path / 'old.db'}")
+    with eng.begin() as c:
+        c.execute(sa.text("CREATE TABLE backup_ids (id INTEGER PRIMARY KEY, label VARCHAR NOT NULL UNIQUE, "
+                          "client_name VARCHAR, prefix VARCHAR, created_at DATETIME, status VARCHAR)"))
+        c.execute(sa.text("INSERT INTO backup_ids (label, status) VALUES ('antigo', 'active')"))
+    monkeypatch.setattr(db_mod, "engine", eng)
+    db_mod.init_db()
+    with eng.connect() as c:
+        assert c.execute(sa.text("SELECT photos_enabled FROM backup_ids")).scalar() in (1, True)
