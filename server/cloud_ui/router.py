@@ -40,6 +40,13 @@ def create_session(request: Request, response: Response, user: User = Depends(ge
     return {"username": user.username, "role": user.role}
 
 
+@router.get("/me")
+def get_me(user: User = Depends(get_user_header_or_cookie)):
+    """Quem é o dono da chave/sessão — as páginas usam o role para decidir o que
+    mostrar (usuário comum só navega entre Fotos e Cloud)."""
+    return {"username": user.username, "role": user.role}
+
+
 @router.delete("/session")
 def delete_session(response: Response):
     response.delete_cookie(SESSION_COOKIE, path="/")

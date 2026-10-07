@@ -71,7 +71,7 @@
   }
 </style>
 </head>
-<body>
+<body data-admin-page>
 
 <header>
   <div class="logo">
@@ -164,7 +164,7 @@
     try {
       const r = await fetch('/storage/disks', {headers: H()});
       if (r.status === 401) { showLogin('API Key inválida.'); container.innerHTML = ''; return; }
-      if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); container.innerHTML = ''; return; }
+      if (r.status === 403) { nvNotAdmin(); container.innerHTML = ''; return; }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const disks = await r.json();
       renderDisks(disks);

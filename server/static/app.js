@@ -148,6 +148,36 @@ function nvConfirm(title, message, opts) {
   });
 }
 
+// ── Usuário comum fora das páginas de admin ─────────────────────────────────
+// Páginas administrativas têm <body data-admin-page>. Uma chave de usuário comum
+// é levada para /photos (Fotos e Cloud são as páginas dele) em vez de cair no
+// login com "sem permissão". O role fica em sessionStorage, amarrado ao fim da
+// chave, para não custar um request a mais a cada página do admin.
+function nvNotAdmin() { location.replace('/photos'); }
+
+async function nvRole() {
+  if (!API_KEY) return null;
+  const tag = API_KEY.slice(-8);
+  try {
+    const c = JSON.parse(sessionStorage.getItem('nv-role') || 'null');
+    if (c && c.k === tag) return c.role;
+  } catch (_) {}
+  const r = await fetch('/cloud/me', {headers: H()});
+  if (!r.ok) return null;  // 401 segue o fluxo de login da própria página
+  const role = (await r.json()).role;
+  try { sessionStorage.setItem('nv-role', JSON.stringify({k: tag, role})); } catch (_) {}
+  return role;
+}
+
+// true = pode seguir; false = está saindo para /photos.
+async function nvGuardAdmin() {
+  if (!document.body || !document.body.hasAttribute('data-admin-page')) return true;
+  let role = null;
+  try { role = await nvRole(); } catch (_) {}
+  if (role && role !== 'admin') { nvNotAdmin(); return false; }
+  return true;
+}
+
 // ── Wiring (login padrão, tema, service worker) ─────────────────────────────
 (function () {
   function init() {
@@ -159,13 +189,16 @@ function nvConfirm(title, message, opts) {
         const key = document.getElementById('apiKeyInput').value.trim();
         if (!key) return;
         API_KEY = key; localStorage.setItem('backupApiKey', key);
-        hideLogin(); _nvRefresh();
+        hideLogin();
+        nvGuardAdmin().then(ok => { if (ok) _nvRefresh(); });
       });
       const logout = document.getElementById('logoutBtn');
       if (logout) logout.addEventListener('click', () => {
         localStorage.removeItem('backupApiKey'); API_KEY = ''; showLogin();
+        try { sessionStorage.removeItem('nv-role'); } catch (_) {}
       });
     }
+    nvGuardAdmin();
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

@@ -1381,6 +1381,8 @@ Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Par
 
 > **v7.9 — dashboard é admin-only.** O painel web (stats, discos, manutenção, atividade, rclone, usuários) exige uma chave com `role=admin`; uma chave de usuário comum recebe a tela de login novamente com "Esta chave não tem permissão de administrador." O caminho de backup/restore do usuário comum é o CLI (`nestvault.py`), cuja API (`/backups`, `/files`, etc.) já é escopada por dono.
 
+> **v10.0 — usuário comum no navegador.** Quem entra com chave de usuário comum em `/` (ou abre o app instalado no celular) é levado direto para **[Fotos](#-cloud-e--fotos)**, e navega só entre Fotos e Cloud: os links de Dashboard e Atividade não aparecem para ele, e qualquer página administrativa aberta pela URL redireciona para Fotos em vez de pedir outra chave.
+
 > **v9.1.1 — layout e leitura.** Todas as telas usam a mesma coluna centrada, em duas larguras: 1440px nas páginas de dados e 960px em Configurações e Usuários, que são formulários. O cabeçalho ocupa a largura toda mas alinha os botões com a borda do conteúdo, então a coluna não muda de posição ao navegar. As cores foram calibradas para atender WCAG AA em texto pequeno nos dois temas — inclusive os badges de status, que antes não passavam em nenhum —, e a navegação por `Tab` passa a mostrar um anel de foco visível.
 
 **O que o dashboard exibe:**

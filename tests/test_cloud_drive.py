@@ -261,3 +261,25 @@ def test_decrypt_range_matches_full_decrypt(tmp_path):
 def test_cloud_page_served(client):
     r = client.get("/cloud")
     assert r.status_code == 200 and "NestVault" in r.text
+
+
+# -- Papel do usuário (navegação de usuário comum) ----------------------------
+
+def test_me_reports_role_via_header_and_cookie(two_users):
+    admin, alice, _bob = two_users
+    assert admin.get("/cloud/me").json() == {"username": "admin", "role": "admin"}
+    assert alice.get("/cloud/me").json() == {"username": "alice", "role": "user"}
+    browser = TestClient(m.app)
+    assert browser.get("/cloud/me").status_code == 401
+    browser.post("/cloud/session", headers={"X-API-Key": "alice-key"})
+    assert browser.get("/cloud/me").json()["role"] == "user"
+
+
+def test_admin_pages_are_marked_for_the_guard(client):
+    for path in ("/", "/disks", "/explorer", "/maintenance", "/activity", "/rclone-jobs",
+                 "/stats", "/manage-users", "/settings"):
+        html = client.get(path).text
+        assert "<body data-admin-page>" in html, path
+        assert "permissão de administrador" not in html, path
+    for path in ("/cloud", "/photos"):
+        assert "data-admin-page" not in client.get(path).text, path

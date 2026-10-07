@@ -216,7 +216,7 @@
   }
 </style>
 </head>
-<body>
+<body data-admin-page>
 
 <header>
   <div class="logo">
@@ -456,7 +456,7 @@
     try {
       const r = await fetch('/api/activity', {headers: H()});
       if (r.status === 401) { showLogin('API Key inválida.'); return; }
-      if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); return; }
+      if (r.status === 403) { nvNotAdmin(); return; }
       if (!r.ok) throw new Error('HTTP '+r.status);
       const data = await r.json();
       clearError();
