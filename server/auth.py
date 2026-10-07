@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import logging
 import os
 import secrets
 import time
@@ -11,6 +12,8 @@ from sqlalchemy.orm import Session
 
 import config
 from database import get_db, User, hash_api_key
+
+log = logging.getLogger("backup-server")
 
 
 def get_current_user(x_api_key: Optional[str] = Header(None),
@@ -72,6 +75,7 @@ def _secret() -> bytes:
             with os.fdopen(fd, "w") as f:
                 f.write(raw)
             _session_secret = bytes.fromhex(raw)
+            log.info(f"[cloud] segredo de sessao gerado em {path}")
     return _session_secret
 
 

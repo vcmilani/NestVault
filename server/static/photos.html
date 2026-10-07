@@ -54,6 +54,14 @@
   .ph-ph svg{width:26px;height:26px}
   .ph-name{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .ph-vid{position:absolute;bottom:5px;right:6px;color:#fff;font-size:10px;text-shadow:0 1px 3px rgba(0,0,0,.8);display:flex;gap:4px;align-items:center}
+  .ph-live{position:absolute;top:5px;left:6px;color:#fff;font-size:9px;letter-spacing:.08em;text-shadow:0 1px 3px rgba(0,0,0,.8)}
+  .live-wrap{position:relative;display:flex;max-width:100%;max-height:100%}
+  .live-wrap img{max-width:100%;max-height:calc(100vh - 90px);object-fit:contain}
+  .live-wrap video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;opacity:0;transition:opacity .2s;pointer-events:none}
+  .live-wrap.playing video{opacity:1}
+  .v-live{position:absolute;left:10px;top:10px;background:rgba(0,0,0,.55);color:#fff;border:1px solid rgba(255,255,255,.3);font-family:var(--mono);font-size:10px;letter-spacing:.08em;padding:5px 9px;cursor:pointer;z-index:2}
+  .v-live:hover,.v-live.on{border-color:#e8a940;color:#e8a940}
+  .v-live:disabled{opacity:.6;cursor:not-allowed;border-color:rgba(255,255,255,.3);color:#cfd8d6}
   .sentinel{height:1px}
   .end{padding:30px;text-align:center;color:var(--text-mute);font-size:11px}
   .empty{padding:60px 20px;text-align:center;color:var(--text-mute);font-size:12px;line-height:1.9}
@@ -320,11 +328,17 @@
   function rowHeight() { return window.innerWidth <= 768 ? 110 : 190; }
   const ratio = it => (it.w && it.h) ? Math.min(3, Math.max(0.4, it.w / it.h)) : 1;
 
+  // Live Photo: a miniatura da foto, ou — HEIC sem pillow-heif no servidor — o
+  // quadro do vídeo que vem junto.
+  const stillThumb = it => it.thumb ? it : (it.live && it.live.thumb ? it.live : null);
+
   function tileHtml(it, idx, w, h) {
     const vid = it.kind === 'video'
-      ? `<span class="ph-vid">${ICON_PLAY}${esc(fmtDur(it.duration))}</span>` : '';
-    const inner = it.thumb
-      ? `<img loading="lazy" decoding="async" alt="" src="${thumbUrl(it, 'sm')}">`
+      ? `<span class="ph-vid">${ICON_PLAY}${esc(fmtDur(it.duration))}</span>`
+      : it.live ? '<span class="ph-live">◉ LIVE</span>' : '';
+    const st_ = stillThumb(it);
+    const inner = st_
+      ? `<img loading="lazy" decoding="async" alt="" src="${thumbUrl(st_, 'sm')}">`
       : `<span class="ph-ph">${it.kind === 'video' ? ICON_PLAY.replace('width="11" height="11"', '') : ICON_IMG}<span class="ph-name">${esc(it.name)}</span></span>`;
     return `<button class="ph" data-i="${idx}" style="width:${w.toFixed(1)}px;height:${h.toFixed(1)}px" title="${esc(it.name)}">${inner}${vid}</button>`;
   }
@@ -440,7 +454,16 @@
     const stage = document.getElementById('vStage');
     stage.querySelectorAll('video').forEach(v => v.pause());
     let media;
-    if (it.kind === 'video') {
+    const still = stillThumb(it) ? thumbUrl(stillThumb(it), 'lg')
+                : BROWSER_IMG.includes(ext(it.name)) ? contentUrl(it) : null;
+    if (it.live && still) {
+      // Foto parada por baixo, vídeo da Live Photo por cima (invisível até tocar).
+      media = `<button class="v-live" id="vLive" title="Reproduzir a Live Photo (ou passe o mouse sobre a foto)">◉ LIVE</button>
+        <div class="live-wrap" id="liveWrap"><img alt="${esc(it.name)}" src="${still}">
+        <video muted playsinline preload="auto" src="${contentUrl(it.live)}"></video></div>`;
+    } else if (it.live) {
+      media = `<video controls autoplay muted playsinline src="${contentUrl(it.live)}"></video>`;
+    } else if (it.kind === 'video') {
       media = `<video controls autoplay playsinline preload="metadata" ${it.thumb ? `poster="${thumbUrl(it, 'lg')}"` : ''} src="${contentUrl(it)}"></video>`;
     } else if (it.thumb) {
       media = `<img alt="${esc(it.name)}" src="${thumbUrl(it, 'lg')}">`;
@@ -452,14 +475,46 @@
     stage.innerHTML = media +
       (vw.idx > 0 ? '<button class="v-nav v-prev" id="vPrev" aria-label="Anterior">‹</button>' : '') +
       (vw.idx < st.items.length - 1 || !st.done ? '<button class="v-nav v-next" id="vNext" aria-label="Próxima">›</button>' : '');
+    if (it.live && still) wireLive();
     const drive = `/cloud?label=${encodeURIComponent(it.label)}` + (dirOf(it.path) ? `&path=${encodeURIComponent(dirOf(it.path))}` : '');
     document.getElementById('vInfo').innerHTML = `<dl>
       <dt>Data</dt><dd>${esc(fmtFull(it.ts))}${it.dated ? '' : '<br><span style="color:#8a9b98">sem data de captura — usando a data do arquivo</span>'}</dd>
       ${it.w ? `<dt>Dimensões</dt><dd>${it.w} × ${it.h}</dd>` : ''}
       ${it.duration ? `<dt>Duração</dt><dd>${esc(fmtDur(it.duration))}</dd>` : ''}
+      ${it.live ? `<dt>Live Photo</dt><dd>vídeo ${esc(it.live.name)}${it.live.duration ? ' · ' + esc(fmtDur(it.live.duration)) : ''}<br><a href="${contentUrl(it.live, true)}">baixar o vídeo →</a></dd>` : ''}
       <dt>Backup</dt><dd>${esc(it.label)}</dd>
       <dt>Caminho</dt><dd>${esc(it.path)}</dd>
       <dt>No drive</dt><dd><a href="${drive}">abrir a pasta no Cloud →</a></dd></dl>`;
+  }
+
+  function wireLive() {
+    const wrap = document.getElementById('liveWrap');
+    const video = wrap.querySelector('video');
+    const btn = document.getElementById('vLive');
+    const play = () => {
+      if (btn.disabled) return;
+      video.currentTime = 0;
+      wrap.classList.add('playing'); btn.classList.add('on');
+      video.play().catch(() => {});
+    };
+    const stop = () => { wrap.classList.remove('playing'); btn.classList.remove('on'); };
+    video.addEventListener('ended', stop);
+    // MOV em HEVC (padrão do iPhone) só toca no Safari/Edge: avisa em vez de
+    // ficar um botão que não faz nada.
+    video.addEventListener('error', () => {
+      stop();
+      btn.disabled = true;
+      btn.textContent = '◉ LIVE indisponível';
+      btn.title = 'Este navegador não reproduz o vídeo desta Live Photo (provavelmente HEVC). Baixe o vídeo em ⓘ Info.';
+    });
+    btn.addEventListener('click', play);
+    wrap.addEventListener('mouseenter', play);
+    wrap.addEventListener('mouseleave', () => { video.pause(); stop(); });
+    // Celular: segurar o dedo na foto, como no app de Fotos do iPhone.
+    let hold = null;
+    wrap.addEventListener('touchstart', () => { hold = setTimeout(play, 250); }, {passive: true});
+    wrap.addEventListener('touchend', () => clearTimeout(hold), {passive: true});
+    video.addEventListener('canplay', () => play(), {once: true});  // toca uma vez ao abrir
   }
 
   async function step(d) {

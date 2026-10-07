@@ -307,3 +307,87 @@ def test_photos_enabled_column_migrates_existing_db(tmp_path, monkeypatch):
     db_mod.init_db()
     with eng.connect() as c:
         assert c.execute(sa.text("SELECT photos_enabled FROM backup_ids")).scalar() in (1, True)
+
+
+# -- Live Photos -------------------------------------------------------------
+
+def test_live_photo_pairs_still_and_motion(client, monkeypatch):
+    monkeypatch.setattr(media.shutil, "which", lambda _: None)
+    backup(client, "iphone", {
+        "/DCIM/IMG_0001.HEIC": (jpeg(taken="2024:05:01 10:00:00"), 1),   # bytes JPEG: só importa o nome
+        "/DCIM/IMG_0001.MOV": (b"\x00\x00\x00\x14ftypqt  live", 1),
+        "/DCIM/IMG_0002.JPG": (jpeg((0, 0, 200)), 2),                     # foto comum
+        "/DCIM/clip.mov": (b"\x00\x00\x00\x14ftypqt  clip", 3),            # vídeo comum
+        "/Outra/IMG_0001.MOV": (b"\x00\x00\x00\x14ftypqt  outra", 4),      # mesmo nome, outra pasta
+    })
+    index()
+    items = photos(client)["items"]
+    by_name = {(i["path"]): i for i in items}
+    assert set(by_name) == {"DCIM/IMG_0001.HEIC", "DCIM/IMG_0002.JPG", "DCIM/clip.mov", "Outra/IMG_0001.MOV"}
+    live = by_name["DCIM/IMG_0001.HEIC"]["live"]
+    assert live["name"] == "IMG_0001.MOV"
+    assert client.get(f"/cloud/content/{live['id']}").status_code == 200
+    assert "live" not in by_name["DCIM/IMG_0002.JPG"]
+    assert client.get("/cloud/photos/indexing").json()["total"] == 4
+
+
+def test_long_video_with_same_name_is_not_a_live_photo():
+    items = [
+        {"id": 1, "sha256": "a", "path": "d/IMG_1.JPG", "label": "x", "name": "IMG_1.JPG", "duration": None, "thumb": True},
+        {"id": 2, "sha256": "b", "path": "d/img_1.mov", "label": "x", "name": "img_1.mov", "duration": 42.0, "thumb": True},
+        {"id": 3, "sha256": "c", "path": "d/IMG_2.HEIC", "label": "x", "name": "IMG_2.HEIC", "duration": None, "thumb": False},
+        {"id": 4, "sha256": "d", "path": "d/IMG_2.MOV", "label": "x", "name": "IMG_2.MOV", "duration": 2.9, "thumb": True},
+        {"id": 5, "sha256": "e", "path": "d/IMG_3.HEIC", "label": "outro", "name": "IMG_3.HEIC", "duration": None, "thumb": True},
+        {"id": 6, "sha256": "f", "path": "d/IMG_3.MOV", "label": "x", "name": "IMG_3.MOV", "duration": 2.0, "thumb": True},
+    ]
+    out = {i["id"]: i for i in media.pair_live_photos(items)}
+    assert set(out) == {1, 2, 3, 5, 6}           # só o par 3+4 vira Live Photo
+    assert out[3]["live"]["id"] == 4 and out[3]["live"]["thumb"] is True
+    assert "live" not in out[1] and "live" not in out[5]
+
+
+# -- Logs --------------------------------------------------------------------
+
+def test_every_indexed_item_and_cycle_is_logged(client, caplog):
+    import logging
+    backup(client, "fotos", {"/p/ok.jpg": (jpeg(taken="2023:01:02 03:04:05"), 1),
+                             "/p/ruim.jpg": (b"corrompido", 1)})
+    with caplog.at_level(logging.INFO, logger="backup-server"):
+        index()
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("ciclo de indexacao iniciado" in m for m in msgs)
+    assert any("processando fotos/" in m for m in msgs)
+    assert any("ok.jpg" in m and "miniaturas ok" in m and "2023-01-02 03:04" in m for m in msgs)
+    assert any("ruim.jpg falhou (tentativa 1/3" in m for m in msgs)
+    assert any("ciclo de indexacao concluido: 2 processado(s), 1 falha(s)" in m for m in msgs)
+
+    # E aparece na Atividade como job
+    db = session()
+    job = db.query(db_mod.MaintenanceJob).filter_by(job_type="photos-index").one()
+    db.close()
+    assert job.status == "done" and "2 arquivo(s) processado(s), 1 falha(s)" in job.summary
+
+
+def test_idle_cycle_creates_no_job_and_pause_is_reported(client, monkeypatch):
+    assert index() == 0
+    db = session()
+    assert db.query(db_mod.MaintenanceJob).filter_by(job_type="photos-index").count() == 0
+    db.close()
+    monkeypatch.setattr(media.config, "get", lambda k: {"photos.indexing_enabled": False}.get(k, 0))
+    assert "desligada" in media.pause_reason()
+
+
+def test_user_actions_are_logged(two_users, caplog):
+    import logging
+    from fastapi.testclient import TestClient
+    _admin, alice, _bob = two_users
+    backup(alice, "alice-fotos", {"/a/1.jpg": (jpeg(), 1)})
+    fid = photos(alice)["items"][0]["id"]
+    with caplog.at_level(logging.INFO, logger="backup-server"):
+        TestClient(m.app).post("/cloud/session", headers={"X-API-Key": "alice-key"})
+        _set(alice, "alice-fotos", False)
+        alice.get(f"/cloud/content/{fid}")
+    msgs = " | ".join(r.getMessage() for r in caplog.records)
+    assert "sessao aberta para alice" in msgs
+    assert "backup 'alice-fotos' removido da galeria" in msgs
+    assert f"alice file_id={fid} abre '1.jpg'" in msgs

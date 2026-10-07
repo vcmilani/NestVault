@@ -1424,9 +1424,10 @@ Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Par
 
 - Fotos e vídeos da última versão de **todos** os seus backups numa linha do tempo, por data de captura (EXIF), agrupados por dia e mês; a mesma foto em dois backups aparece uma vez
 - Rolagem infinita, **Ir para…** um mês, visualizador com setas/swipe, data, dimensões, backup de origem e atalho para a pasta no `/cloud`
+- **Live Photos** do iPhone (`IMG_1234.HEIC` + `IMG_1234.MOV` na mesma pasta) aparecem como um item só, com o selo **◉ LIVE**; o vídeo toca ao abrir, ao passar o mouse ou ao segurar o dedo. O MOV costuma ser HEVC, que só o Safari (e o Edge com a extensão HEVC) reproduz — nos outros navegadores o botão avisa "LIVE indisponível" e o vídeo fica para baixar em ⓘ Info
 - **▤ Backups** escolhe quais backups entram na galeria (todos, por padrão), com a contagem de fotos e vídeos de cada um. Um backup desmarcado também **não é indexado** — bom para backups de documentos com PDFs escaneados em JPG, por exemplo. A escolha é por backup e só o dono a altera
 
-**Indexação.** Miniaturas e datas são geradas por um processo em segundo plano no servidor, que pega também os backups que já existiam antes da atualização — não é preciso refazer backup. Ele processa um arquivo por vez, das versões mais novas para as mais antigas; enquanto isso, as fotos já aparecem com a data do arquivo, e a página mostra o progresso. Novos backups entram assim que a versão termina. Em Configurações, grupo **Fotos**:
+**Indexação.** Miniaturas e datas são geradas por um processo em segundo plano no servidor, que pega também os backups que já existiam antes da atualização — não é preciso refazer backup. Ele processa um arquivo por vez, das versões mais novas para as mais antigas; enquanto isso, as fotos já aparecem com a data do arquivo, e a página mostra o progresso. Novos backups entram assim que a versão termina. Cada arquivo processado deixa uma linha no log do servidor (`[photos] … miniaturas ok` ou o motivo da falha), e cada ciclo com trabalho aparece na **Atividade** como *Indexação de Fotos*. Em Configurações, grupo **Fotos**:
 
 | Parâmetro | Padrão | O que faz |
 |---|---|---|

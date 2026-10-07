@@ -31,8 +31,9 @@ from sqlalchemy.orm import Session
 import config
 import crypto
 import storage
-from database import (BackupID, BackupVersion, FileContent, MediaInfo, User, VersionFile,
-                      TRASHED_STATUS)
+from cache_state import invalidate_activity
+from database import (BackupID, BackupVersion, FileContent, MaintenanceJob, MediaInfo, User,
+                      VersionFile, TRASHED_STATUS)
 from . import tree
 
 log = logging.getLogger("backup-server")
@@ -222,35 +223,58 @@ def _save_thumb(img, box, dest: Path, encrypt: bool, workdir: Path) -> str:
 
 def _remove_thumbs(mi: MediaInfo) -> None:
     for p in (mi.thumb_sm, mi.thumb_lg):
-        if p:
-            try:
-                os.remove(p)
-            except OSError:
-                pass
+        if not p:
+            continue
+        try:
+            os.remove(p)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log.warning(f"[photos] nao foi possivel apagar a miniatura {p}: {exc}")
+
+
+def _fmt_ts(ts: float | None) -> str:
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else "sem data de captura"
 
 
 def process_one(db: Session, sha256: str, name: str) -> bool:
-    """Indexa um conteúdo. Nunca levanta: falha vira status=failed com o erro."""
+    """Indexa um conteúdo. Nunca levanta: falha vira status=failed com o erro.
+    Toda saída — sucesso, falha, ignorado — deixa uma linha de log."""
+    t0 = time.monotonic()
     kind = kind_of(name)
     fc = db.get(FileContent, sha256)
-    if kind is None or fc is None or fc.quarantined_at is not None:
-        return False
-    mi = db.get(MediaInfo, sha256) or MediaInfo(sha256=sha256, kind=kind, attempts=0)
-    mi.kind = kind
+    mi = db.get(MediaInfo, sha256) or MediaInfo(sha256=sha256, kind=kind or "image", attempts=0)
     mi.attempts = (mi.attempts or 0) + 1
     mi.processed_at = datetime.now()
+
+    skip = ("extensao nao suportada" if kind is None else
+            "conteudo ausente do indice" if fc is None else
+            "conteudo em quarentena" if fc.quarantined_at is not None else None)
+    if skip:
+        # Grava como falha definitiva: sem o registro, o item voltaria à fila a cada ciclo.
+        mi.status, mi.error, mi.attempts = "failed", f"ignorado: {skip}", MAX_ATTEMPTS
+        db.add(mi)
+        db.commit()
+        log.info(f"[photos] {sha256[:8]}… ({name}) ignorado: {skip}")
+        return False
+
+    mi.kind = kind
+    no_thumb = None
     try:
-        src, _ = storage.readable_copy(db, sha256, "photos")
+        src, has_degraded = storage.readable_copy(db, sha256, "photos")
         if src is None:
-            raise RuntimeError("nenhuma copia legivel")
+            raise RuntimeError("nenhuma copia legivel" + (" (so em volume degraded)" if has_degraded else ""))
         with _workdir() as wd:
             plain = _plain_copy(src, fc, kind, wd)
             if plain is None:
                 meta, img = {"width": None, "height": None, "taken_ts": None, "duration": None}, None
+                no_thumb = f"video cifrado acima de {VIDEO_DECRYPT_MAX // 1024 ** 3} GB"
             elif kind == "image":
                 meta, img = _image(plain)
             else:
                 meta, img = _video(plain, wd)
+                if img is None:
+                    no_thumb = "ffmpeg/ffprobe nao encontrados no PATH"
             _remove_thumbs(mi)
             mi.thumb_sm = mi.thumb_lg = None
             if img is not None:
@@ -265,10 +289,20 @@ def process_one(db: Session, sha256: str, name: str) -> bool:
         ok = True
     except Exception as exc:
         mi.status, mi.error = "failed", f"{type(exc).__name__}: {exc}"[:500]
-        log.warning(f"[photos] {sha256[:8]}… ({name}) falhou (tentativa {mi.attempts}): {mi.error}")
         ok = False
     db.add(mi)
     db.commit()
+
+    dt = time.monotonic() - t0
+    if ok:
+        dims = f"{mi.width}x{mi.height}" if mi.width else "dimensoes desconhecidas"
+        thumb = "miniaturas ok" + (" (cifradas)" if mi.thumb_encrypted and mi.thumb_sm else "") \
+            if mi.thumb_sm else f"sem miniatura ({no_thumb})"
+        log.info(f"[photos] {sha256[:8]}… {name} — {kind} {dims}, {_fmt_ts(mi.taken_ts)}, {thumb}, {dt:.2f}s")
+    else:
+        final = mi.attempts >= MAX_ATTEMPTS
+        log.warning(f"[photos] {sha256[:8]}… {name} falhou (tentativa {mi.attempts}/{MAX_ATTEMPTS}"
+                    f"{', desistindo' if final else f', nova tentativa em {RETRY_AFTER}'}): {mi.error}")
     return ok
 
 
@@ -306,6 +340,8 @@ def sweep_orphans(db: Session) -> int:
     if orphans:
         db.commit()
         bump_generation()
+        log.info(f"[photos] {len(orphans)} registro(s) de midia orfao(s) removido(s) "
+                 f"(conteudo ja apagado do storage), com as miniaturas")
     return len(orphans)
 
 
@@ -317,8 +353,20 @@ def in_window(now: datetime | None = None) -> bool:
     return start <= h < end if start < end else (h >= start or h < end)
 
 
+def pause_reason() -> str | None:
+    if not config.get("photos.indexing_enabled"):
+        return "desligada em Config (photos.indexing_enabled)"
+    if not in_window():
+        return (f"fora da janela {config.get('photos.window_start_hour'):02d}h–"
+                f"{config.get('photos.window_end_hour'):02d}h")
+    return None
+
+
 class Indexer:
-    """Um thread, acordado a cada 10 min ou quando uma versão termina (wake())."""
+    """Um thread, acordado a cada 10 min ou quando uma versão termina (wake()).
+
+    Cada ciclo que encontra trabalho vira um MaintenanceJob "photos-index", com
+    progresso a cada lote — a indexação aparece na Atividade como os outros jobs."""
 
     INTERVAL = 600
     RESCAN_EVERY = 6 * 3600
@@ -329,6 +377,7 @@ class Indexer:
         self._thread: threading.Thread | None = None
         self._scanned: set[int] = set()   # versões já varridas por inteiro
         self._scanned_at = 0.0
+        self._paused: str | None = None
         self.running = False
         self.processed = 0
         self.failed = 0
@@ -340,8 +389,13 @@ class Indexer:
         self._thread = threading.Thread(target=self._loop, args=(session_factory,),
                                         name="photos-indexer", daemon=True)
         self._thread.start()
+        reason = pause_reason()
+        log.info("[photos] indexador iniciado — primeiro ciclo em 30s"
+                 + (f" (por ora pausado: {reason})" if reason else ""))
 
     def stop(self) -> None:
+        if self._thread and self._thread.is_alive():
+            log.info("[photos] indexador encerrando")
         self._stop.set()
         self._wake.set()
 
@@ -349,19 +403,27 @@ class Indexer:
         self._wake.set()
 
     def _should_continue(self) -> bool:
-        return (not self._stop.is_set() and config.get("photos.indexing_enabled") and in_window())
+        return not self._stop.is_set() and pause_reason() is None
 
     def _loop(self, session_factory) -> None:
         self._stop.wait(30)  # deixa o boot terminar antes de disputar disco/banco
         # Sobras de um processamento interrompido (queda de energia, kill). Só este
         # thread escreve em .tmp, então antes do primeiro ciclo é seguro apagar tudo.
-        shutil.rmtree(_thumbs_root() / ".tmp", ignore_errors=True)
+        tmp = _thumbs_root() / ".tmp"
+        if tmp.exists() and any(tmp.iterdir()):
+            log.info(f"[photos] removendo temporarios de um processamento interrompido em {tmp}")
+        shutil.rmtree(tmp, ignore_errors=True)
         while not self._stop.is_set():
-            if self._should_continue():
+            reason = pause_reason()
+            if reason != self._paused:
+                # Loga só a transição, não a cada 10 min parado.
+                log.info(f"[photos] indexacao pausada: {reason}" if reason else "[photos] indexacao retomada")
+                self._paused = reason
+            if reason is None:
                 try:
                     self.run_once(session_factory)
-                except Exception as exc:  # pragma: no cover - o loop não pode morrer
-                    log.error(f"[photos] ciclo de indexacao falhou: {exc}")
+                except Exception:  # o loop não pode morrer
+                    log.exception("[photos] ciclo de indexacao falhou")
             self._wake.wait(self.INTERVAL)
             self._wake.clear()
 
@@ -374,41 +436,91 @@ class Indexer:
             self._scanned.clear()
             self._scanned_at = time.time()
         db = session_factory()
-        done = 0
+        done = failed = 0
+        job_id = None
+        t0 = time.monotonic()
+        stopped = None
         self.running = True
+
+        def progress(final: bool = False) -> None:
+            nonlocal job_id
+            text_ = f"{done} arquivo(s) processado(s), {failed} falha(s)"
+            if job_id is None:
+                mj = MaintenanceJob(job_type="photos-index", status="running",
+                                    summary=f"Indexando fotos: {text_}")
+                db.add(mj)
+                db.commit()
+                job_id = mj.id
+            else:
+                mj = db.get(MaintenanceJob, job_id)
+                if final:
+                    mj.status, mj.finished_at = "done", datetime.now()
+                    mj.summary = (f"{text_} em {time.monotonic() - t0:.0f}s"
+                                  + (f" — pausado: {stopped}" if stopped else ""))
+                else:
+                    mj.summary = f"Indexando fotos: {text_}"
+                db.commit()
+            invalidate_activity()
+
         try:
             sweep_orphans(db)
             # Só backups marcados para Fotos: não gasta CPU do Pi com, por exemplo,
             # os JPGs escaneados de um backup de documentos.
-            version_ids = [vid for (vid,) in db.query(BackupVersion.id)
-                           .join(BackupID, BackupID.label == BackupVersion.backup_label)
-                           .filter(BackupVersion.status == "done",
-                                   BackupID.photos_enabled.is_(True),
-                                   tree.live_label_filter())
-                           .order_by(BackupVersion.id.desc()).all()]
-            for vid in version_ids:
+            versions = (db.query(BackupVersion.id, BackupVersion.backup_label, BackupVersion.version_key)
+                        .join(BackupID, BackupID.label == BackupVersion.backup_label)
+                        .filter(BackupVersion.status == "done",
+                                BackupID.photos_enabled.is_(True),
+                                tree.live_label_filter())
+                        .order_by(BackupVersion.id.desc()).all())
+            for vid, label, vkey in versions:
                 if vid in self._scanned:
                     continue
-                while True:
+                first = True
+                while stopped is None:
                     if not should_continue():
-                        return done
+                        stopped = pause_reason() or "servidor encerrando"
+                        break
                     batch = pending_in_version(db, vid, BATCH)
                     if not batch:
                         break
+                    if job_id is None:
+                        log.info("[photos] ciclo de indexacao iniciado (job photos-index)")
+                        progress()
+                    if first:
+                        log.info(f"[photos] processando {label}/{vkey}")
+                        first = False
                     for sha256, path in batch:
                         if not should_continue():
-                            bump_generation()
-                            return done
+                            stopped = pause_reason() or "servidor encerrando"
+                            break
                         if process_one(db, sha256, path.rsplit("/", 1)[-1]):
                             self.processed += 1
                         else:
                             self.failed += 1
+                            failed += 1
                         done += 1
                     bump_generation()
+                    progress()
+                if stopped:
+                    break
                 self._scanned.add(vid)
-            if done:
-                log.info(f"[photos] indexacao: {done} arquivo(s) processado(s) neste ciclo")
+            if job_id is not None:
+                progress(final=True)
+                log.info(f"[photos] ciclo de indexacao concluido: {done} processado(s), {failed} falha(s) "
+                         f"em {time.monotonic() - t0:.0f}s" + (f" — pausado: {stopped}" if stopped else ""))
             return done
+        except Exception as exc:
+            if job_id is not None:
+                try:
+                    db.rollback()
+                    mj = db.get(MaintenanceJob, job_id)
+                    mj.status, mj.finished_at = "error", datetime.now()
+                    mj.summary = f"Erro: {type(exc).__name__}: {exc} — parou em: {done} processado(s)"
+                    db.commit()
+                    invalidate_activity()
+                except Exception:
+                    log.exception("[photos] nao foi possivel fechar o job photos-index como erro")
+            raise
         finally:
             self.running = False
             db.close()
@@ -480,11 +592,52 @@ def timeline(db: Session, user: User) -> list[dict]:
                 "thumb": bool(r.thumb_sm), "state": state,
                 "label": label, "path": rel, "name": name,
             })
+        items = pair_live_photos(items)
         items.sort(key=lambda x: (x["ts"], x["id"]), reverse=True)
 
     with _timeline_lock:
         _timeline_cache[user.id] = (key, items)
     return items
+
+
+# Live Photo (iPhone): a foto e um vídeo curto com o MESMO nome-base na mesma pasta —
+# IMG_1234.HEIC + IMG_1234.MOV. Na galeria viram um item só: a foto, com o vídeo
+# anexado em "live"; o .MOV não aparece solto.
+LIVE_STILL_EXT = ("heic", "heif", "jpg", "jpeg")
+LIVE_MOTION_EXT = ("mov", "mp4")
+# A de iPhone tem ~3 s. Duração conhecida acima disto = vídeo comum que só
+# coincide no nome — não some da galeria. Sem ffprobe a duração é desconhecida e
+# vale só o nome.
+LIVE_MAX_DURATION = 6.0
+
+
+def pair_live_photos(items: list[dict]) -> list[dict]:
+    groups: dict[tuple, dict[str, list[dict]]] = {}
+    for it in items:
+        stem, _, ext = it["path"].rpartition(".")
+        ext = ext.lower()
+        if ext in LIVE_STILL_EXT:
+            role = "still"
+        elif ext in LIVE_MOTION_EXT:
+            role = "motion"
+        else:
+            continue
+        g = groups.setdefault((it["label"], stem.lower()), {"still": [], "motion": []})
+        g[role].append(it)
+
+    absorbed: set[int] = set()
+    for g in groups.values():
+        if not g["still"] or not g["motion"]:
+            continue
+        motion = min(g["motion"], key=lambda m: m["id"])
+        if motion["duration"] and motion["duration"] > LIVE_MAX_DURATION:
+            continue
+        live = {"id": motion["id"], "sha256": motion["sha256"], "name": motion["name"],
+                "duration": motion["duration"], "thumb": motion["thumb"]}
+        for still in g["still"]:
+            still["live"] = live
+        absorbed.add(motion["id"])
+    return [it for it in items if it["id"] not in absorbed]
 
 
 def page(items: list[dict], before_ts: float | None, before_id: int | None, limit: int) -> list[dict]:

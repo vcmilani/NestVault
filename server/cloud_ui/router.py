@@ -3,6 +3,7 @@
 Somente leitura. Autentica pelo header X-API-Key ou pelo cookie de sessão emitido
 em POST /cloud/session (ver auth.get_user_header_or_cookie).
 """
+import logging
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -20,6 +21,7 @@ from database import (BackupID, BackupVersion, FileContent, MediaInfo, User, Ver
 from . import content, media, tree
 
 router = APIRouter()
+log = logging.getLogger("backup-server")
 
 
 # -- Sessão -------------------------------------------------------------------
@@ -34,12 +36,14 @@ def create_session(request: Request, response: Response, user: User = Depends(ge
     """Troca a API key (header) por um cookie HttpOnly — usado por <img>/<video>."""
     response.set_cookie(SESSION_COOKIE, make_session_token(user), max_age=SESSION_TTL,
                         httponly=True, samesite="strict", secure=_is_https(request), path="/")
+    log.info(f"[cloud] sessao aberta para {user.username}")
     return {"username": user.username, "role": user.role}
 
 
 @router.delete("/session")
 def delete_session(response: Response):
     response.delete_cookie(SESSION_COOKIE, path="/")
+    log.info("[cloud] sessao encerrada (logout)")
     return {"ok": True}
 
 
@@ -124,7 +128,8 @@ def get_content(file_id: int, request: Request, download: bool = False,
         raise HTTPException(404, "Arquivo nao encontrado")
     require_owner_or_admin(row.owner_user_id, user)
     return content.stream(request, db, sha256=row.sha256, name=Path(row.original_path).name,
-                          size=row.size, encrypted=bool(row.encrypted), download=download)
+                          size=row.size, encrypted=bool(row.encrypted), download=download,
+                          who=f"{user.username} file_id={file_id}")
 
 
 # -- Fotos --------------------------------------------------------------------
@@ -180,6 +185,8 @@ def set_photo_label(label: str, req: PhotoLabelUpdate, db: Session = Depends(get
         raise HTTPException(403, "Voce nao tem permissao sobre este backup")
     b.photos_enabled = req.enabled
     db.commit()
+    log.info(f"[photos] {user.username}: backup '{label}' "
+             f"{'incluido na' if req.enabled else 'removido da'} galeria")
     if req.enabled:
         media.indexer.wake()  # fotos que nunca foram indexadas entram agora
     return {"label": label, "enabled": req.enabled}
@@ -197,6 +204,8 @@ def get_thumb(sha256: str, request: Request, size: Literal["sm", "lg"] = "sm",
     p = Path(path)
     if not p.exists():
         # Volume trocado/limpo: descarta o registro para o indexador refazer.
+        log.warning(f"[photos] miniatura de {sha256[:8]}… sumiu do disco ({p}) — "
+                    f"registro descartado para ser refeito pelo indexador")
         db.delete(mi)
         db.commit()
         media.bump_generation()

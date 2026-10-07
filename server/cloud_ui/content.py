@@ -100,9 +100,11 @@ def _guarded(gen, sha256: str):
 
 
 def stream(request: Request, db, *, sha256: str, name: str, size: int, encrypted: bool,
-           download: bool) -> Response:
+           download: bool, who: str = "") -> Response:
     path, has_degraded = storage.readable_copy(db, sha256, "cloud")
     if path is None:
+        log.error(f"[cloud] {who} {name!r} ({sha256[:8]}…): nenhuma copia legivel"
+                  + (" — so em volume degraded" if has_degraded else ""))
         raise HTTPException(503 if has_degraded else 410,
                             "Arquivo em volume degraded" if has_degraded else "Conteudo fisico nao encontrado")
     if not encrypted:
@@ -134,6 +136,11 @@ def stream(request: Request, db, *, sha256: str, name: str, size: int, encrypted
         return Response(b"", media_type=media_type, headers=headers)
 
     start, end = rng if rng else (0, size - 1)
+    # Um <video> faz dezenas de requests Range durante o play/seek: só a abertura
+    # (sem Range ou a partir do byte 0) sai em INFO; o resto, em DEBUG.
+    (log.info if start == 0 else log.debug)(
+        f"[cloud] {who} {'baixa' if download else 'abre'} {name!r} ({sha256[:8]}…, "
+        f"{'cifrado, ' if encrypted else ''}bytes {start}-{end}/{size})")
     if encrypted:
         body = crypto.decrypt_range(path, storage.encryption_key, start, end)
     else:
