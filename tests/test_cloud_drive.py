@@ -170,10 +170,14 @@ def test_session_rejects_tampered_or_rotated(two_users):
     # Sem `with`: o lifespan já roda no fixture; subir outro reinicia o scheduler.
     browser = TestClient(m.app)
     token = browser.post("/cloud/session", headers={"X-API-Key": "alice-key"}).cookies["nv_session"]
-    uid, exp, sig = token.split(":")
+    uid, kid, exp, sig = token.split(":")
 
     browser.cookies.clear()
-    browser.cookies.set("nv_session", f"{int(uid) + 1}:{exp}:{sig}")  # troca de usuário
+    browser.cookies.set("nv_session", f"{int(uid) + 1}:{kid}:{exp}:{sig}")  # troca de usuário
+    assert browser.get("/cloud/tree").status_code == 401
+    browser.cookies.clear()
+    browser.cookies.set("nv_session", f"{uid}:{exp}:{sig}")  # formato antigo, sem a chave
+    assert browser.get("/cloud/tree").status_code == 401
     assert browser.get("/cloud/tree").status_code == 401
 
     browser.cookies.clear()
@@ -267,8 +271,8 @@ def test_cloud_page_served(client):
 
 def test_me_reports_role_via_header_and_cookie(two_users):
     admin, alice, _bob = two_users
-    assert admin.get("/cloud/me").json() == {"username": "admin", "role": "admin"}
-    assert alice.get("/cloud/me").json() == {"username": "alice", "role": "user"}
+    assert admin.get("/cloud/me").json() == {"username": "admin", "role": "admin", "scope": "full"}
+    assert alice.get("/cloud/me").json() == {"username": "alice", "role": "user", "scope": "full"}
     browser = TestClient(m.app)
     assert browser.get("/cloud/me").status_code == 401
     browser.post("/cloud/session", headers={"X-API-Key": "alice-key"})

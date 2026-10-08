@@ -12,8 +12,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from auth import (SESSION_COOKIE, SESSION_TTL, get_current_user, get_user_header_or_cookie,
-                  make_session_token, require_owner_or_admin)
+from auth import (SESSION_COOKIE, SESSION_TTL, effective_role, get_current_user,
+                  get_user_header_or_cookie, make_session_token, require_owner_or_admin)
 import crypto
 import storage
 from database import (BackupID, BackupVersion, FileContent, MediaInfo, User, VersionFile, get_db,
@@ -32,19 +32,21 @@ def _is_https(request: Request) -> bool:
 
 
 @router.post("/session")
-def create_session(request: Request, response: Response, user: User = Depends(get_current_user)):
-    """Troca a API key (header) por um cookie HttpOnly — usado por <img>/<video>."""
-    response.set_cookie(SESSION_COOKIE, make_session_token(user), max_age=SESSION_TTL,
+def create_session(request: Request, response: Response, db: Session = Depends(get_db),
+                   user: User = Depends(get_current_user)):
+    """Troca a API key (header) por um cookie HttpOnly — usado por <img>/<video>.
+    O cookie herda o escopo da chave: aberto com chave de cliente, não é admin."""
+    response.set_cookie(SESSION_COOKIE, make_session_token(db, user), max_age=SESSION_TTL,
                         httponly=True, samesite="strict", secure=_is_https(request), path="/")
-    log.info(f"[cloud] sessao aberta para {user.username}")
-    return {"username": user.username, "role": user.role}
+    log.info(f"[cloud] sessao aberta para {user.username} (chave {user.key_scope})")
+    return {"username": user.username, "role": effective_role(user), "scope": user.key_scope}
 
 
 @router.get("/me")
 def get_me(user: User = Depends(get_user_header_or_cookie)):
     """Quem é o dono da chave/sessão — as páginas usam o role para decidir o que
-    mostrar (usuário comum só navega entre Fotos e Cloud)."""
-    return {"username": user.username, "role": user.role}
+    mostrar. É o papel EFETIVO: a chave de cliente de um admin responde "user"."""
+    return {"username": user.username, "role": effective_role(user), "scope": user.key_scope}
 
 
 @router.delete("/session")

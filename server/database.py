@@ -102,6 +102,22 @@ class User(Base):
     created_at   = Column(DateTime, default=_now)
 
 
+class ApiKey(Base):
+    """Chaves adicionais de um usuário, além da principal (users.api_key_hash).
+    Escopo "client": autentica o mesmo usuário (mesmos backups), mas nunca com
+    poderes de admin — é a chave que vai no CLI/PWA de um admin, para que a
+    principal fique só no navegador. Ver auth.is_admin."""
+    __tablename__ = "api_keys"
+
+    id           = Column(Integer, primary_key=True)
+    user_id      = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    name         = Column(String, nullable=False)
+    key_hash     = Column(String(64), nullable=False, unique=True, index=True)
+    scope        = Column(String, nullable=False, default="client")
+    created_at   = Column(DateTime, default=_now)
+    last_used_at = Column(DateTime, nullable=True)
+
+
 class BackupID(Base):
     __tablename__ = "backup_ids"
 

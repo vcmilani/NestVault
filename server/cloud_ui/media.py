@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 import config
 import crypto
 import storage
+from auth import is_admin
 from cache_state import invalidate_activity
 from database import (BackupID, BackupVersion, FileContent, MaintenanceJob, MediaInfo, User,
                       VersionFile, TRASHED_STATUS)
@@ -675,7 +676,7 @@ def indexing_status(items: list[dict]) -> dict:
 
 
 def thumb_visible_to(db: Session, user: User, sha256: str) -> bool:
-    if user.role == "admin":
+    if is_admin(user):
         return True
     return db.query(exists().where(and_(
         VersionFile.sha256 == sha256,
