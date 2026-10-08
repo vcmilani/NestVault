@@ -164,7 +164,7 @@ from sqlalchemy.exc import IntegrityError
 from database import (
     init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy,
     VersionFile, MaintenanceJob, SsdCachePendingMove, RcloneBackupJob, DiskSnapshot,
-    DiskUsageDaily, User, ApiKey, hash_api_key, bootstrap_admin_user, TRASHED_STATUS,
+    DiskUsageDaily, User, ApiKey, hash_api_key, hash_pin, bootstrap_admin_user, TRASHED_STATUS,
 )
 import config
 import crypto
@@ -175,7 +175,8 @@ import version_diff
 # é mantido: cada sha256 é commitado individualmente, sem commit final agregado.
 from nightly_cleanup import _cleanup_orphan_contents as _cleanup_orphan_contents_no_commit
 from nightly_cleanup import orphan_filter as _orphan_filter
-from auth import get_current_user, is_admin, require_admin, require_owner_or_admin
+from auth import (get_current_user, is_admin, require_admin, require_owner_or_admin,
+                  reset_pin_attempts)
 from cloud.rclone_router import router as rclone_router
 from cloud_ui import router as cloud_ui_router
 from cloud_ui import media as cloud_media
@@ -668,6 +669,9 @@ class UserUpdate(BaseModel):
     is_active: Optional[bool] = None
     role: Optional[Literal["admin", "user"]] = None
 
+class HiddenPinSet(BaseModel):
+    pin: str = Field(..., pattern=r"^\d{4,8}$", description="4 a 8 digitos")
+
 class ApiKeyCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=64, description="Onde a chave vai ser usada, ex.: MacBook")
 
@@ -820,6 +824,7 @@ class UserInfo(BaseModel):
     role: str
     is_active: bool
     created_at: str
+    has_hidden_pin: bool = False
 
 class UserCreatedResponse(BaseModel):
     user: UserInfo
@@ -3115,7 +3120,8 @@ def all_backup_disk_summary(db: Session = Depends(get_db)):
 # -- Users (admin) --------------------------------------------------------------
 def _user_info(u: User) -> UserInfo:
     return UserInfo(id=u.id, username=u.username, role=u.role,
-                     is_active=u.is_active, created_at=str(u.created_at))
+                     is_active=u.is_active, created_at=str(u.created_at),
+                     has_hidden_pin=bool(u.hidden_pin_hash))
 
 
 @app.post("/users", response_model=UserCreatedResponse, dependencies=[Depends(require_admin)])
@@ -3187,6 +3193,28 @@ def revoke_user_key(user_id: int, key_id: int, db: Session = Depends(get_db)):
     db.delete(k); db.commit()
     log.info(f"[users] Chave de cliente '{k.name}' de '{u.username}' revogada")
     return {"ok": True}
+
+
+# PIN das fotos ocultas em /photos (ver auth.hidden_unlocked). Só o admin define;
+# trocar ou remover derruba os desbloqueios abertos, porque o hash assina o cookie.
+@app.put("/users/{user_id}/hidden-pin", response_model=UserInfo, dependencies=[Depends(require_admin)])
+def set_hidden_pin(user_id: int, req: HiddenPinSet, db: Session = Depends(get_db)):
+    u = _user_or_404(db, user_id)
+    u.hidden_pin_hash = hash_pin(req.pin)
+    db.commit(); db.refresh(u)
+    reset_pin_attempts(u.id)
+    log.info(f"[users] PIN das fotos ocultas definido para '{u.username}'")
+    return _user_info(u)
+
+
+@app.delete("/users/{user_id}/hidden-pin", response_model=UserInfo, dependencies=[Depends(require_admin)])
+def delete_hidden_pin(user_id: int, db: Session = Depends(get_db)):
+    u = _user_or_404(db, user_id)
+    u.hidden_pin_hash = None
+    db.commit(); db.refresh(u)
+    reset_pin_attempts(u.id)
+    log.info(f"[users] PIN das fotos ocultas removido de '{u.username}'")
+    return _user_info(u)
 
 
 @app.patch("/users/{user_id}", response_model=UserInfo)

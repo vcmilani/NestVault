@@ -179,3 +179,65 @@ def get_user_header_or_cookie(request: Request,
     if not user:
         raise HTTPException(401, "Sessao ausente ou expirada")
     return user
+
+
+# -- Desbloqueio das fotos ocultas (PIN) --------------------------------------
+# Usuário com PIN (users.hidden_pin_hash) só vê as ocultas de /photos com este
+# cookie, emitido por POST /cloud/photos/unlock. O hash do PIN entra na
+# assinatura: trocar ou remover o PIN derruba os desbloqueios abertos.
+
+HIDDEN_COOKIE = "nv_hidden"
+HIDDEN_TTL    = 15 * 60
+
+PIN_MAX_FAILS = 5
+PIN_LOCKOUT   = 5 * 60
+_pin_fails: dict[int, tuple[int, float]] = {}  # user_id -> (erros seguidos, bloqueado até)
+
+
+def _sign_hidden(user_id: int, exp: int, pin_hash: str) -> str:
+    msg = f"hidden:{user_id}:{exp}:{pin_hash}".encode()
+    return hmac.new(_secret(), msg, hashlib.sha256).hexdigest()
+
+
+def make_hidden_token(user: User) -> tuple[str, int]:
+    exp = int(time.time()) + HIDDEN_TTL
+    return f"{user.id}:{exp}:{_sign_hidden(user.id, exp, user.hidden_pin_hash)}", exp
+
+
+def hidden_unlocked(request: Request, user: User) -> bool:
+    """Sem PIN não há trava. Com PIN, vale o cookie de desbloqueio do mesmo usuário."""
+    if not user.hidden_pin_hash:
+        return True
+    token = request.cookies.get(HIDDEN_COOKIE)
+    try:
+        uid_s, exp_s, sig = (token or "").split(":")
+        uid, exp = int(uid_s), int(exp_s)
+    except ValueError:
+        return False
+    if uid != user.id or exp < time.time():
+        return False
+    return hmac.compare_digest(sig, _sign_hidden(uid, exp, user.hidden_pin_hash))
+
+
+def pin_locked_for(user: User) -> int:
+    """Segundos restantes de bloqueio por excesso de PIN errado (0 = liberado)."""
+    _fails, until = _pin_fails.get(user.id, (0, 0.0))
+    return max(0, int(until - time.time() + 0.999))
+
+
+def register_pin_attempt(user: User, ok: bool) -> None:
+    if ok:
+        _pin_fails.pop(user.id, None)
+        return
+    fails, _until = _pin_fails.get(user.id, (0, 0.0))
+    fails += 1
+    if fails >= PIN_MAX_FAILS:
+        _pin_fails[user.id] = (0, time.time() + PIN_LOCKOUT)
+        log.warning(f"[photos] {user.username}: {fails} PINs errados — bloqueado por {PIN_LOCKOUT}s")
+    else:
+        _pin_fails[user.id] = (fails, 0.0)
+
+
+def reset_pin_attempts(user_id: int) -> None:
+    """PIN novo (ou removido) pelo admin: zera os erros e o bloqueio."""
+    _pin_fails.pop(user_id, None)

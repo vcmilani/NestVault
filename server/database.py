@@ -91,6 +91,27 @@ def hash_api_key(raw: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def hash_pin(pin: str) -> str:
+    """PIN das fotos ocultas: scrypt com salt — PIN curto pede hash lento, não SHA-256."""
+    import hashlib, secrets
+    salt = secrets.token_bytes(16)
+    h = hashlib.scrypt(pin.encode(), salt=salt, n=2**14, r=8, p=1)
+    return f"scrypt${salt.hex()}${h.hex()}"
+
+
+def check_pin(pin: str, stored: str) -> bool:
+    import hashlib, hmac
+    try:
+        algo, salt_hex, h_hex = stored.split("$")
+        salt = bytes.fromhex(salt_hex)
+    except (ValueError, AttributeError):
+        return False
+    if algo != "scrypt":
+        return False
+    h = hashlib.scrypt(pin.encode(), salt=salt, n=2**14, r=8, p=1)
+    return hmac.compare_digest(h.hex(), h_hex)
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -100,6 +121,9 @@ class User(Base):
     role         = Column(String, nullable=False, default="user")  # "admin" | "user"
     is_active    = Column(Boolean, nullable=False, default=True)
     created_at   = Column(DateTime, default=_now)
+    # PIN numérico (hash, ver hash_pin) que destrava as fotos ocultas em /photos.
+    # Definido pelo admin em Usuários; NULL = sem PIN, ocultas sem trava.
+    hidden_pin_hash = Column(String, nullable=True)
 
 
 class ApiKey(Base):
@@ -464,6 +488,7 @@ def init_db():
         ("backup_ids",      "trashed_by",          "INTEGER"),
         # Fotos: default constante, então o ALTER continua O(1) (SQLite e PG 11+).
         ("backup_ids",      "photos_enabled",      "BOOLEAN NOT NULL DEFAULT TRUE"),
+        ("users",           "hidden_pin_hash",     "TEXT"),
     ):
         with engine.connect() as conn:
             try:

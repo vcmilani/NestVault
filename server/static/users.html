@@ -141,6 +141,19 @@
     <div class="new-user-hint">A chave de cliente entra como o mesmo usuário, com os mesmos backups, mas <b>nunca tem poderes de admin</b>. Use uma dessas no CLI e no celular, uma por aparelho, e deixe a chave principal de um admin só no navegador. Girar a chave principal não afeta as chaves de cliente.</div>
   </div>
 
+  <div class="new-user-card">
+    <div class="new-user-title">PIN das fotos ocultas</div>
+    <div class="form-row">
+      <span class="form-label">Usuário</span>
+      <select class="op-select" id="pinUser"></select>
+      <span class="form-label">PIN</span>
+      <input class="op-input" id="pinValue" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" placeholder="4 a 8 dígitos" autocomplete="new-password">
+      <button class="run-btn" id="setPinBtn" onclick="setHiddenPin()">🔒 Definir PIN</button>
+    </div>
+    <div class="form-error" id="setPinError"></div>
+    <div class="new-user-hint">Com PIN, as fotos de pastas ocultas (álbum Hidden do iCloud etc.) só aparecem em Fotos depois de digitar o PIN, e o desbloqueio vale por 15 minutos. Definir de novo troca o PIN e encerra os desbloqueios abertos. O drive Cloud não muda.</div>
+  </div>
+
   <div class="table-wrap">
     <div id="usersContainer"><div class="loading">Carregando</div></div>
   </div>
@@ -226,6 +239,7 @@
             ${u.is_active ? '⏻ Desativar' : '⏻ Reativar'}
           </button>
           <button class="small-btn" onclick="changeRole(${u.id})">${u.role === 'admin' ? '⇩ Tornar user' : '⇧ Tornar admin'}</button>
+          ${u.has_hidden_pin ? `<button class="small-btn" onclick="removeHiddenPin(${u.id})" title="Fotos ocultas protegidas por PIN — clique para remover">🔒 Remover PIN</button>` : ''}
           <button class="small-btn btn-danger" onclick="deleteUser(${u.id})">✕ Excluir</button>
         </td>
       </tr>${keysRow}`;
@@ -265,11 +279,62 @@
   }
 
   function renderKeyUserSelect() {
-    const sel = document.getElementById('keyUser');
-    const prev = sel.value;
-    sel.innerHTML = _users.filter(u => u.is_active)
-      .map(u => `<option value="${u.id}">${esc(u.username)}${u.role === 'admin' ? ' (admin)' : ''}</option>`).join('');
-    if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+    for (const id of ['keyUser', 'pinUser']) {
+      const sel = document.getElementById(id);
+      const prev = sel.value;
+      sel.innerHTML = _users.filter(u => u.is_active)
+        .map(u => `<option value="${u.id}">${esc(u.username)}${u.role === 'admin' ? ' (admin)' : ''}${id === 'pinUser' && u.has_hidden_pin ? ' · tem PIN' : ''}</option>`).join('');
+      if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+    }
+  }
+
+  async function setHiddenPin() {
+    const userId = document.getElementById('pinUser').value;
+    const pin = document.getElementById('pinValue').value.trim();
+    const errEl = document.getElementById('setPinError');
+    errEl.textContent = '';
+    if (!userId) { errEl.textContent = 'Escolha um usuário.'; return; }
+    if (!/^\d{4,8}$/.test(pin)) { errEl.textContent = 'O PIN tem de 4 a 8 dígitos.'; return; }
+    const u = _users.find(x => String(x.id) === String(userId));
+    if (u && u.has_hidden_pin) {
+      const ok = await nvConfirm('Trocar PIN',
+        `"${u.username}" já tem PIN nas fotos ocultas. O PIN antigo deixa de valer e os desbloqueios abertos são encerrados.`);
+      if (!ok) return;
+    }
+    const btn = document.getElementById('setPinBtn');
+    btn.disabled = true;
+    try {
+      const r = await fetch(`/users/${userId}/hidden-pin`, {
+        method: 'PUT', headers: {...H(), 'Content-Type': 'application/json'},
+        body: JSON.stringify({pin}),
+      });
+      if (r.status === 401) { showLogin('API Key inválida.'); return; }
+      if (r.status === 403) { nvNotAdmin(); return; }
+      if (!r.ok) { const data = await r.json().catch(() => ({})); errEl.textContent = (typeof data.detail === 'string' && data.detail) || `Erro ${r.status}`; return; }
+      document.getElementById('pinValue').value = '';
+      load();
+    } catch(e) {
+      errEl.textContent = 'Erro de conexão: ' + e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function removeHiddenPin(id) {
+    const u = _users.find(x => x.id === id);
+    if (!u) return;
+    const ok = await nvConfirm('Remover PIN',
+      `As fotos ocultas de "${u.username}" voltam a aparecer em Fotos sem PIN, só com o botão Ocultas.`);
+    if (!ok) return;
+    try {
+      const r = await fetch(`/users/${id}/hidden-pin`, {method: 'DELETE', headers: H()});
+      if (r.status === 401) { showLogin('API Key inválida.'); return; }
+      if (r.status === 403) { nvNotAdmin(); return; }
+      if (!r.ok) { const data = await r.json().catch(() => ({})); showError(data.detail || `Erro ${r.status}`); return; }
+      load();
+    } catch(e) {
+      showError('Erro de conexão: ' + e.message);
+    }
   }
 
   async function createKey() {

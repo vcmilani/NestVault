@@ -152,6 +152,20 @@
   </div>
 </div>
 
+<div class="login-overlay" id="pinOverlay" style="display:none" role="dialog" aria-modal="true" aria-labelledby="pinTitle">
+  <div class="login-box">
+    <div class="login-title" id="pinTitle">◌ Fotos ocultas</div>
+    <div class="login-sub">Digite o PIN para ver as fotos ocultas por 15 minutos</div>
+    <form id="pinForm">
+      <label class="login-label" for="pinInput">PIN</label>
+      <input class="login-input" id="pinInput" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off">
+      <button class="login-btn" type="submit">Desbloquear →</button>
+      <button class="login-btn" type="button" id="pinCancel" style="background:none;border:1px solid var(--border2);color:var(--text-dim)">Cancelar</button>
+      <div class="login-error" id="pinError"></div>
+    </form>
+  </div>
+</div>
+
 <div class="login-overlay" id="loginOverlay" style="display:none">
   <div class="login-box">
     <div class="login-title">◈ NestVault</div>
@@ -193,7 +207,12 @@
   async function api(path, params) {
     const r = await fetch(path + (params ? '?' + new URLSearchParams(params) : ''), {headers: H(), credentials: 'same-origin'});
     if (r.status === 401) { sessionReady = false; showLogin('Sessão expirada — informe a API Key'); throw new Error('401'); }
-    if (!r.ok) { let m = r.status + ''; try { m = (await r.json()).detail || m; } catch (_) {} throw new Error(m); }
+    if (!r.ok) {
+      let m = r.status + ''; try { m = (await r.json()).detail || m; } catch (_) {}
+      // Desbloqueio das ocultas expirou (ou nunca houve): volta a escondê-las.
+      if (r.status === 403 && m === PIN_REQUIRED) { relockHidden(); throw new Error('pin'); }
+      throw new Error(m);
+    }
     return r.json();
   }
   async function ensureSession() {
@@ -241,7 +260,7 @@
       st.done = !d.next;
       render();
     } catch (e) {
-      if (e.message !== '401') showError(e.message);
+      if (e.message !== '401' && e.message !== 'pin') showError(e.message);
     } finally {
       st.loading = false;
       if (stale) loadMore();
@@ -342,14 +361,66 @@
     btn.textContent = (st.showHidden ? '◉ Ocultas visíveis' : '◌ Ocultas escondidas') + (count ? ` · ${count.toLocaleString('pt-BR')}` : '');
     btn.title = st.showHidden
       ? 'Fotos de pastas ocultas (álbum Hidden do iCloud) estão aparecendo — clique para esconder'
-      : 'Fotos de pastas ocultas (álbum Hidden do iCloud) estão escondidas — clique para mostrar';
+      : 'Fotos de pastas ocultas (álbum Hidden do iCloud) estão escondidas — clique para mostrar'
+        + (st.pinRequired ? ' (pede o PIN)' : '');
   }
-  document.getElementById('hiddenBtn').addEventListener('click', () => {
-    st.showHidden = !st.showHidden;
-    try { localStorage.setItem('nv-photos-hidden', st.showHidden ? '1' : '0'); } catch (_) {}
+  function setShowHidden(on) {
+    st.showHidden = on;
+    try { localStorage.setItem('nv-photos-hidden', on ? '1' : '0'); } catch (_) {}
     renderHiddenBtn(st.hiddenCount);
     window.scrollTo(0, 0);
     reloadGrid();
+  }
+  // Com PIN (definido pelo admin em Usuários), mostrar as ocultas pede o PIN; o
+  // servidor guarda o desbloqueio num cookie de 15 min e recusa show_hidden sem ele.
+  const PIN_REQUIRED = 'PIN necessario';
+  function relockHidden() {
+    st.unlocked = false;
+    if (st.showHidden) setShowHidden(false);
+  }
+  document.getElementById('hiddenBtn').addEventListener('click', () => {
+    if (st.showHidden) {
+      if (st.pinRequired) {
+        st.unlocked = false;
+        fetch('/cloud/photos/unlock', {method: 'DELETE', credentials: 'same-origin'}).catch(() => {});
+      }
+      setShowHidden(false);
+    } else if (st.pinRequired && !st.unlocked) {
+      openPin();
+    } else {
+      setShowHidden(true);
+    }
+  });
+  function openPin() {
+    document.getElementById('pinError').textContent = '';
+    document.getElementById('pinInput').value = '';
+    document.getElementById('pinOverlay').style.display = 'flex';
+    document.getElementById('pinInput').focus();
+  }
+  function closePin() { document.getElementById('pinOverlay').style.display = 'none'; }
+  document.getElementById('pinCancel').addEventListener('click', closePin);
+  document.getElementById('pinOverlay').addEventListener('keydown', e => { if (e.key === 'Escape') closePin(); });
+  document.getElementById('pinForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const err = document.getElementById('pinError');
+    const pin = document.getElementById('pinInput').value.trim();
+    if (!/^\d{4,8}$/.test(pin)) { err.textContent = 'O PIN tem de 4 a 8 dígitos'; return; }
+    err.textContent = '';
+    try {
+      const r = await fetch('/cloud/photos/unlock', {
+        method: 'POST', credentials: 'same-origin',
+        headers: {...H(), 'Content-Type': 'application/json'}, body: JSON.stringify({pin}),
+      });
+      if (r.status === 401) { closePin(); showLogin('Sessão expirada — informe a API Key'); return; }
+      if (!r.ok) {
+        err.textContent = (await r.json().catch(() => ({}))).detail || ('Erro ' + r.status);
+        document.getElementById('pinInput').select();
+        return;
+      }
+      st.unlocked = true;
+      closePin();
+      setShowHidden(true);
+    } catch (_) { err.textContent = 'Falha de conexão'; }
   });
 
   let idxTimer = null;
@@ -358,6 +429,8 @@
     let s;
     try { s = await api('/cloud/photos/indexing', hiddenParam()); } catch (_) { return; }
     st.hiddenCount = s.hidden;
+    st.pinRequired = s.pin_required;
+    st.unlocked = s.unlocked;
     renderHiddenBtn(s.hidden);
     const box = document.getElementById('idx');
     const busy = s.pending > 0;

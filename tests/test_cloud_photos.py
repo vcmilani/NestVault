@@ -427,3 +427,98 @@ def test_hidden_folders_are_left_out_unless_asked(client):
     shown = photos(client, show_hidden=True)["items"]
     assert sorted(i["name"] for i in shown) == ["a.jpg", "b.jpg", "segredo.jpg", "x.jpg"]
     assert client.get("/cloud/photos/indexing", params={"show_hidden": True}).json()["total"] == 4
+
+
+# -- PIN das fotos ocultas ---------------------------------------------------
+
+def _hidden_backup(c):
+    backup(c, "icloud-a", {
+        "/PrimarySync/All Photos/a.jpg": (jpeg(), 1),
+        "/PrimarySync/Hidden/segredo.jpg": (jpeg((1, 2, 3)), 2),
+    })
+
+
+def test_hidden_pin_locks_hidden_photos_until_unlocked(two_users):
+    admin, alice, _bob = two_users
+    _hidden_backup(alice)
+    alice_id = next(u["id"] for u in admin.get("/users").json() if u["username"] == "alice")
+
+    # Sem PIN, como antes.
+    st = alice.get("/cloud/photos/indexing").json()
+    assert st["pin_required"] is False and st["unlocked"] is True
+    assert len(photos(alice, show_hidden=True)["items"]) == 2
+
+    r = admin.put(f"/users/{alice_id}/hidden-pin", json={"pin": "1234"})
+    assert r.status_code == 200 and r.json()["has_hidden_pin"] is True
+    assert next(u for u in admin.get("/users").json() if u["id"] == alice_id)["has_hidden_pin"]
+
+    for path in ("/cloud/photos", "/cloud/photos/months", "/cloud/photos/indexing"):
+        r = alice.get(path, params={"show_hidden": True})
+        assert r.status_code == 403 and r.json()["detail"] == "PIN necessario", path
+    st = alice.get("/cloud/photos/indexing").json()
+    assert st["pin_required"] is True and st["unlocked"] is False and st["hidden"] == 1
+    assert len(photos(alice)["items"]) == 1  # sem show_hidden segue normal
+
+    assert alice.post("/cloud/photos/unlock", json={"pin": "0000"}).status_code == 403
+    r = alice.post("/cloud/photos/unlock", json={"pin": "1234"})
+    assert r.status_code == 200 and r.json()["unlocked_until"]
+    assert len(photos(alice, show_hidden=True)["items"]) == 2
+    assert alice.get("/cloud/photos/indexing").json()["unlocked"] is True
+
+    # Trocar o PIN derruba o desbloqueio aberto.
+    assert admin.put(f"/users/{alice_id}/hidden-pin", json={"pin": "98765"}).status_code == 200
+    assert alice.get("/cloud/photos", params={"show_hidden": True}).status_code == 403
+
+    # Bloquear de novo pelo botão.
+    assert alice.post("/cloud/photos/unlock", json={"pin": "98765"}).status_code == 200
+    assert alice.delete("/cloud/photos/unlock").status_code == 200
+    assert alice.get("/cloud/photos", params={"show_hidden": True}).status_code == 403
+
+    # Remover o PIN volta ao comportamento antigo.
+    r = admin.delete(f"/users/{alice_id}/hidden-pin")
+    assert r.status_code == 200 and r.json()["has_hidden_pin"] is False
+    assert len(photos(alice, show_hidden=True)["items"]) == 2
+
+
+def test_hidden_pin_unlock_cookie_is_per_user(two_users):
+    admin, alice, bob = two_users
+    users = {u["username"]: u["id"] for u in admin.get("/users").json()}
+    admin.put(f"/users/{users['alice']}/hidden-pin", json={"pin": "1111"})
+    admin.put(f"/users/{users['bob']}/hidden-pin", json={"pin": "2222"})
+    assert alice.post("/cloud/photos/unlock", json={"pin": "1111"}).status_code == 200
+    bob.cookies.set("nv_hidden", alice.cookies.get("nv_hidden"))
+    assert bob.get("/cloud/photos", params={"show_hidden": True}).status_code == 403
+
+
+def test_hidden_pin_lockout_after_too_many_errors(two_users):
+    admin, alice, _bob = two_users
+    alice_id = next(u["id"] for u in admin.get("/users").json() if u["username"] == "alice")
+    admin.put(f"/users/{alice_id}/hidden-pin", json={"pin": "1234"})
+    for _ in range(5):
+        assert alice.post("/cloud/photos/unlock", json={"pin": "0000"}).status_code == 403
+    # Bloqueado: nem o PIN certo passa.
+    assert alice.post("/cloud/photos/unlock", json={"pin": "1234"}).status_code == 429
+    # Admin redefinindo o PIN libera.
+    admin.put(f"/users/{alice_id}/hidden-pin", json={"pin": "1234"})
+    assert alice.post("/cloud/photos/unlock", json={"pin": "1234"}).status_code == 200
+
+
+def test_hidden_pin_admin_only_and_validated(two_users):
+    admin, alice, _bob = two_users
+    alice_id = next(u["id"] for u in admin.get("/users").json() if u["username"] == "alice")
+    assert alice.put(f"/users/{alice_id}/hidden-pin", json={"pin": "1234"}).status_code == 403
+    assert alice.delete(f"/users/{alice_id}/hidden-pin").status_code == 403
+    for bad in ("123", "123456789", "12a4", ""):
+        assert admin.put(f"/users/{alice_id}/hidden-pin", json={"pin": bad}).status_code == 422, bad
+    assert admin.put("/users/9999/hidden-pin", json={"pin": "1234"}).status_code == 404
+    # Nunca guarda o PIN em texto puro.
+    db = session()
+    try:
+        h = db.get(db_mod.User, alice_id).hidden_pin_hash
+        assert h is None
+        admin.put(f"/users/{alice_id}/hidden-pin", json={"pin": "1234"})
+        db.expire_all()
+        h = db.get(db_mod.User, alice_id).hidden_pin_hash
+        assert h.startswith("scrypt$") and "1234" not in h
+    finally:
+        db.close()
