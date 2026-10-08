@@ -46,6 +46,12 @@ def index():
     return media.indexer.run_once(lambda: m.SessionLocal(), should_continue=lambda: True)
 
 
+@pytest.fixture(autouse=True)
+def _no_rest(monkeypatch):
+    # O descanso entre fotos (photos.rest_factor) só atrasaria a suíte.
+    monkeypatch.setattr(media.Indexer, "MAX_REST", 0)
+
+
 def photos(c, **params):
     r = c.get("/cloud/photos", params=params)
     assert r.status_code == 200, r.text
@@ -241,6 +247,39 @@ def test_window(monkeypatch, start, end, hour, expected):
     assert media.in_window(datetime(2026, 1, 1, hour)) is expected
 
 
+@pytest.mark.parametrize("limit,temp,paused", [
+    (0, 95.0, False), (70, 80.0, True), (70, 70.0, True), (70, 60.0, False), (70, None, False),
+])
+def test_thermal_pause(monkeypatch, limit, temp, paused):
+    vals = {"photos.indexing_enabled": True, "photos.window_start_hour": 0,
+            "photos.window_end_hour": 0, "photos.max_temp_c": limit}
+    monkeypatch.setattr(media.config, "get", lambda k: vals[k])
+    monkeypatch.setattr(media.sysmetrics, "snapshot", lambda: {"temp_c": temp})
+    reason = media.pause_reason()
+    assert (reason is not None) is paused
+    if paused:
+        assert reason.startswith("CPU a ")
+
+
+@pytest.mark.parametrize("factor,worked,expected", [(0, 2.0, None), (2, 0.5, 1.0), (20, 60.0, 300)])
+def test_rest_between_items(monkeypatch, factor, worked, expected):
+    monkeypatch.setattr(media.Indexer, "MAX_REST", 300)
+    monkeypatch.setattr(media.config, "get", lambda k: {"photos.rest_factor": factor}[k])
+    ix = media.Indexer()
+    waits = []
+    monkeypatch.setattr(ix._stop, "wait", lambda t: waits.append(t))
+    ix._rest(worked)
+    assert waits == ([] if expected is None else [pytest.approx(expected)])
+
+
+def test_saving_photos_settings_wakes_indexer(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(media.indexer, "wake", lambda: calls.append(1))
+    r = client.put("/api/settings", json={"photos": {"rest_factor": 3}})
+    assert r.status_code == 200, r.text
+    assert calls == [1]
+
+
 def test_finishing_a_version_wakes_indexer(client, monkeypatch):
     calls = []
     monkeypatch.setattr(media.indexer, "wake", lambda: calls.append(1))
@@ -391,3 +430,134 @@ def test_user_actions_are_logged(two_users, caplog):
     assert "sessao aberta para alice" in msgs
     assert "backup 'alice-fotos' removido da galeria" in msgs
     assert f"alice file_id={fid} abre '1.jpg'" in msgs
+
+
+# -- Selecionar/desmarcar todos e pastas ocultas ----------------------------
+
+def test_set_all_labels_at_once_only_own(two_users):
+    admin, alice, bob = two_users
+    backup(alice, "a1", {"/a/1.jpg": (jpeg(), 1)})
+    backup(alice, "a2", {"/a/2.jpg": (jpeg((0, 0, 9)), 2)})
+    backup(bob, "b1", {"/b/1.jpg": (jpeg((9, 0, 0)), 3)})
+
+    assert alice.put("/cloud/photos/labels", json={"enabled": False}).json() == {"enabled": False, "count": 2}
+    assert [l["enabled"] for l in alice.get("/cloud/photos/labels").json()] == [False, False]
+    assert photos(alice)["items"] == []
+    assert [l["enabled"] for l in bob.get("/cloud/photos/labels").json()] == [True]  # não mexe no alheio
+
+    assert alice.put("/cloud/photos/labels", json={"enabled": True}).status_code == 200
+    assert {i["label"] for i in photos(alice)["items"]} == {"a1", "a2"}
+
+
+def test_hidden_folders_are_left_out_unless_asked(client):
+    backup(client, "icloud", {
+        "/PrimarySync/All Photos/a.jpg": (jpeg(), 1),
+        "/PrimarySync/Hidden/segredo.jpg": (jpeg((1, 2, 3)), 2),
+        "/PrimarySync/Favoritos/segredo.jpg": (jpeg((1, 2, 3)), 2),  # mesma foto em outro álbum
+        "/PrimarySync/.cache/x.jpg": (jpeg((4, 5, 6)), 3),
+        "/PrimarySync/Hiddenness/b.jpg": (jpeg((7, 8, 9)), 4),       # só o nome exato conta
+    })
+    assert sorted(i["name"] for i in photos(client)["items"]) == ["a.jpg", "b.jpg"]
+    assert photos(client)["total"] == 2
+    assert sum(m["count"] for m in client.get("/cloud/photos/months").json()) == 2
+    st = client.get("/cloud/photos/indexing").json()
+    assert st["total"] == 2 and st["hidden"] == 2
+
+    shown = photos(client, show_hidden=True)["items"]
+    assert sorted(i["name"] for i in shown) == ["a.jpg", "b.jpg", "segredo.jpg", "x.jpg"]
+    assert client.get("/cloud/photos/indexing", params={"show_hidden": True}).json()["total"] == 4
+
+
+# -- PIN das fotos ocultas ---------------------------------------------------
+
+def _hidden_backup(c):
+    backup(c, "icloud-a", {
+        "/PrimarySync/All Photos/a.jpg": (jpeg(), 1),
+        "/PrimarySync/Hidden/segredo.jpg": (jpeg((1, 2, 3)), 2),
+    })
+
+
+def test_hidden_pin_locks_hidden_photos_until_unlocked(two_users):
+    admin, alice, _bob = two_users
+    _hidden_backup(alice)
+    alice_id = next(u["id"] for u in admin.get("/users").json() if u["username"] == "alice")
+
+    # Sem PIN, como antes.
+    st = alice.get("/cloud/photos/indexing").json()
+    assert st["pin_required"] is False and st["unlocked"] is True
+    assert len(photos(alice, show_hidden=True)["items"]) == 2
+
+    r = admin.put(f"/users/{alice_id}/hidden-pin", json={"pin": "1234"})
+    assert r.status_code == 200 and r.json()["has_hidden_pin"] is True
+    assert next(u for u in admin.get("/users").json() if u["id"] == alice_id)["has_hidden_pin"]
+
+    for path in ("/cloud/photos", "/cloud/photos/months", "/cloud/photos/indexing"):
+        r = alice.get(path, params={"show_hidden": True})
+        assert r.status_code == 403 and r.json()["detail"] == "PIN necessario", path
+    st = alice.get("/cloud/photos/indexing").json()
+    assert st["pin_required"] is True and st["unlocked"] is False and st["hidden"] == 1
+    assert len(photos(alice)["items"]) == 1  # sem show_hidden segue normal
+
+    assert alice.post("/cloud/photos/unlock", json={"pin": "0000"}).status_code == 403
+    r = alice.post("/cloud/photos/unlock", json={"pin": "1234"})
+    assert r.status_code == 200 and r.json()["unlocked_until"]
+    assert len(photos(alice, show_hidden=True)["items"]) == 2
+    assert alice.get("/cloud/photos/indexing").json()["unlocked"] is True
+
+    # Trocar o PIN derruba o desbloqueio aberto.
+    assert admin.put(f"/users/{alice_id}/hidden-pin", json={"pin": "98765"}).status_code == 200
+    assert alice.get("/cloud/photos", params={"show_hidden": True}).status_code == 403
+
+    # Bloquear de novo pelo botão.
+    assert alice.post("/cloud/photos/unlock", json={"pin": "98765"}).status_code == 200
+    assert alice.delete("/cloud/photos/unlock").status_code == 200
+    assert alice.get("/cloud/photos", params={"show_hidden": True}).status_code == 403
+
+    # Remover o PIN volta ao comportamento antigo.
+    r = admin.delete(f"/users/{alice_id}/hidden-pin")
+    assert r.status_code == 200 and r.json()["has_hidden_pin"] is False
+    assert len(photos(alice, show_hidden=True)["items"]) == 2
+
+
+def test_hidden_pin_unlock_cookie_is_per_user(two_users):
+    admin, alice, bob = two_users
+    users = {u["username"]: u["id"] for u in admin.get("/users").json()}
+    admin.put(f"/users/{users['alice']}/hidden-pin", json={"pin": "1111"})
+    admin.put(f"/users/{users['bob']}/hidden-pin", json={"pin": "2222"})
+    assert alice.post("/cloud/photos/unlock", json={"pin": "1111"}).status_code == 200
+    bob.cookies.set("nv_hidden", alice.cookies.get("nv_hidden"))
+    assert bob.get("/cloud/photos", params={"show_hidden": True}).status_code == 403
+
+
+def test_hidden_pin_lockout_after_too_many_errors(two_users):
+    admin, alice, _bob = two_users
+    alice_id = next(u["id"] for u in admin.get("/users").json() if u["username"] == "alice")
+    admin.put(f"/users/{alice_id}/hidden-pin", json={"pin": "1234"})
+    for _ in range(5):
+        assert alice.post("/cloud/photos/unlock", json={"pin": "0000"}).status_code == 403
+    # Bloqueado: nem o PIN certo passa.
+    assert alice.post("/cloud/photos/unlock", json={"pin": "1234"}).status_code == 429
+    # Admin redefinindo o PIN libera.
+    admin.put(f"/users/{alice_id}/hidden-pin", json={"pin": "1234"})
+    assert alice.post("/cloud/photos/unlock", json={"pin": "1234"}).status_code == 200
+
+
+def test_hidden_pin_admin_only_and_validated(two_users):
+    admin, alice, _bob = two_users
+    alice_id = next(u["id"] for u in admin.get("/users").json() if u["username"] == "alice")
+    assert alice.put(f"/users/{alice_id}/hidden-pin", json={"pin": "1234"}).status_code == 403
+    assert alice.delete(f"/users/{alice_id}/hidden-pin").status_code == 403
+    for bad in ("123", "123456789", "12a4", ""):
+        assert admin.put(f"/users/{alice_id}/hidden-pin", json={"pin": bad}).status_code == 422, bad
+    assert admin.put("/users/9999/hidden-pin", json={"pin": "1234"}).status_code == 404
+    # Nunca guarda o PIN em texto puro.
+    db = session()
+    try:
+        h = db.get(db_mod.User, alice_id).hidden_pin_hash
+        assert h is None
+        admin.put(f"/users/{alice_id}/hidden-pin", json={"pin": "1234"})
+        db.expire_all()
+        h = db.get(db_mod.User, alice_id).hidden_pin_hash
+        assert h.startswith("scrypt$") and "1234" not in h
+    finally:
+        db.close()

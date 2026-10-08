@@ -8,7 +8,9 @@ versão done e ainda sem MediaInfo. Assim os backups que já existiam entram soz
 
 Varre as versões da mais nova para a mais antiga, para que a timeline fique útil
 cedo. Cada conteúdo é processado uma vez (dedup por sha256). Uma foto por vez, num
-único thread, dentro da janela de horário de config.photos.* — pensado para Pi.
+único thread com nice 19, dentro da janela de horário de config.photos.* — pensado
+para Pi. photos.rest_factor descansa entre fotos e photos.max_temp_c pausa com a CPU
+quente; ambos são lidos a cada foto, então valem assim que salvos em /settings.
 
 Miniaturas ficam em <volume>/_thumbs/; se o original está cifrado, a miniatura
 também é cifrada (é tão pessoal quanto a foto).
@@ -31,6 +33,8 @@ from sqlalchemy.orm import Session
 import config
 import crypto
 import storage
+import sysmetrics
+from auth import is_admin
 from cache_state import invalidate_activity
 from database import (BackupID, BackupVersion, FileContent, MaintenanceJob, MediaInfo, User,
                       VersionFile, TRASHED_STATUS)
@@ -66,6 +70,16 @@ def kind_of(name: str) -> str | None:
     if ext in VIDEO_EXT:
         return "video"
     return None
+
+
+# Pastas "ocultas": o álbum Hidden do iCloud Photos (o rclone usa o nome em inglês;
+# os demais são o que um export manual em PT-BR costuma ter) e pastas com ponto.
+HIDDEN_FOLDERS = {"hidden", "ocultas", "ocultos", "oculta", "oculto"}
+
+
+def in_hidden_folder(rel: str) -> bool:
+    return any(seg.lower() in HIDDEN_FOLDERS or seg.startswith(".")
+               for seg in rel.split("/")[:-1] if seg)
 
 
 def media_path_filter():
@@ -359,6 +373,10 @@ def pause_reason() -> str | None:
     if not in_window():
         return (f"fora da janela {config.get('photos.window_start_hour'):02d}h–"
                 f"{config.get('photos.window_end_hour'):02d}h")
+    limit = config.get("photos.max_temp_c")
+    temp = (sysmetrics.snapshot() or {}).get("temp_c")
+    if limit and temp is not None and temp >= limit:
+        return f"CPU a {temp:.0f}°C (limite {limit}°C)"
     return None
 
 
@@ -369,6 +387,8 @@ class Indexer:
     progresso a cada lote — a indexação aparece na Atividade como os outros jobs."""
 
     INTERVAL = 600
+    HOT_RECHECK = 60     # pausado por temperatura: reavalia logo, não em 10 min
+    MAX_REST = 300
     RESCAN_EVERY = 6 * 3600
 
     def __init__(self):
@@ -402,10 +422,22 @@ class Indexer:
     def wake(self) -> None:
         self._wake.set()
 
+    def _rest(self, worked: float) -> None:
+        # Lido a cada item: mudar em /settings vale já na próxima foto.
+        factor = config.get("photos.rest_factor")
+        if factor > 0:
+            self._stop.wait(min(worked * factor, self.MAX_REST))
+
     def _should_continue(self) -> bool:
         return not self._stop.is_set() and pause_reason() is None
 
     def _loop(self, session_factory) -> None:
+        try:
+            # Prioridade mínima só para este thread (no Linux, setpriority com o TID);
+            # ffmpeg/ffprobe herdam o nice ao serem disparados daqui.
+            os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 19)
+        except (AttributeError, OSError) as exc:
+            log.warning(f"[photos] nao foi possivel baixar a prioridade do indexador: {exc}")
         self._stop.wait(30)  # deixa o boot terminar antes de disputar disco/banco
         # Sobras de um processamento interrompido (queda de energia, kill). Só este
         # thread escreve em .tmp, então antes do primeiro ciclo é seguro apagar tudo.
@@ -424,7 +456,8 @@ class Indexer:
                     self.run_once(session_factory)
                 except Exception:  # o loop não pode morrer
                     log.exception("[photos] ciclo de indexacao falhou")
-            self._wake.wait(self.INTERVAL)
+            hot = reason is not None and reason.startswith("CPU a ")
+            self._wake.wait(self.HOT_RECHECK if hot else self.INTERVAL)
             self._wake.clear()
 
     def run_once(self, session_factory, should_continue=None) -> int:
@@ -493,12 +526,14 @@ class Indexer:
                         if not should_continue():
                             stopped = pause_reason() or "servidor encerrando"
                             break
+                        t_item = time.monotonic()
                         if process_one(db, sha256, path.rsplit("/", 1)[-1]):
                             self.processed += 1
                         else:
                             self.failed += 1
                             failed += 1
                         done += 1
+                        self._rest(time.monotonic() - t_item)
                     bump_generation()
                     progress()
                 if stopped:
@@ -570,6 +605,14 @@ def timeline(db: Session, user: User) -> list[dict]:
                 .outerjoin(MediaInfo, MediaInfo.sha256 == VersionFile.sha256)
                 .filter(VersionFile.version_id.in_(list(by_vid)), media_path_filter())
                 .all())
+        # Uma foto oculta no iCloud pode aparecer também em outro álbum: o conteúdo
+        # inteiro conta como oculto, não só a cópia que está na pasta Hidden.
+        hidden_shas = set()
+        for r in rows:
+            label, base = by_vid[r.version_id]
+            rel = r.original_path[len(base):] if r.original_path.startswith(base) else r.original_path
+            if in_hidden_folder(rel):
+                hidden_shas.add(r.sha256)
         seen: set[str] = set()
         for r in rows:
             if r.sha256 in seen:
@@ -591,6 +634,7 @@ def timeline(db: Session, user: User) -> list[dict]:
                 "w": r.width, "h": r.height, "duration": r.duration,
                 "thumb": bool(r.thumb_sm), "state": state,
                 "label": label, "path": rel, "name": name,
+                "hidden": r.sha256 in hidden_shas,
             })
         items = pair_live_photos(items)
         items.sort(key=lambda x: (x["ts"], x["id"]), reverse=True)
@@ -640,6 +684,10 @@ def pair_live_photos(items: list[dict]) -> list[dict]:
     return [it for it in items if it["id"] not in absorbed]
 
 
+def visible(items: list[dict], show_hidden: bool) -> list[dict]:
+    return items if show_hidden else [i for i in items if not i["hidden"]]
+
+
 def page(items: list[dict], before_ts: float | None, before_id: int | None, limit: int) -> list[dict]:
     """Página keyset: itens estritamente "depois" de (before_ts, before_id) na ordem desc."""
     if before_ts is None:
@@ -675,7 +723,7 @@ def indexing_status(items: list[dict]) -> dict:
 
 
 def thumb_visible_to(db: Session, user: User, sha256: str) -> bool:
-    if user.role == "admin":
+    if is_admin(user):
         return True
     return db.query(exists().where(and_(
         VersionFile.sha256 == sha256,

@@ -67,13 +67,6 @@
   .small-restore:hover{border-color:var(--green);color:var(--green)}
   .result-ts{display:block;font-size:9px;color:var(--text-mute);margin-top:4px}
 
-  /* login overlay */
-  #loginOverlay{position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:500;display:none;place-items:center}
-  #loginOverlay.visible{display:grid}
-  .login-box{background:var(--bg2);border:1px solid var(--border);padding:32px;width:340px}
-  .login-title{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--text);margin-bottom:6px}
-  .login-sub{font-size:10px;color:var(--text-mute);margin-bottom:20px}
-  .login-error{font-size:10px;color:var(--red);margin-bottom:12px;display:none}
   .login-error.visible{display:block}
   .login-input{width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:12px;padding:9px 12px;outline:none;margin-bottom:12px}
   .login-input:focus{border-color:var(--amber)}
@@ -151,13 +144,17 @@
 </head>
 <body data-admin-page>
 
-<div id="loginOverlay">
+<!-- Login overlay (padrão do app.js: área admin, guarda em nvAdminKey) -->
+<div class="login-overlay" id="loginOverlay" style="display:none">
   <div class="login-box">
-    <div class="login-title">NestVault</div>
+    <div class="login-title">◈ NestVault</div>
     <div class="login-sub">Informe a API Key para continuar</div>
-    <div class="login-error" id="loginError"></div>
-    <input class="login-input" type="password" id="loginInput" placeholder="API Key" autocomplete="current-password">
-    <button class="login-btn" onclick="submitLogin()">Entrar</button>
+    <form id="loginForm">
+      <label class="login-label" for="apiKeyInput">API Key</label>
+      <input class="login-input" id="apiKeyInput" type="password" placeholder="sua-api-key-aqui" autocomplete="off">
+      <button class="login-btn" type="submit">Entrar →</button>
+      <div class="login-error" id="loginError"></div>
+    </form>
   </div>
 </div>
 
@@ -1489,32 +1486,14 @@ async function runMigrate() {
   }
 }
 
-// -- Auth / theme -------------------------------------------------------------
-function showLogin(msg) {
-  document.getElementById('loginError').textContent = msg || '';
-  document.getElementById('loginError').classList.toggle('visible', !!msg);
-  document.getElementById('loginOverlay').classList.add('visible');
-  setTimeout(() => document.getElementById('loginInput').focus(), 50);
-}
-
-function submitLogin() {
-  const key = document.getElementById('loginInput').value.trim();
-  if (!key) return;
-  API_KEY = key;
-  localStorage.setItem('backupApiKey', key);
-  document.getElementById('loginOverlay').classList.remove('visible');
-  document.getElementById('loginInput').value = '';
-  loadLabels();
-  loadReassignUsers();
-}
-
-document.getElementById('loginInput').addEventListener('keydown', e => { if (e.key === 'Enter') submitLogin(); });
-document.getElementById('logoutBtn').addEventListener('click', () => showLogin(''));
+// -- Auth -----------------------------------------------------------------------
+// Login, "Sair do admin" e a chave de admin (nvAdminKey) são o fluxo padrão do
+// app.js; depois do login ele chama load() (via _nvRefresh).
+function load() { loadLabels(); loadReassignUsers(); }
 
 // init
 document.getElementById('cleanupdate-before').max = new Date().toISOString().split('T')[0];
-if (!API_KEY) { showLogin(''); }
-else          { loadLabels(); loadReassignUsers(); }
+if (API_KEY) load();  // sem chave, o nvGuardAdmin do app.js já abre o login
 </script>
 <script src="/static/nav.js"></script>
 </body>

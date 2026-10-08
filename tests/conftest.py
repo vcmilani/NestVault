@@ -27,6 +27,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.pool import NullPool
 from sqlalchemy.orm import sessionmaker
 
+import auth as auth_mod
 import config as config_mod
 import database as db_mod
 import main as m
@@ -122,6 +123,7 @@ def _reset_module_caches():
     cloud_tree._base_cache.clear()
     cloud_media._timeline_cache.clear()
     cloud_media.indexer._scanned.clear()
+    auth_mod._pin_fails.clear()
 
 
 @pytest.fixture

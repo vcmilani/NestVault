@@ -214,7 +214,17 @@ SCHEMA: list[Field] = [
     Field("photos.indexing_enabled", None, "bool", True,
           "Indexar fotos e vídeos",
           "Gera miniaturas e lê a data de captura (EXIF) para a página Fotos. Roda em "
-          "segundo plano, uma foto por vez."),
+          "segundo plano, uma foto por vez e com prioridade baixa de CPU (nice 19)."),
+    Field("photos.rest_factor", None, "float", 1.0,
+          "Descanso entre fotos",
+          "Para cada segundo trabalhando, o indexador descansa N segundos. 0 = velocidade "
+          "máxima; 1 = metade da CPU de um núcleo; 4 = ~20%. Vale na hora.",
+          min=0, max=20),
+    Field("photos.max_temp_c", None, "int", 0,
+          "Pausar acima de (°C)",
+          "Se a temperatura da CPU chegar a este valor, a indexação espera esfriar. "
+          "0 = desligado.",
+          min=0, max=100),
     Field("photos.window_start_hour", None, "int", 0,
           "Início da janela de indexação",
           "Hora local em que a indexação pode começar. Igual ao fim = o dia todo.",

@@ -12,12 +12,14 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from auth import (SESSION_COOKIE, SESSION_TTL, get_current_user, get_user_header_or_cookie,
-                  make_session_token, require_owner_or_admin)
+from auth import (HIDDEN_COOKIE, HIDDEN_TTL, SESSION_COOKIE, SESSION_TTL, effective_role,
+                  get_current_user, get_user_header_or_cookie, hidden_unlocked,
+                  make_hidden_token, make_session_token, pin_locked_for,
+                  register_pin_attempt, require_owner_or_admin)
 import crypto
 import storage
 from database import (BackupID, BackupVersion, FileContent, MediaInfo, User, VersionFile, get_db,
-                      TRASHED_STATUS)
+                      TRASHED_STATUS, check_pin)
 from . import content, media, tree
 
 router = APIRouter()
@@ -32,19 +34,21 @@ def _is_https(request: Request) -> bool:
 
 
 @router.post("/session")
-def create_session(request: Request, response: Response, user: User = Depends(get_current_user)):
-    """Troca a API key (header) por um cookie HttpOnly — usado por <img>/<video>."""
-    response.set_cookie(SESSION_COOKIE, make_session_token(user), max_age=SESSION_TTL,
+def create_session(request: Request, response: Response, db: Session = Depends(get_db),
+                   user: User = Depends(get_current_user)):
+    """Troca a API key (header) por um cookie HttpOnly — usado por <img>/<video>.
+    O cookie herda o escopo da chave: aberto com chave de cliente, não é admin."""
+    response.set_cookie(SESSION_COOKIE, make_session_token(db, user), max_age=SESSION_TTL,
                         httponly=True, samesite="strict", secure=_is_https(request), path="/")
-    log.info(f"[cloud] sessao aberta para {user.username}")
-    return {"username": user.username, "role": user.role}
+    log.info(f"[cloud] sessao aberta para {user.username} (chave {user.key_scope})")
+    return {"username": user.username, "role": effective_role(user), "scope": user.key_scope}
 
 
 @router.get("/me")
 def get_me(user: User = Depends(get_user_header_or_cookie)):
     """Quem é o dono da chave/sessão — as páginas usam o role para decidir o que
-    mostrar (usuário comum só navega entre Fotos e Cloud)."""
-    return {"username": user.username, "role": user.role}
+    mostrar. É o papel EFETIVO: a chave de cliente de um admin responde "user"."""
+    return {"username": user.username, "role": effective_role(user), "scope": user.key_scope}
 
 
 @router.delete("/session")
@@ -141,14 +145,29 @@ def get_content(file_id: int, request: Request, download: bool = False,
 
 # -- Fotos --------------------------------------------------------------------
 
+# Detail fixo: o front reconhece este 403 e volta a esconder as ocultas.
+PIN_REQUIRED = "PIN necessario"
+
+
+def _check_hidden(request: Request, user: User, show_hidden: bool) -> None:
+    """show_hidden de quem tem PIN exige o cookie de desbloqueio (POST /photos/unlock)."""
+    if show_hidden and not hidden_unlocked(request, user):
+        raise HTTPException(403, PIN_REQUIRED)
+
+
 @router.get("/photos")
-def get_photos(before_ts: Optional[float] = None, before_id: Optional[int] = None,
+def get_photos(request: Request,
+               before_ts: Optional[float] = None, before_id: Optional[int] = None,
                limit: int = Query(200, ge=1, le=1000),
+               show_hidden: bool = False,
                db: Session = Depends(get_db),
                user: User = Depends(get_user_header_or_cookie)):
     """Timeline de fotos e vídeos de todos os backups do usuário (última versão de
-    cada um), mais recentes primeiro. Paginação keyset por (before_ts, before_id)."""
-    items = media.timeline(db, user)
+    cada um), mais recentes primeiro. Paginação keyset por (before_ts, before_id).
+    Fotos em pastas ocultas (álbum Hidden do iCloud etc.) só com show_hidden — e,
+    se o usuário tem PIN, só depois de desbloquear."""
+    _check_hidden(request, user, show_hidden)
+    items = media.visible(media.timeline(db, user), show_hidden)
     chunk = media.page(items, before_ts, before_id, limit)
     nxt = None
     if chunk and len(chunk) == limit:
@@ -157,15 +176,57 @@ def get_photos(before_ts: Optional[float] = None, before_id: Optional[int] = Non
 
 
 @router.get("/photos/months")
-def get_photo_months(db: Session = Depends(get_db),
+def get_photo_months(request: Request, show_hidden: bool = False,
+                     db: Session = Depends(get_db),
                      user: User = Depends(get_user_header_or_cookie)):
-    return media.months(media.timeline(db, user))
+    _check_hidden(request, user, show_hidden)
+    return media.months(media.visible(media.timeline(db, user), show_hidden))
 
 
 @router.get("/photos/indexing")
-def get_indexing(db: Session = Depends(get_db),
+def get_indexing(request: Request, show_hidden: bool = False,
+                 db: Session = Depends(get_db),
                  user: User = Depends(get_user_header_or_cookie)):
-    return media.indexing_status(media.timeline(db, user))
+    _check_hidden(request, user, show_hidden)
+    items = media.timeline(db, user)
+    status = media.indexing_status(media.visible(items, show_hidden))
+    status["hidden"] = sum(1 for i in items if i["hidden"])
+    status["pin_required"] = bool(user.hidden_pin_hash)
+    status["unlocked"] = hidden_unlocked(request, user)
+    return status
+
+
+class PinUnlock(BaseModel):
+    pin: str
+
+
+@router.post("/photos/unlock")
+def unlock_hidden(req: PinUnlock, request: Request, response: Response,
+                  user: User = Depends(get_current_user)):
+    """Confere o PIN das ocultas e emite o cookie de desbloqueio (HIDDEN_TTL).
+    Escrita: exige o header X-API-Key, como as outras. Erros seguidos bloqueiam
+    por alguns minutos (429)."""
+    if not user.hidden_pin_hash:
+        return {"unlocked_until": None}
+    wait = pin_locked_for(user)
+    if wait:
+        raise HTTPException(429, f"Muitas tentativas — tente de novo em {wait}s")
+    ok = check_pin(req.pin, user.hidden_pin_hash)
+    register_pin_attempt(user, ok)
+    if not ok:
+        log.info(f"[photos] {user.username}: PIN das ocultas incorreto")
+        raise HTTPException(403, "PIN incorreto")
+    token, exp = make_hidden_token(user)
+    response.set_cookie(HIDDEN_COOKIE, token, max_age=HIDDEN_TTL, httponly=True,
+                        samesite="strict", secure=_is_https(request), path="/")
+    log.info(f"[photos] {user.username}: ocultas desbloqueadas por {HIDDEN_TTL // 60} min")
+    return {"unlocked_until": exp}
+
+
+@router.delete("/photos/unlock")
+def lock_hidden(response: Response):
+    response.delete_cookie(HIDDEN_COOKIE, path="/")
+    return {"ok": True}
 
 
 @router.get("/photos/labels")
@@ -177,6 +238,22 @@ def get_photo_labels(db: Session = Depends(get_db),
 
 class PhotoLabelUpdate(BaseModel):
     enabled: bool
+
+
+@router.put("/photos/labels")
+def set_all_photo_labels(req: PhotoLabelUpdate, db: Session = Depends(get_db),
+                         user: User = Depends(get_current_user)):
+    """Marca/desmarca de uma vez todos os backups do próprio usuário na galeria."""
+    labels = (db.query(BackupID)
+              .filter(BackupID.owner_user_id == user.id, tree.live_label_filter()).all())
+    for b in labels:
+        b.photos_enabled = req.enabled
+    db.commit()
+    log.info(f"[photos] {user.username}: todos os {len(labels)} backup(s) "
+             f"{'incluidos na' if req.enabled else 'removidos da'} galeria")
+    if req.enabled:
+        media.indexer.wake()
+    return {"enabled": req.enabled, "count": len(labels)}
 
 
 @router.put("/photos/labels/{label}")

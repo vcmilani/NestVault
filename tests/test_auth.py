@@ -2,6 +2,9 @@
 e que endpoints administrativos exigem role=admin."""
 import pytest
 
+from fastapi.testclient import TestClient
+
+import main as m
 from conftest import ADMIN_KEY
 
 
@@ -115,3 +118,57 @@ def test_admin_can_deactivate_another_admin_while_one_remains(client):
     # Reativar não passa pela trava.
     assert client.patch(f"/users/{admin2_id}", json={"is_active": True}).status_code == 200
 
+
+
+# -- Papel e exclusão ---------------------------------------------------------
+
+def test_promote_and_demote_user(two_users):
+    admin, alice, _bob = two_users
+    alice_id = _user_id(admin, "alice")
+    assert alice.get("/users").status_code == 403
+
+    r = admin.patch(f"/users/{alice_id}", json={"role": "admin"})
+    assert r.status_code == 200 and r.json()["role"] == "admin"
+    assert alice.get("/users").status_code == 200
+    assert r.json()["is_active"] is True  # PATCH parcial não mexe no que não veio
+
+    assert admin.patch(f"/users/{alice_id}", json={"role": "user"}).status_code == 200
+    assert alice.get("/users").status_code == 403
+
+
+def test_admin_cannot_change_own_role(client):
+    r = client.patch(f"/users/{_user_id(client, 'admin')}", json={"role": "user"})
+    assert r.status_code == 409
+    assert client.get("/users").status_code == 200
+
+
+def test_delete_user_requires_reassigning_live_backups(two_users):
+    admin, alice, _bob = two_users
+    alice_id = _user_id(admin, "alice")
+    admin_id = _user_id(admin, "admin")
+    assert alice.post("/backups", json={"label": "alice-docs"}).status_code in (200, 201)
+    key = admin.post(f"/users/{alice_id}/keys", json={"name": "Mac"}).json()
+
+    r = admin.delete(f"/users/{alice_id}")
+    assert r.status_code == 409 and "alice-docs" in r.json()["detail"]
+
+    assert admin.patch("/backups/alice-docs/owner", json={"owner_user_id": admin_id}).status_code == 200
+    assert admin.delete(f"/users/{alice_id}").status_code == 200
+    assert "alice" not in {u["username"] for u in admin.get("/users").json()}
+    assert alice.get("/backups").status_code == 401
+    client_key = TestClient(m.app)
+    client_key.headers.update({"X-API-Key": key["api_key"]})
+    assert client_key.get("/backups").status_code == 401
+    assert admin.get("/backups/alice-docs").status_code == 200
+
+
+def test_admin_cannot_delete_self_and_404(client):
+    assert client.delete(f"/users/{_user_id(client, 'admin')}").status_code == 409
+    assert client.delete("/users/9999").status_code == 404
+
+
+def test_regular_user_cannot_delete_or_promote(two_users):
+    admin, alice, _bob = two_users
+    bob_id = _user_id(admin, "bob")
+    assert alice.delete(f"/users/{bob_id}").status_code == 403
+    assert alice.patch(f"/users/{_user_id(admin, 'alice')}", json={"role": "admin"}).status_code == 403

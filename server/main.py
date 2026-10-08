@@ -164,7 +164,7 @@ from sqlalchemy.exc import IntegrityError
 from database import (
     init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy,
     VersionFile, MaintenanceJob, SsdCachePendingMove, RcloneBackupJob, DiskSnapshot,
-    DiskUsageDaily, User, hash_api_key, bootstrap_admin_user, TRASHED_STATUS,
+    DiskUsageDaily, User, ApiKey, hash_api_key, hash_pin, bootstrap_admin_user, TRASHED_STATUS,
 )
 import config
 import crypto
@@ -175,7 +175,8 @@ import version_diff
 # é mantido: cada sha256 é commitado individualmente, sem commit final agregado.
 from nightly_cleanup import _cleanup_orphan_contents as _cleanup_orphan_contents_no_commit
 from nightly_cleanup import orphan_filter as _orphan_filter
-from auth import get_current_user, require_admin, require_owner_or_admin
+from auth import (get_current_user, is_admin, require_admin, require_owner_or_admin,
+                  reset_pin_attempts)
 from cloud.rclone_router import router as rclone_router
 from cloud_ui import router as cloud_ui_router
 from cloud_ui import media as cloud_media
@@ -664,8 +665,15 @@ class UserCreate(BaseModel):
     username: str = Field(..., min_length=1, max_length=64)
     role: Literal["admin", "user"] = "user"
 
-class UserActiveUpdate(BaseModel):
-    is_active: bool
+class UserUpdate(BaseModel):
+    is_active: Optional[bool] = None
+    role: Optional[Literal["admin", "user"]] = None
+
+class HiddenPinSet(BaseModel):
+    pin: str = Field(..., pattern=r"^\d{4,8}$", description="4 a 8 digitos")
+
+class ApiKeyCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=64, description="Onde a chave vai ser usada, ex.: MacBook")
 
 class VersionCreate(BaseModel):
     version_key: str = Field(..., description="ISO datetime: 2026-04-25T10:42:31")
@@ -746,6 +754,7 @@ class SettingsUpdate(BaseModel):
     db_backup: Optional[dict] = None
     digest:    Optional[dict] = None
     rclone:    Optional[dict] = None
+    photos:    Optional[dict] = None
     confirm_encryption_change: bool = False
 
 
@@ -816,6 +825,7 @@ class UserInfo(BaseModel):
     role: str
     is_active: bool
     created_at: str
+    has_hidden_pin: bool = False
 
 class UserCreatedResponse(BaseModel):
     user: UserInfo
@@ -823,6 +833,17 @@ class UserCreatedResponse(BaseModel):
 
 class UserKeyRotatedResponse(BaseModel):
     user: UserInfo
+    api_key: str = Field(..., description="Exibida uma unica vez — nao e recuperavel depois")
+
+class ApiKeyInfo(BaseModel):
+    id: int
+    name: str
+    scope: str
+    created_at: str
+    last_used_at: Optional[str] = None
+
+class ApiKeyCreatedResponse(BaseModel):
+    key: ApiKeyInfo
     api_key: str = Field(..., description="Exibida uma unica vez — nao e recuperavel depois")
 
 class VersionInfo(BaseModel):
@@ -2950,7 +2971,7 @@ def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db
                   user: User = Depends(get_current_user)):
     """Lista backups com stats — 4 queries fixas independente de N (sem N+1)."""
     q = db.query(BackupID).filter(_live_label_filter()).order_by(BackupID.created_at.desc())
-    if user.role != "admin":
+    if not is_admin(user):
         q = q.filter(BackupID.owner_user_id == user.id)
     if client_name:
         q = q.filter(BackupID.client_name == client_name)
@@ -3100,7 +3121,8 @@ def all_backup_disk_summary(db: Session = Depends(get_db)):
 # -- Users (admin) --------------------------------------------------------------
 def _user_info(u: User) -> UserInfo:
     return UserInfo(id=u.id, username=u.username, role=u.role,
-                     is_active=u.is_active, created_at=str(u.created_at))
+                     is_active=u.is_active, created_at=str(u.created_at),
+                     has_hidden_pin=bool(u.hidden_pin_hash))
 
 
 @app.post("/users", response_model=UserCreatedResponse, dependencies=[Depends(require_admin)])
@@ -3132,23 +3154,117 @@ def rotate_user_key(user_id: int, db: Session = Depends(get_db)):
     return UserKeyRotatedResponse(user=_user_info(u), api_key=api_key)
 
 
-@app.patch("/users/{user_id}", response_model=UserInfo)
-def update_user_active(user_id: int, req: UserActiveUpdate, db: Session = Depends(get_db),
-                       admin: User = Depends(require_admin)):
+# Chaves de cliente: mesmo usuário (mesmos backups), sem poderes de admin. É o que
+# vai no CLI/PWA de um admin, para a chave principal ficar só no navegador.
+def _api_key_info(k: ApiKey) -> ApiKeyInfo:
+    return ApiKeyInfo(id=k.id, name=k.name, scope=k.scope, created_at=str(k.created_at),
+                      last_used_at=str(k.last_used_at) if k.last_used_at else None)
+
+
+def _user_or_404(db: Session, user_id: int) -> User:
     u = db.query(User).filter(User.id == user_id).first()
     if not u:
         raise HTTPException(404, "Usuario nao encontrado")
-    if not req.is_active and u.id == admin.id:
+    return u
+
+
+@app.get("/users/{user_id}/keys", response_model=list[ApiKeyInfo], dependencies=[Depends(require_admin)])
+def list_user_keys(user_id: int, db: Session = Depends(get_db)):
+    _user_or_404(db, user_id)
+    return [_api_key_info(k) for k in
+            db.query(ApiKey).filter(ApiKey.user_id == user_id).order_by(ApiKey.created_at.asc()).all()]
+
+
+@app.post("/users/{user_id}/keys", response_model=ApiKeyCreatedResponse, dependencies=[Depends(require_admin)])
+def create_user_key(user_id: int, req: ApiKeyCreate, db: Session = Depends(get_db)):
+    u = _user_or_404(db, user_id)
+    api_key = secrets.token_urlsafe(32)
+    k = ApiKey(user_id=u.id, name=req.name.strip(), scope="client", key_hash=hash_api_key(api_key))
+    db.add(k); db.commit(); db.refresh(k)
+    log.info(f"[users] Chave de cliente '{k.name}' criada para '{u.username}'")
+    return ApiKeyCreatedResponse(key=_api_key_info(k), api_key=api_key)
+
+
+@app.delete("/users/{user_id}/keys/{key_id}", dependencies=[Depends(require_admin)])
+def revoke_user_key(user_id: int, key_id: int, db: Session = Depends(get_db)):
+    u = _user_or_404(db, user_id)
+    k = db.query(ApiKey).filter(ApiKey.id == key_id, ApiKey.user_id == u.id).first()
+    if not k:
+        raise HTTPException(404, "Chave nao encontrada")
+    db.delete(k); db.commit()
+    log.info(f"[users] Chave de cliente '{k.name}' de '{u.username}' revogada")
+    return {"ok": True}
+
+
+# PIN das fotos ocultas em /photos (ver auth.hidden_unlocked). Só o admin define;
+# trocar ou remover derruba os desbloqueios abertos, porque o hash assina o cookie.
+@app.put("/users/{user_id}/hidden-pin", response_model=UserInfo, dependencies=[Depends(require_admin)])
+def set_hidden_pin(user_id: int, req: HiddenPinSet, db: Session = Depends(get_db)):
+    u = _user_or_404(db, user_id)
+    u.hidden_pin_hash = hash_pin(req.pin)
+    db.commit(); db.refresh(u)
+    reset_pin_attempts(u.id)
+    log.info(f"[users] PIN das fotos ocultas definido para '{u.username}'")
+    return _user_info(u)
+
+
+@app.delete("/users/{user_id}/hidden-pin", response_model=UserInfo, dependencies=[Depends(require_admin)])
+def delete_hidden_pin(user_id: int, db: Session = Depends(get_db)):
+    u = _user_or_404(db, user_id)
+    u.hidden_pin_hash = None
+    db.commit(); db.refresh(u)
+    reset_pin_attempts(u.id)
+    log.info(f"[users] PIN das fotos ocultas removido de '{u.username}'")
+    return _user_info(u)
+
+
+@app.patch("/users/{user_id}", response_model=UserInfo)
+def update_user(user_id: int, req: UserUpdate, db: Session = Depends(get_db),
+                admin: User = Depends(require_admin)):
+    """Ativa/desativa e/ou troca o papel. A trava em mudar a PRÓPRIA conta basta
+    para nunca zerar os admins ativos: quem chama é sempre um admin ativo, então
+    desativar ou rebaixar OUTRA conta ainda deixa pelo menos quem chamou."""
+    u = _user_or_404(db, user_id)
+    if req.is_active is False and u.id == admin.id:
         # Sem esta trava o admin podia desativar a própria conta — e, sendo o
         # único, não havia volta pela API: o bootstrap por BACKUP_API_KEY só roda
-        # com a tabela de usuários vazia. Ela basta para nunca zerar os admins
-        # ativos: quem chama é sempre um admin ativo, então desativar OUTRA conta
-        # ainda deixa pelo menos quem chamou.
+        # com a tabela de usuários vazia.
         raise HTTPException(409, "Voce nao pode desativar a propria conta — peca a outro admin")
-    u.is_active = req.is_active
+    if req.role is not None and req.role != u.role and u.id == admin.id:
+        raise HTTPException(409, "Voce nao pode mudar o proprio papel — peca a outro admin")
+    if req.is_active is not None and req.is_active != u.is_active:
+        u.is_active = req.is_active
+        log.info(f"[users] Usuario '{u.username}' {'ativado' if u.is_active else 'desativado'}")
+    if req.role is not None and req.role != u.role:
+        log.info(f"[users] Usuario '{u.username}' passou de {u.role} para {req.role}")
+        u.role = req.role
     db.commit(); db.refresh(u)
-    log.info(f"[users] Usuario '{u.username}' {'ativado' if u.is_active else 'desativado'}")
     return _user_info(u)
+
+
+@app.delete("/users/{user_id}")
+def delete_user(user_id: int, db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    """Exclui o usuário e as chaves de cliente dele. Recusa (409) enquanto ele for
+    dono de algum backup vivo — reatribua antes (PATCH /backups/{label}/owner), para
+    nenhum backup ficar órfão sem querer. Labels dele já na lixeira ficam sem dono
+    (só admin enxerga) até a limpeza noturna apagá-los."""
+    u = _user_or_404(db, user_id)
+    if u.id == admin.id:
+        raise HTTPException(409, "Voce nao pode excluir a propria conta — peca a outro admin")
+    live = (db.query(BackupID.label)
+            .filter(BackupID.owner_user_id == u.id, _live_label_filter())
+            .order_by(BackupID.label).all())
+    if live:
+        labels = ", ".join(r.label for r in live[:5]) + ("..." if len(live) > 5 else "")
+        raise HTTPException(409, f"'{u.username}' ainda e dono de {len(live)} backup(s) ({labels}) — "
+                                 f"reatribua em Manutencao antes de excluir")
+    trashed = (db.query(BackupID).filter(BackupID.owner_user_id == u.id)
+               .update({"owner_user_id": None}, synchronize_session=False))
+    keys = db.query(ApiKey).filter(ApiKey.user_id == u.id).delete(synchronize_session=False)
+    db.delete(u); db.commit()
+    log.info(f"[users] Usuario '{u.username}' excluido ({keys} chave(s) de cliente revogada(s), "
+             f"{trashed} backup(s) na lixeira sem dono)")
+    return {"ok": True}
 
 
 @app.patch("/backups/{label}/owner", response_model=BackupInfo, dependencies=[Depends(require_admin)])
@@ -3252,7 +3368,7 @@ def delete_backup(label: str, background_tasks: BackgroundTasks, db: Session = D
     version_ids = [
         r.id for r in db.query(BackupVersion.id).filter(BackupVersion.backup_label == label).all()
     ]
-    if user.role != "admin":
+    if not is_admin(user):
         now = datetime.now()
         n = _trash_versions(db, version_ids, user, now)
         b.status, b.trashed_at, b.trashed_by = TRASHED_STATUS, now, user.id
@@ -3298,6 +3414,8 @@ def update_settings(req: SettingsUpdate, db: Session = Depends(get_db)):
         raise HTTPException(400, str(e))
     if changed:
         log.info(f"[settings] {len(changed)} parametro(s) alterado(s): {', '.join(sorted(changed))}")
+        if any(k.startswith("photos.") for k in changed):
+            cloud_media.indexer.wake()  # reavalia pausa/ritmo já, sem esperar o ciclo de 10 min
     return config.public()
 
 
@@ -3467,7 +3585,7 @@ def absorb_version(label: str, version_key: str, req: AbsorbRequest, db: Session
 def delete_version(label: str, version_key: str, background_tasks: BackgroundTasks,
                     db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     v = _get_version_or_404(label, version_key, db, user)
-    if user.role != "admin":
+    if not is_admin(user):
         now = datetime.now()
         _trash_versions(db, [v.id], user, now)
         db.commit()
@@ -3508,7 +3626,7 @@ def _content_visible_to_user(db: Session, user: User, sha256s: set[str]) -> set[
     a partir dos bytes efetivamente recebidos, então quem envia já provou posse por
     definição — só o atalho "cite o hash e pule o envio" precisa de posse prévia.
     """
-    if not sha256s or user.role == "admin":
+    if not sha256s or is_admin(user):
         return set(sha256s)
     # Semi-join dirigido pela lista de hashes, não DISTINCT sobre o join. A forma
     # anterior obrigava o banco a materializar TODA linha de version_files casada
@@ -4662,7 +4780,7 @@ def cleanup_versions(label: str, req: CleanupRequest, background_tasks: Backgrou
     ids_to_delete = [v[0] for v in to_delete]
     keys_removed  = [v[2] for v in to_delete]
 
-    if user.role != "admin":
+    if not is_admin(user):
         now = datetime.now()
         _trash_versions(db, ids_to_delete, user, now)
         db.commit()

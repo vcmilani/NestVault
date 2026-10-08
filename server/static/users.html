@@ -48,7 +48,19 @@
   .td-r{text-align:right}
   .td-dim{color:var(--text-dim)}
   .td-nb{white-space:nowrap}
-  .td-actions{display:flex;gap:8px;justify-content:flex-end}
+  .td-actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}
+
+  .new-user-hint{font-size:11px;color:var(--text-dim);line-height:1.6;margin-top:10px}
+  tbody tr.keys-row{border-bottom:1px solid var(--border)}
+  tbody tr.keys-row:hover{background:none}
+  tr.has-keys{border-bottom:none}
+  .keys-cell{padding:0 14px 10px 28px}
+  .keys-list{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  .keys-label{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim)}
+  .key-chip{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--border);background:var(--bg2);padding:3px 4px 3px 10px;font-size:11px}
+  .key-chip-used{color:var(--text-dim)}
+  .key-chip button{background:none;border:none;color:var(--text-dim);font-family:var(--mono);font-size:12px;cursor:pointer;padding:2px 6px}
+  .key-chip button:hover{color:var(--red)}
 </style>
 </head>
 <body data-admin-page>
@@ -116,6 +128,32 @@
     <div class="form-error" id="createError"></div>
   </div>
 
+  <div class="new-user-card">
+    <div class="new-user-title">Nova chave de cliente</div>
+    <div class="form-row">
+      <span class="form-label">Usuário</span>
+      <select class="op-select" id="keyUser"></select>
+      <span class="form-label">Nome</span>
+      <input class="op-input" id="keyName" placeholder="ex: MacBook" autocomplete="off" maxlength="64">
+      <button class="run-btn" id="createKeyBtn" onclick="createKey()">＋ Criar chave</button>
+    </div>
+    <div class="form-error" id="createKeyError"></div>
+    <div class="new-user-hint">A chave de cliente entra como o mesmo usuário, com os mesmos backups, mas <b>nunca tem poderes de admin</b>. Use uma dessas no CLI e no celular, uma por aparelho, e deixe a chave principal de um admin só no navegador. Girar a chave principal não afeta as chaves de cliente.</div>
+  </div>
+
+  <div class="new-user-card">
+    <div class="new-user-title">PIN das fotos ocultas</div>
+    <div class="form-row">
+      <span class="form-label">Usuário</span>
+      <select class="op-select" id="pinUser"></select>
+      <span class="form-label">PIN</span>
+      <input class="op-input" id="pinValue" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" placeholder="4 a 8 dígitos" autocomplete="new-password">
+      <button class="run-btn" id="setPinBtn" onclick="setHiddenPin()">🔒 Definir PIN</button>
+    </div>
+    <div class="form-error" id="setPinError"></div>
+    <div class="new-user-hint">Com PIN, as fotos de pastas ocultas (álbum Hidden do iCloud etc.) só aparecem em Fotos depois de digitar o PIN, e o desbloqueio vale por 15 minutos. Definir de novo troca o PIN e encerra os desbloqueios abertos. O drive Cloud não muda.</div>
+  </div>
+
   <div class="table-wrap">
     <div id="usersContainer"><div class="loading">Carregando</div></div>
   </div>
@@ -138,6 +176,7 @@
 <script src="/static/app.js"></script>
 <script>
   let _users = [];
+  let _keys = {};  // user_id -> [chaves de cliente]
 
   function copyKey() {
     const el = document.getElementById('keyRevealValue');
@@ -161,7 +200,11 @@
       if (r.status === 403) { nvNotAdmin(); container.innerHTML = ''; return; }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       _users = await r.json();
+      const lists = await Promise.all(_users.map(u =>
+        fetch(`/users/${u.id}/keys`, {headers: H()}).then(k => k.ok ? k.json() : []).catch(() => [])));
+      _keys = Object.fromEntries(_users.map((u, i) => [u.id, lists[i]]));
       renderUsers();
+      renderKeyUserSelect();
       nvMarkUpdated();
     } catch(e) {
       showError('Não foi possível conectar: '+e.message);
@@ -175,19 +218,32 @@
       container.innerHTML = '<div class="empty">Nenhum usuário cadastrado</div>';
       return;
     }
-    const rows = _users.map(u => `
-      <tr>
+    const rows = _users.map(u => {
+      const keys = _keys[u.id] || [];
+      const keysRow = keys.length ? `
+      <tr class="keys-row"><td class="keys-cell" colspan="5"><div class="keys-list">
+        <span class="keys-label">Chaves de cliente</span>
+        ${keys.map(k => `<span class="key-chip">${esc(k.name)}
+          <span class="key-chip-used">${k.last_used_at ? 'usada ' + fmtDate(k.last_used_at) : 'nunca usada'}</span>
+          <button title="Revogar" onclick="revokeKey(${u.id}, ${k.id})">✕</button></span>`).join('')}
+      </div></td></tr>` : '';
+      return `
+      <tr${keys.length ? ' class="has-keys"' : ''}>
         <td>${esc(u.username)}</td>
         <td><span class="badge ${u.role === 'admin' ? 'badge-running' : 'badge-active'}">${esc(u.role)}</span></td>
         <td><span class="badge ${u.is_active ? 'badge-active' : 'badge-off'}">${u.is_active ? 'ativo' : 'inativo'}</span></td>
         <td class="td-dim td-nb">${fmtDate(u.created_at)}</td>
         <td class="td-actions">
-          <button class="small-btn" onclick="rotateKey(${u.id}, '${esc(u.username)}')">⟳ Girar chave</button>
+          <button class="small-btn" onclick="rotateKey(${u.id}, '${esc(u.username)}')">⟳ Girar chave principal</button>
           <button class="small-btn ${u.is_active ? 'btn-danger' : ''}" onclick="toggleActive(${u.id}, '${esc(u.username)}', ${!u.is_active})">
             ${u.is_active ? '⏻ Desativar' : '⏻ Reativar'}
           </button>
+          <button class="small-btn" onclick="changeRole(${u.id})">${u.role === 'admin' ? '⇩ Tornar user' : '⇧ Tornar admin'}</button>
+          ${u.has_hidden_pin ? `<button class="small-btn" onclick="removeHiddenPin(${u.id})" title="Fotos ocultas protegidas por PIN — clique para remover">🔒 Remover PIN</button>` : ''}
+          <button class="small-btn btn-danger" onclick="deleteUser(${u.id})">✕ Excluir</button>
         </td>
-      </tr>`).join('');
+      </tr>${keysRow}`;
+    }).join('');
     container.innerHTML = `<table>
       <thead><tr><th>Username</th><th>Papel</th><th>Status</th><th>Criado em</th><th class="td-r">Ações</th></tr></thead>
       <tbody>${rows}</tbody>
@@ -222,10 +278,119 @@
     }
   }
 
+  function renderKeyUserSelect() {
+    for (const id of ['keyUser', 'pinUser']) {
+      const sel = document.getElementById(id);
+      const prev = sel.value;
+      sel.innerHTML = _users.filter(u => u.is_active)
+        .map(u => `<option value="${u.id}">${esc(u.username)}${u.role === 'admin' ? ' (admin)' : ''}${id === 'pinUser' && u.has_hidden_pin ? ' · tem PIN' : ''}</option>`).join('');
+      if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+    }
+  }
+
+  async function setHiddenPin() {
+    const userId = document.getElementById('pinUser').value;
+    const pin = document.getElementById('pinValue').value.trim();
+    const errEl = document.getElementById('setPinError');
+    errEl.textContent = '';
+    if (!userId) { errEl.textContent = 'Escolha um usuário.'; return; }
+    if (!/^\d{4,8}$/.test(pin)) { errEl.textContent = 'O PIN tem de 4 a 8 dígitos.'; return; }
+    const u = _users.find(x => String(x.id) === String(userId));
+    if (u && u.has_hidden_pin) {
+      const ok = await nvConfirm('Trocar PIN',
+        `"${u.username}" já tem PIN nas fotos ocultas. O PIN antigo deixa de valer e os desbloqueios abertos são encerrados.`);
+      if (!ok) return;
+    }
+    const btn = document.getElementById('setPinBtn');
+    btn.disabled = true;
+    try {
+      const r = await fetch(`/users/${userId}/hidden-pin`, {
+        method: 'PUT', headers: {...H(), 'Content-Type': 'application/json'},
+        body: JSON.stringify({pin}),
+      });
+      if (r.status === 401) { showLogin('API Key inválida.'); return; }
+      if (r.status === 403) { nvNotAdmin(); return; }
+      if (!r.ok) { const data = await r.json().catch(() => ({})); errEl.textContent = (typeof data.detail === 'string' && data.detail) || `Erro ${r.status}`; return; }
+      document.getElementById('pinValue').value = '';
+      load();
+    } catch(e) {
+      errEl.textContent = 'Erro de conexão: ' + e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function removeHiddenPin(id) {
+    const u = _users.find(x => x.id === id);
+    if (!u) return;
+    const ok = await nvConfirm('Remover PIN',
+      `As fotos ocultas de "${u.username}" voltam a aparecer em Fotos sem PIN, só com o botão Ocultas.`);
+    if (!ok) return;
+    try {
+      const r = await fetch(`/users/${id}/hidden-pin`, {method: 'DELETE', headers: H()});
+      if (r.status === 401) { showLogin('API Key inválida.'); return; }
+      if (r.status === 403) { nvNotAdmin(); return; }
+      if (!r.ok) { const data = await r.json().catch(() => ({})); showError(data.detail || `Erro ${r.status}`); return; }
+      load();
+    } catch(e) {
+      showError('Erro de conexão: ' + e.message);
+    }
+  }
+
+  async function createKey() {
+    const userId = document.getElementById('keyUser').value;
+    const name = document.getElementById('keyName').value.trim();
+    const errEl = document.getElementById('createKeyError');
+    errEl.textContent = '';
+    if (!userId) { errEl.textContent = 'Escolha um usuário.'; return; }
+    if (!name) { errEl.textContent = 'Dê um nome à chave (onde ela vai ser usada).'; return; }
+
+    const btn = document.getElementById('createKeyBtn');
+    btn.disabled = true;
+    try {
+      const r = await fetch(`/users/${userId}/keys`, {
+        method: 'POST', headers: {...H(), 'Content-Type': 'application/json'},
+        body: JSON.stringify({name}),
+      });
+      if (r.status === 401) { showLogin('API Key inválida.'); return; }
+      if (r.status === 403) { nvNotAdmin(); return; }
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) { errEl.textContent = data.detail || `Erro ${r.status}`; return; }
+      document.getElementById('keyName').value = '';
+      const u = _users.find(x => String(x.id) === String(userId));
+      revealKey(`${u ? u.username : ''} · cliente "${data.key.name}"`, data.api_key);
+      load();
+    } catch(e) {
+      errEl.textContent = 'Erro de conexão: ' + e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function revokeKey(userId, keyId) {
+    // Nomes vêm do estado, não do onclick: um nome com aspas quebraria o atributo.
+    const username = (_users.find(u => u.id === userId) || {}).username || '';
+    const name = ((_keys[userId] || []).find(k => k.id === keyId) || {}).name || '';
+    const ok = await nvConfirm(
+      'Revogar chave de cliente',
+      `A chave "${name}" de "${username}" para de funcionar imediatamente. O aparelho que a usa perde acesso até receber outra chave. As outras chaves do usuário não mudam.`
+    );
+    if (!ok) return;
+    try {
+      const r = await fetch(`/users/${userId}/keys/${keyId}`, {method: 'DELETE', headers: H()});
+      if (r.status === 401) { showLogin('API Key inválida.'); return; }
+      if (r.status === 403) { nvNotAdmin(); return; }
+      if (!r.ok) { const data = await r.json().catch(() => ({})); showError(data.detail || `Erro ${r.status}`); return; }
+      load();
+    } catch(e) {
+      showError('Erro de conexão: ' + e.message);
+    }
+  }
+
   async function rotateKey(id, username) {
     const ok = await nvConfirm(
       'Girar chave de acesso',
-      `Isso invalida a chave atual de "${username}" imediatamente. Qualquer cliente usando a chave antiga (CLI, dashboard) perderá acesso até receber a nova.`
+      `Isso invalida a chave principal de "${username}" imediatamente. Qualquer cliente usando a chave antiga (CLI, dashboard) perderá acesso até receber a nova. As chaves de cliente continuam valendo.`
     );
     if (!ok) return;
     try {
@@ -241,18 +406,45 @@
     }
   }
 
-  async function toggleActive(id, username, nextActive) {
-    if (!nextActive) {
-      const ok = await nvConfirm(
-        'Desativar usuário',
-        `"${username}" perde acesso imediatamente — não poderá mais fazer backup nem restore até ser reativado. O histórico de backups é mantido.`
-      );
-      if (!ok) return;
+  async function changeRole(id) {
+    const u = _users.find(x => x.id === id);
+    if (!u) return;
+    const role = u.role === 'admin' ? 'user' : 'admin';
+    const ok = await nvConfirm(
+      role === 'admin' ? 'Tornar administrador' : 'Remover administrador',
+      role === 'admin'
+        ? `A chave principal de "${u.username}" passa a ter acesso total ao servidor: painéis, configurações e os backups de todos. Qualquer computador que use essa chave vira admin também. Para backup, entregue uma chave de cliente, que continua sem poderes de admin.`
+        : `"${u.username}" perde o acesso à área do administrador e passa a ver só os próprios backups.`
+    );
+    if (!ok) return;
+    await patchUser(id, {role});
+  }
+
+  async function deleteUser(id) {
+    const u = _users.find(x => x.id === id);
+    if (!u) return;
+    const ok = await nvConfirm(
+      'Excluir usuário',
+      `"${u.username}" e as chaves de cliente dele são apagados de vez. Só é possível excluir quem não é mais dono de nenhum backup: se ainda for, reatribua os backups em Manutenção antes. Para só bloquear o acesso, use Desativar.`,
+      {word: u.username}
+    );
+    if (!ok) return;
+    try {
+      const r = await fetch(`/users/${id}`, {method: 'DELETE', headers: H()});
+      if (r.status === 401) { showLogin('API Key inválida.'); return; }
+      if (r.status === 403) { nvNotAdmin(); return; }
+      if (!r.ok) { const data = await r.json().catch(() => ({})); showError(data.detail || `Erro ${r.status}`); return; }
+      load();
+    } catch(e) {
+      showError('Erro de conexão: ' + e.message);
     }
+  }
+
+  async function patchUser(id, body) {
     try {
       const r = await fetch(`/users/${id}`, {
         method: 'PATCH', headers: {...H(), 'Content-Type': 'application/json'},
-        body: JSON.stringify({is_active: nextActive}),
+        body: JSON.stringify(body),
       });
       if (r.status === 401) { showLogin('API Key inválida.'); return; }
       if (r.status === 403) { nvNotAdmin(); return; }
@@ -262,6 +454,18 @@
       showError('Erro de conexão: ' + e.message);
     }
   }
+
+  async function toggleActive(id, username, nextActive) {
+    if (!nextActive) {
+      const ok = await nvConfirm(
+        'Desativar usuário',
+        `"${username}" perde acesso imediatamente — não poderá mais fazer backup nem restore até ser reativado. O histórico de backups é mantido.`
+      );
+      if (!ok) return;
+    }
+    await patchUser(id, {is_active: nextActive});
+  }
+
 
   // Init — a própria carga inicial faz o auth-check (401/403 → login)
   load();

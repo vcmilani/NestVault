@@ -1384,6 +1384,8 @@ Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Par
 
 > **v10.0 — página inicial é Fotos; painel em `/admin`.** Para qualquer perfil, `/` (e o app instalado no celular) abre **[Fotos](#-cloud-e--fotos)**, com **Cloud** ao lado. O dashboard passou para **`/admin`**, a entrada da **área do administrador** (botão **⚙ Admin**), que dá acesso a todos os painéis desta seção. A área exige uma **chave de administrador**: se a chave com que você entrou já é de admin, entra direto; se não, ela pede uma, guardada à parte (`localStorage.nvAdminKey`), sem trocar a chave que você usa nas fotos. **⎋ Sair do admin** apaga só a chave de admin e volta para as fotos. Chave de admin revogada ou rotacionada faz a área pedir a credencial de novo. As URLs das outras páginas (`/disks`, `/activity`, `/explorer`...) não mudaram.
 
+> **v10.0 — uma conta para admin e backup.** Se você administra o servidor e também faz backup, não precisa mais de duas contas. Use a chave **principal** do admin no navegador: Fotos e Cloud mostram só os seus backups, e o ⚙ Admin abre sem pedir outra chave. No CLI e no celular, use uma **chave de cliente** (Usuários → Nova chave de cliente), que não tem poderes de admin. Para juntar uma conta comum que você já tinha: (1) crie a chave de cliente para o admin; (2) em Manutenção → Reatribuir dono, passe os backups da conta comum para o admin; (3) troque a chave nos clientes; (4) desative a conta comum.
+
 > **v9.1.1 — layout e leitura.** Todas as telas usam a mesma coluna centrada, em duas larguras: 1440px nas páginas de dados e 960px em Configurações e Usuários, que são formulários. O cabeçalho ocupa a largura toda mas alinha os botões com a borda do conteúdo, então a coluna não muda de posição ao navegar. As cores foram calibradas para atender WCAG AA em texto pequeno nos dois temas — inclusive os badges de status, que antes não passavam em nenhum —, e a navegação por `Tab` passa a mostrar um anel de foco visível.
 
 **O que o dashboard exibe:**
@@ -1881,11 +1883,17 @@ As respostas continuam com `"status": "deleted"`, para não quebrar clientes ant
 |--------|----------|-----------|
 | `POST` | `/users` | Cria usuário — retorna a API key gerada **uma única vez** |
 | `GET` | `/users` | Lista usuários (sem expor as chaves) |
-| `PATCH` | `/users/{id}` | Ativa/desativa o acesso (`is_active`) — histórico de backups é preservado. O admin não pode desativar a própria conta (`409`) |
+| `PATCH` | `/users/{id}` | Ativa/desativa o acesso (`is_active`), com o histórico de backups preservado, e/ou troca o papel (`role`: `admin` \| `user`, *v10.0*). Os dois campos são opcionais. O admin não pode desativar a própria conta nem mudar o próprio papel (`409`) |
+| `DELETE` | `/users/{id}` | Exclui o usuário e as chaves de cliente dele *(v10.0)*. Retorna `409` se ele ainda for dono de algum backup ativo (reatribua antes com `PATCH /backups/{label}/owner`) ou se for a própria conta. Backups dele que já estão na lixeira ficam sem dono até a limpeza noturna |
 | `POST` | `/users/{id}/rotate-key` | Gera nova chave para o usuário e invalida a anterior — retorna a nova chave **uma única vez** |
 | `PATCH` | `/backups/{label}/owner` | Reatribui o dono de um backup (`owner_user_id`) |
+| `GET` | `/users/{id}/keys` | Lista as chaves de cliente do usuário (nome, criação, último uso) *(v10.0)* |
+| `POST` | `/users/{id}/keys` | Cria uma chave de cliente (`{"name": "MacBook"}`) e retorna a chave **uma única vez** *(v10.0)* |
+| `DELETE` | `/users/{id}/keys/{key_id}` | Revoga uma chave de cliente, inclusive as sessões do front cloud abertas com ela *(v10.0)* |
 
-> As chaves nunca são armazenadas em texto puro — o banco guarda apenas o SHA-256 da chave (`users.api_key_hash`).
+> As chaves nunca são armazenadas em texto puro — o banco guarda apenas o SHA-256 da chave (`users.api_key_hash`, `api_keys.key_hash`).
+
+> **Chave principal × chaves de cliente** *(v10.0)*. A chave principal tem o papel do usuário. Uma **chave de cliente** entra como o mesmo usuário, com os mesmos backups, mas nunca com poderes de admin, mesmo quando o usuário é admin. Com isso, quem administra o servidor usa uma conta só: a chave principal fica no navegador (Fotos, Cloud e a área do administrador sem trocar de chave) e cada computador ou celular recebe a sua chave de cliente. Girar a chave principal não afeta as chaves de cliente.
 
 ### Backups
 
