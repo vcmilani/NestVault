@@ -48,7 +48,7 @@
   .td-r{text-align:right}
   .td-dim{color:var(--text-dim)}
   .td-nb{white-space:nowrap}
-  .td-actions{display:flex;gap:8px;justify-content:flex-end}
+  .td-actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}
 
   .new-user-hint{font-size:11px;color:var(--text-dim);line-height:1.6;margin-top:10px}
   tbody tr.keys-row{border-bottom:1px solid var(--border)}
@@ -225,6 +225,8 @@
           <button class="small-btn ${u.is_active ? 'btn-danger' : ''}" onclick="toggleActive(${u.id}, '${esc(u.username)}', ${!u.is_active})">
             ${u.is_active ? '⏻ Desativar' : '⏻ Reativar'}
           </button>
+          <button class="small-btn" onclick="changeRole(${u.id})">${u.role === 'admin' ? '⇩ Tornar user' : '⇧ Tornar admin'}</button>
+          <button class="small-btn btn-danger" onclick="deleteUser(${u.id})">✕ Excluir</button>
         </td>
       </tr>${keysRow}`;
     }).join('');
@@ -339,18 +341,45 @@
     }
   }
 
-  async function toggleActive(id, username, nextActive) {
-    if (!nextActive) {
-      const ok = await nvConfirm(
-        'Desativar usuário',
-        `"${username}" perde acesso imediatamente — não poderá mais fazer backup nem restore até ser reativado. O histórico de backups é mantido.`
-      );
-      if (!ok) return;
+  async function changeRole(id) {
+    const u = _users.find(x => x.id === id);
+    if (!u) return;
+    const role = u.role === 'admin' ? 'user' : 'admin';
+    const ok = await nvConfirm(
+      role === 'admin' ? 'Tornar administrador' : 'Remover administrador',
+      role === 'admin'
+        ? `A chave principal de "${u.username}" passa a ter acesso total ao servidor: painéis, configurações e os backups de todos. Qualquer computador que use essa chave vira admin também. Para backup, entregue uma chave de cliente, que continua sem poderes de admin.`
+        : `"${u.username}" perde o acesso à área do administrador e passa a ver só os próprios backups.`
+    );
+    if (!ok) return;
+    await patchUser(id, {role});
+  }
+
+  async function deleteUser(id) {
+    const u = _users.find(x => x.id === id);
+    if (!u) return;
+    const ok = await nvConfirm(
+      'Excluir usuário',
+      `"${u.username}" e as chaves de cliente dele são apagados de vez. Só é possível excluir quem não é mais dono de nenhum backup: se ainda for, reatribua os backups em Manutenção antes. Para só bloquear o acesso, use Desativar.`,
+      {word: u.username}
+    );
+    if (!ok) return;
+    try {
+      const r = await fetch(`/users/${id}`, {method: 'DELETE', headers: H()});
+      if (r.status === 401) { showLogin('API Key inválida.'); return; }
+      if (r.status === 403) { nvNotAdmin(); return; }
+      if (!r.ok) { const data = await r.json().catch(() => ({})); showError(data.detail || `Erro ${r.status}`); return; }
+      load();
+    } catch(e) {
+      showError('Erro de conexão: ' + e.message);
     }
+  }
+
+  async function patchUser(id, body) {
     try {
       const r = await fetch(`/users/${id}`, {
         method: 'PATCH', headers: {...H(), 'Content-Type': 'application/json'},
-        body: JSON.stringify({is_active: nextActive}),
+        body: JSON.stringify(body),
       });
       if (r.status === 401) { showLogin('API Key inválida.'); return; }
       if (r.status === 403) { nvNotAdmin(); return; }
@@ -360,6 +389,18 @@
       showError('Erro de conexão: ' + e.message);
     }
   }
+
+  async function toggleActive(id, username, nextActive) {
+    if (!nextActive) {
+      const ok = await nvConfirm(
+        'Desativar usuário',
+        `"${username}" perde acesso imediatamente — não poderá mais fazer backup nem restore até ser reativado. O histórico de backups é mantido.`
+      );
+      if (!ok) return;
+    }
+    await patchUser(id, {is_active: nextActive});
+  }
+
 
   // Init — a própria carga inicial faz o auth-check (401/403 → login)
   load();

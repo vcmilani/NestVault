@@ -664,8 +664,9 @@ class UserCreate(BaseModel):
     username: str = Field(..., min_length=1, max_length=64)
     role: Literal["admin", "user"] = "user"
 
-class UserActiveUpdate(BaseModel):
-    is_active: bool
+class UserUpdate(BaseModel):
+    is_active: Optional[bool] = None
+    role: Optional[Literal["admin", "user"]] = None
 
 class ApiKeyCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=64, description="Onde a chave vai ser usada, ex.: MacBook")
@@ -3189,22 +3190,52 @@ def revoke_user_key(user_id: int, key_id: int, db: Session = Depends(get_db)):
 
 
 @app.patch("/users/{user_id}", response_model=UserInfo)
-def update_user_active(user_id: int, req: UserActiveUpdate, db: Session = Depends(get_db),
-                       admin: User = Depends(require_admin)):
-    u = db.query(User).filter(User.id == user_id).first()
-    if not u:
-        raise HTTPException(404, "Usuario nao encontrado")
-    if not req.is_active and u.id == admin.id:
+def update_user(user_id: int, req: UserUpdate, db: Session = Depends(get_db),
+                admin: User = Depends(require_admin)):
+    """Ativa/desativa e/ou troca o papel. A trava em mudar a PRÓPRIA conta basta
+    para nunca zerar os admins ativos: quem chama é sempre um admin ativo, então
+    desativar ou rebaixar OUTRA conta ainda deixa pelo menos quem chamou."""
+    u = _user_or_404(db, user_id)
+    if req.is_active is False and u.id == admin.id:
         # Sem esta trava o admin podia desativar a própria conta — e, sendo o
         # único, não havia volta pela API: o bootstrap por BACKUP_API_KEY só roda
-        # com a tabela de usuários vazia. Ela basta para nunca zerar os admins
-        # ativos: quem chama é sempre um admin ativo, então desativar OUTRA conta
-        # ainda deixa pelo menos quem chamou.
+        # com a tabela de usuários vazia.
         raise HTTPException(409, "Voce nao pode desativar a propria conta — peca a outro admin")
-    u.is_active = req.is_active
+    if req.role is not None and req.role != u.role and u.id == admin.id:
+        raise HTTPException(409, "Voce nao pode mudar o proprio papel — peca a outro admin")
+    if req.is_active is not None and req.is_active != u.is_active:
+        u.is_active = req.is_active
+        log.info(f"[users] Usuario '{u.username}' {'ativado' if u.is_active else 'desativado'}")
+    if req.role is not None and req.role != u.role:
+        log.info(f"[users] Usuario '{u.username}' passou de {u.role} para {req.role}")
+        u.role = req.role
     db.commit(); db.refresh(u)
-    log.info(f"[users] Usuario '{u.username}' {'ativado' if u.is_active else 'desativado'}")
     return _user_info(u)
+
+
+@app.delete("/users/{user_id}")
+def delete_user(user_id: int, db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    """Exclui o usuário e as chaves de cliente dele. Recusa (409) enquanto ele for
+    dono de algum backup vivo — reatribua antes (PATCH /backups/{label}/owner), para
+    nenhum backup ficar órfão sem querer. Labels dele já na lixeira ficam sem dono
+    (só admin enxerga) até a limpeza noturna apagá-los."""
+    u = _user_or_404(db, user_id)
+    if u.id == admin.id:
+        raise HTTPException(409, "Voce nao pode excluir a propria conta — peca a outro admin")
+    live = (db.query(BackupID.label)
+            .filter(BackupID.owner_user_id == u.id, _live_label_filter())
+            .order_by(BackupID.label).all())
+    if live:
+        labels = ", ".join(r.label for r in live[:5]) + ("..." if len(live) > 5 else "")
+        raise HTTPException(409, f"'{u.username}' ainda e dono de {len(live)} backup(s) ({labels}) — "
+                                 f"reatribua em Manutencao antes de excluir")
+    trashed = (db.query(BackupID).filter(BackupID.owner_user_id == u.id)
+               .update({"owner_user_id": None}, synchronize_session=False))
+    keys = db.query(ApiKey).filter(ApiKey.user_id == u.id).delete(synchronize_session=False)
+    db.delete(u); db.commit()
+    log.info(f"[users] Usuario '{u.username}' excluido ({keys} chave(s) de cliente revogada(s), "
+             f"{trashed} backup(s) na lixeira sem dono)")
+    return {"ok": True}
 
 
 @app.patch("/backups/{label}/owner", response_model=BackupInfo, dependencies=[Depends(require_admin)])

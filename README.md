@@ -1883,7 +1883,8 @@ As respostas continuam com `"status": "deleted"`, para não quebrar clientes ant
 |--------|----------|-----------|
 | `POST` | `/users` | Cria usuário — retorna a API key gerada **uma única vez** |
 | `GET` | `/users` | Lista usuários (sem expor as chaves) |
-| `PATCH` | `/users/{id}` | Ativa/desativa o acesso (`is_active`) — histórico de backups é preservado. O admin não pode desativar a própria conta (`409`) |
+| `PATCH` | `/users/{id}` | Ativa/desativa o acesso (`is_active`), com o histórico de backups preservado, e/ou troca o papel (`role`: `admin` \| `user`, *v10.0*). Os dois campos são opcionais. O admin não pode desativar a própria conta nem mudar o próprio papel (`409`) |
+| `DELETE` | `/users/{id}` | Exclui o usuário e as chaves de cliente dele *(v10.0)*. Retorna `409` se ele ainda for dono de algum backup ativo (reatribua antes com `PATCH /backups/{label}/owner`) ou se for a própria conta. Backups dele que já estão na lixeira ficam sem dono até a limpeza noturna |
 | `POST` | `/users/{id}/rotate-key` | Gera nova chave para o usuário e invalida a anterior — retorna a nova chave **uma única vez** |
 | `PATCH` | `/backups/{label}/owner` | Reatribui o dono de um backup (`owner_user_id`) |
 | `GET` | `/users/{id}/keys` | Lista as chaves de cliente do usuário (nome, criação, último uso) *(v10.0)* |
