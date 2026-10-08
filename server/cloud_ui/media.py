@@ -69,6 +69,16 @@ def kind_of(name: str) -> str | None:
     return None
 
 
+# Pastas "ocultas": o álbum Hidden do iCloud Photos (o rclone usa o nome em inglês;
+# os demais são o que um export manual em PT-BR costuma ter) e pastas com ponto.
+HIDDEN_FOLDERS = {"hidden", "ocultas", "ocultos", "oculta", "oculto"}
+
+
+def in_hidden_folder(rel: str) -> bool:
+    return any(seg.lower() in HIDDEN_FOLDERS or seg.startswith(".")
+               for seg in rel.split("/")[:-1] if seg)
+
+
 def media_path_filter():
     p = func.lower(VersionFile.original_path)
     return or_(*[p.like(f"%.{e}") for e in IMAGE_EXT + VIDEO_EXT])
@@ -571,6 +581,14 @@ def timeline(db: Session, user: User) -> list[dict]:
                 .outerjoin(MediaInfo, MediaInfo.sha256 == VersionFile.sha256)
                 .filter(VersionFile.version_id.in_(list(by_vid)), media_path_filter())
                 .all())
+        # Uma foto oculta no iCloud pode aparecer também em outro álbum: o conteúdo
+        # inteiro conta como oculto, não só a cópia que está na pasta Hidden.
+        hidden_shas = set()
+        for r in rows:
+            label, base = by_vid[r.version_id]
+            rel = r.original_path[len(base):] if r.original_path.startswith(base) else r.original_path
+            if in_hidden_folder(rel):
+                hidden_shas.add(r.sha256)
         seen: set[str] = set()
         for r in rows:
             if r.sha256 in seen:
@@ -592,6 +610,7 @@ def timeline(db: Session, user: User) -> list[dict]:
                 "w": r.width, "h": r.height, "duration": r.duration,
                 "thumb": bool(r.thumb_sm), "state": state,
                 "label": label, "path": rel, "name": name,
+                "hidden": r.sha256 in hidden_shas,
             })
         items = pair_live_photos(items)
         items.sort(key=lambda x: (x["ts"], x["id"]), reverse=True)
@@ -639,6 +658,10 @@ def pair_live_photos(items: list[dict]) -> list[dict]:
             still["live"] = live
         absorbed.add(motion["id"])
     return [it for it in items if it["id"] not in absorbed]
+
+
+def visible(items: list[dict], show_hidden: bool) -> list[dict]:
+    return items if show_hidden else [i for i in items if not i["hidden"]]
 
 
 def page(items: list[dict], before_ts: float | None, before_id: int | None, limit: int) -> list[dict]:

@@ -391,3 +391,39 @@ def test_user_actions_are_logged(two_users, caplog):
     assert "sessao aberta para alice" in msgs
     assert "backup 'alice-fotos' removido da galeria" in msgs
     assert f"alice file_id={fid} abre '1.jpg'" in msgs
+
+
+# -- Selecionar/desmarcar todos e pastas ocultas ----------------------------
+
+def test_set_all_labels_at_once_only_own(two_users):
+    admin, alice, bob = two_users
+    backup(alice, "a1", {"/a/1.jpg": (jpeg(), 1)})
+    backup(alice, "a2", {"/a/2.jpg": (jpeg((0, 0, 9)), 2)})
+    backup(bob, "b1", {"/b/1.jpg": (jpeg((9, 0, 0)), 3)})
+
+    assert alice.put("/cloud/photos/labels", json={"enabled": False}).json() == {"enabled": False, "count": 2}
+    assert [l["enabled"] for l in alice.get("/cloud/photos/labels").json()] == [False, False]
+    assert photos(alice)["items"] == []
+    assert [l["enabled"] for l in bob.get("/cloud/photos/labels").json()] == [True]  # não mexe no alheio
+
+    assert alice.put("/cloud/photos/labels", json={"enabled": True}).status_code == 200
+    assert {i["label"] for i in photos(alice)["items"]} == {"a1", "a2"}
+
+
+def test_hidden_folders_are_left_out_unless_asked(client):
+    backup(client, "icloud", {
+        "/PrimarySync/All Photos/a.jpg": (jpeg(), 1),
+        "/PrimarySync/Hidden/segredo.jpg": (jpeg((1, 2, 3)), 2),
+        "/PrimarySync/Favoritos/segredo.jpg": (jpeg((1, 2, 3)), 2),  # mesma foto em outro álbum
+        "/PrimarySync/.cache/x.jpg": (jpeg((4, 5, 6)), 3),
+        "/PrimarySync/Hiddenness/b.jpg": (jpeg((7, 8, 9)), 4),       # só o nome exato conta
+    })
+    assert sorted(i["name"] for i in photos(client)["items"]) == ["a.jpg", "b.jpg"]
+    assert photos(client)["total"] == 2
+    assert sum(m["count"] for m in client.get("/cloud/photos/months").json()) == 2
+    st = client.get("/cloud/photos/indexing").json()
+    assert st["total"] == 2 and st["hidden"] == 2
+
+    shown = photos(client, show_hidden=True)["items"]
+    assert sorted(i["name"] for i in shown) == ["a.jpg", "b.jpg", "segredo.jpg", "x.jpg"]
+    assert client.get("/cloud/photos/indexing", params={"show_hidden": True}).json()["total"] == 4

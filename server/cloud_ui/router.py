@@ -146,11 +146,13 @@ def get_content(file_id: int, request: Request, download: bool = False,
 @router.get("/photos")
 def get_photos(before_ts: Optional[float] = None, before_id: Optional[int] = None,
                limit: int = Query(200, ge=1, le=1000),
+               show_hidden: bool = False,
                db: Session = Depends(get_db),
                user: User = Depends(get_user_header_or_cookie)):
     """Timeline de fotos e vídeos de todos os backups do usuário (última versão de
-    cada um), mais recentes primeiro. Paginação keyset por (before_ts, before_id)."""
-    items = media.timeline(db, user)
+    cada um), mais recentes primeiro. Paginação keyset por (before_ts, before_id).
+    Fotos em pastas ocultas (álbum Hidden do iCloud etc.) só com show_hidden."""
+    items = media.visible(media.timeline(db, user), show_hidden)
     chunk = media.page(items, before_ts, before_id, limit)
     nxt = None
     if chunk and len(chunk) == limit:
@@ -159,15 +161,18 @@ def get_photos(before_ts: Optional[float] = None, before_id: Optional[int] = Non
 
 
 @router.get("/photos/months")
-def get_photo_months(db: Session = Depends(get_db),
+def get_photo_months(show_hidden: bool = False, db: Session = Depends(get_db),
                      user: User = Depends(get_user_header_or_cookie)):
-    return media.months(media.timeline(db, user))
+    return media.months(media.visible(media.timeline(db, user), show_hidden))
 
 
 @router.get("/photos/indexing")
-def get_indexing(db: Session = Depends(get_db),
+def get_indexing(show_hidden: bool = False, db: Session = Depends(get_db),
                  user: User = Depends(get_user_header_or_cookie)):
-    return media.indexing_status(media.timeline(db, user))
+    items = media.timeline(db, user)
+    status = media.indexing_status(media.visible(items, show_hidden))
+    status["hidden"] = sum(1 for i in items if i["hidden"])
+    return status
 
 
 @router.get("/photos/labels")
@@ -179,6 +184,22 @@ def get_photo_labels(db: Session = Depends(get_db),
 
 class PhotoLabelUpdate(BaseModel):
     enabled: bool
+
+
+@router.put("/photos/labels")
+def set_all_photo_labels(req: PhotoLabelUpdate, db: Session = Depends(get_db),
+                         user: User = Depends(get_current_user)):
+    """Marca/desmarca de uma vez todos os backups do próprio usuário na galeria."""
+    labels = (db.query(BackupID)
+              .filter(BackupID.owner_user_id == user.id, tree.live_label_filter()).all())
+    for b in labels:
+        b.photos_enabled = req.enabled
+    db.commit()
+    log.info(f"[photos] {user.username}: todos os {len(labels)} backup(s) "
+             f"{'incluidos na' if req.enabled else 'removidos da'} galeria")
+    if req.enabled:
+        media.indexer.wake()
+    return {"enabled": req.enabled, "count": len(labels)}
 
 
 @router.put("/photos/labels/{label}")

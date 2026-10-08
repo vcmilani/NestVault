@@ -25,6 +25,9 @@
   .lbtn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 10px;font-family:var(--mono);font-size:11px;cursor:pointer;min-height:34px}
   .lbtn:hover,.lbtn.on{border-color:var(--amber);color:var(--amber)}
   .labels{border:1px solid var(--border);background:var(--bg2);margin-bottom:16px}
+  .labels-act{display:flex;gap:8px;padding:8px 14px;border-bottom:1px solid var(--border);flex-wrap:wrap}
+  .labels-act .lbtn{min-height:30px;padding:4px 10px}
+  .lbtn:disabled{opacity:.5;cursor:not-allowed;border-color:var(--border2);color:var(--text-dim)}
   .labels-h{padding:10px 14px;font-size:11px;color:var(--text-dim);border-bottom:1px solid var(--border);line-height:1.6}
   .lab{display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--border);cursor:pointer;font-size:12px;color:var(--text)}
   .lab:last-child{border-bottom:none}
@@ -125,6 +128,7 @@
     <h1>Fotos</h1>
     <span class="count" id="count"></span>
     <select class="sel hidden" id="monthSel" title="Ir para o mês"></select>
+    <button class="lbtn hidden" id="hiddenBtn" aria-pressed="false"></button>
     <button class="lbtn" id="labelsBtn" aria-expanded="false" aria-controls="labels" title="Escolher quais backups aparecem aqui">▤ Backups</button>
   </div>
   <div class="labels hidden" id="labels"></div>
@@ -164,7 +168,11 @@
 <script src="/static/app.js"></script>
 <script>
   const PAGE = 300, GAP = 4;
-  const st = {items: [], seen: new Set(), next: undefined, loading: false, total: 0, months: [], indexed: -1};
+  const st = {items: [], seen: new Set(), next: undefined, loading: false, total: 0, months: [], indexed: -1, gen: 0};
+  // Fotos de pastas ocultas (álbum Hidden do iCloud etc.): escondidas por padrão;
+  // a escolha fica neste navegador.
+  st.showHidden = (() => { try { return localStorage.getItem('nv-photos-hidden') === '1'; } catch (_) { return false; } })();
+  const hiddenParam = () => st.showHidden ? {show_hidden: 'true'} : {};
   let sessionReady = false;
 
   const ICON_IMG  = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="1.5"/><circle cx="9" cy="10" r="1.6"/><path d="M4 17l5-4.5 4 3.5 3-2.5 4 3.5"/></svg>';
@@ -207,6 +215,7 @@
   }
 
   function reset(cursor) {
+    st.gen++;  // descarta a página que ainda estiver a caminho
     st.items = []; st.seen = new Set(); st.next = cursor || null; st.done = false;
     document.getElementById('grid').innerHTML = '';
     document.getElementById('end').classList.add('hidden');
@@ -215,10 +224,15 @@
   async function loadMore() {
     if (st.loading || st.done) return;
     st.loading = true;
+    const gen = st.gen;
+    let stale = false;
     try {
-      const params = {limit: PAGE};
+      const params = {limit: PAGE, ...hiddenParam()};
       if (st.next) Object.assign(params, st.next);
       const d = await api('/cloud/photos', params);
+      // reset() no meio do caminho (backup marcado/desmarcado, ocultas, mês):
+      // esta página é do filtro anterior e não pode entrar na grade.
+      if (gen !== st.gen) { stale = true; return; }
       st.total = d.total;
       // O mesmo conteúdo pode estar em dois backups; a página já vem sem repetição,
       // mas a fronteira entre páginas pode repetir.
@@ -230,6 +244,7 @@
       if (e.message !== '401') showError(e.message);
     } finally {
       st.loading = false;
+      if (stale) loadMore();
     }
     // Página curta que não enche a tela: o sentinela continua visível e o
     // observer não dispara de novo — puxa a próxima aqui.
@@ -238,7 +253,7 @@
 
   async function loadMonths() {
     try {
-      st.months = await api('/cloud/photos/months');
+      st.months = await api('/cloud/photos/months', hiddenParam());
       const sel = document.getElementById('monthSel');
       sel.classList.toggle('hidden', st.months.length < 2);
       sel.innerHTML = '<option value="">Ir para…</option><option value="top">↑ Mais recentes</option>' +
@@ -257,6 +272,9 @@
     document.getElementById('labelsBtn').textContent = `▤ Backups · ${on}/${st.labels.length}`;
     document.getElementById('labels').innerHTML =
       '<div class="labels-h">Escolha quais backups aparecem em Fotos. Os desmarcados também deixam de ser indexados — útil para backups de documentos.</div>' +
+      (st.labels.length > 1 ? `<div class="labels-act">
+        <button class="lbtn" data-all="1" ${on === st.labels.length ? 'disabled' : ''}>☑ Selecionar todos</button>
+        <button class="lbtn" data-all="0" ${on === 0 ? 'disabled' : ''}>☐ Desmarcar todos</button></div>` : '') +
       (st.labels.length ? st.labels.map(l => `
         <label class="lab ${l.enabled ? '' : 'off'}">
           <input type="checkbox" data-label="${esc(l.label)}" ${l.enabled ? 'checked' : ''}>
@@ -270,36 +288,77 @@
     document.getElementById('labelsBtn').classList.toggle('on', open);
     document.getElementById('labelsBtn').setAttribute('aria-expanded', String(open));
   });
+  // Escrita vai com o header — o cookie de sessão só vale para leitura.
+  async function putLabels(path, enabled) {
+    const r = await fetch('/cloud/photos/labels' + path, {
+      method: 'PUT', headers: {...H(), 'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled}),
+    });
+    if (r.status === 401) { showLogin('Sessão expirada — informe a API Key'); throw new Error('401'); }
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status);
+  }
+  function reloadGrid() {
+    reset(); st.indexed = -1;
+    loadMonths(); pollIndexing();
+    return loadMore();
+  }
   document.getElementById('labels').addEventListener('change', async e => {
     const cb = e.target.closest('[data-label]');
     if (!cb) return;
     cb.disabled = true;
     try {
-      // Escrita vai com o header — o cookie de sessão só vale para leitura.
-      const r = await fetch('/cloud/photos/labels/' + encodeURIComponent(cb.dataset.label), {
-        method: 'PUT', headers: {...H(), 'Content-Type': 'application/json'},
-        body: JSON.stringify({enabled: cb.checked}),
-      });
-      if (r.status === 401) { showLogin('Sessão expirada — informe a API Key'); return; }
-      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status);
+      await putLabels('/' + encodeURIComponent(cb.dataset.label), cb.checked);
       const l = st.labels.find(x => x.label === cb.dataset.label);
       if (l) l.enabled = cb.checked;
       renderLabels();
-      reset(); st.indexed = -1;
-      loadMonths(); pollIndexing();
-      await loadMore();
+      await reloadGrid();
     } catch (err) {
       cb.checked = !cb.checked;
       cb.disabled = false;
-      showError('Não foi possível salvar: ' + err.message);
+      if (err.message !== '401') showError('Não foi possível salvar: ' + err.message);
     }
+  });
+  document.getElementById('labels').addEventListener('click', async e => {
+    const b = e.target.closest('[data-all]');
+    if (!b) return;
+    const enabled = b.dataset.all === '1';
+    document.querySelectorAll('#labels [data-all], #labels [data-label]').forEach(x => x.disabled = true);
+    try {
+      await putLabels('', enabled);
+      st.labels.forEach(l => l.enabled = enabled);
+      renderLabels();
+      await reloadGrid();
+    } catch (err) {
+      renderLabels();
+      if (err.message !== '401') showError('Não foi possível salvar: ' + err.message);
+    }
+  });
+
+  function renderHiddenBtn(count) {
+    const btn = document.getElementById('hiddenBtn');
+    btn.classList.toggle('hidden', !count && !st.showHidden);
+    btn.classList.toggle('on', st.showHidden);
+    btn.setAttribute('aria-pressed', String(st.showHidden));
+    btn.textContent = (st.showHidden ? '◉ Ocultas visíveis' : '◌ Ocultas escondidas') + (count ? ` · ${count.toLocaleString('pt-BR')}` : '');
+    btn.title = st.showHidden
+      ? 'Fotos de pastas ocultas (álbum Hidden do iCloud) estão aparecendo — clique para esconder'
+      : 'Fotos de pastas ocultas (álbum Hidden do iCloud) estão escondidas — clique para mostrar';
+  }
+  document.getElementById('hiddenBtn').addEventListener('click', () => {
+    st.showHidden = !st.showHidden;
+    try { localStorage.setItem('nv-photos-hidden', st.showHidden ? '1' : '0'); } catch (_) {}
+    renderHiddenBtn(st.hiddenCount);
+    window.scrollTo(0, 0);
+    reloadGrid();
   });
 
   let idxTimer = null;
   async function pollIndexing() {
     clearTimeout(idxTimer);
     let s;
-    try { s = await api('/cloud/photos/indexing'); } catch (_) { return; }
+    try { s = await api('/cloud/photos/indexing', hiddenParam()); } catch (_) { return; }
+    st.hiddenCount = s.hidden;
+    renderHiddenBtn(s.hidden);
     const box = document.getElementById('idx');
     const busy = s.pending > 0;
     box.classList.toggle('hidden', !busy && !s.failed);
@@ -369,6 +428,7 @@
       const noneOn = st.labels.length && !st.labels.some(l => l.enabled);
       grid.innerHTML = !st.done ? '<div class="loading">Carregando</div>'
         : noneOn ? '<div class="empty">Nenhum backup selecionado para Fotos.<br>Escolha quais entram em <strong>▤ Backups</strong>, acima.</div>'
+        : !st.showHidden && st.hiddenCount ? '<div class="empty">Todas as fotos destes backups estão em pastas ocultas.<br>Use <strong>◌ Ocultas</strong>, acima, para mostrá-las.</div>'
         : '<div class="empty">Nenhuma foto ou vídeo nos seus backups ainda.<br>Os arquivos de imagem e vídeo dos backups aparecem aqui, organizados por data. Veja também o <a href="/cloud">Cloud</a>.</div>';
       return;
     }
