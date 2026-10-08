@@ -214,6 +214,24 @@ def pick_volume() -> Path:
     )
 
 
+def pick_volume_for_size(size: int, exclude: "set[str]" = frozenset()) -> "Path | None":
+    """Primeiro volume (em ordem de prioridade) que comporta `size` bytes e
+    ainda fica acima do limiar de esgotamento depois da gravação. None se
+    nenhum couber.
+
+    pick_volume() só olha o espaço livre atual: serve para o upload, que grava
+    na hora, mas não para quem já sabe o tamanho e precisa que ele caiba — o
+    move SSD → HDD escolhia assim e batia em ENOSPC com arquivos grandes."""
+    threshold = STORAGE_FALLBACK_THRESHOLD_GB * 1024 ** 3
+    for vol in healthy_volumes():
+        if str(vol) in exclude:
+            continue
+        usage = safe_disk_usage(vol)
+        if usage and usage.free - size > threshold:
+            return vol
+    return None
+
+
 def pick_volume_last_resort() -> Path:
     """Usado apenas quando cleanup não liberou espaço suficiente. Loga CRITICAL."""
     hvols_set = set(healthy_volumes())
@@ -1229,6 +1247,30 @@ def reconcile_orphaned_ssd_copies(db) -> int:
     return fixed
 
 
+def _choose_ssd_move_dest(move, size: int) -> None:
+    """Reavalia o destino de um move SSD → HDD no momento da cópia.
+
+    O destino gravado na pendência foi escolhido no upload, quando o arquivo
+    caiu no SSD — às vezes horas antes. Nesse meio tempo, centenas de arquivos
+    apontavam para o mesmo disco e o enchiam (ENOSPC). Mantém o destino se ele
+    ainda comporta o arquivo; senão troca pelo melhor volume que comporte. Se
+    nenhum couber, deixa como está e a tentativa segue o caminho de retry."""
+    current = Path(move.dest_volume)
+    threshold = STORAGE_FALLBACK_THRESHOLD_GB * 1024 ** 3
+    usage = safe_disk_usage(current)
+    if usage and usage.free - size > threshold:
+        return
+    new_vol = pick_volume_for_size(size, exclude={move.dest_volume})
+    if new_vol is None:
+        log.warning(f"[ssd-cache] {move.sha256[:8]}… nenhum volume com espaço para "
+                    f"{fmt_bytes(size)} — mantendo destino {current.name}")
+        return
+    move.dest_volume = str(new_vol)
+    move.dest_path = str(content_path(move.sha256, new_vol))
+    log.info(f"[ssd-cache] {move.sha256[:8]}… destino trocado {current.name} → {new_vol.name} "
+             f"({fmt_bytes(size)}; {current.name} sem espaço)")
+
+
 def process_ssd_pending_moves(db) -> tuple[int, list[str]]:
     """Move up to 10 pending SSD-cached files to their HDD destination. Returns (count, sha256s) moved."""
     from database import SsdCachePendingMove, FileContent, FileContentCopy
@@ -1249,6 +1291,9 @@ def process_ssd_pending_moves(db) -> tuple[int, list[str]]:
             db.delete(move)
             db.commit()
             continue
+        size = ssd_path.stat().st_size
+        _choose_ssd_move_dest(move, size)
+        db.commit()
         _redirected = False
         while True:
             dest_path = Path(move.dest_path)
@@ -1354,11 +1399,8 @@ def process_ssd_pending_moves(db) -> tuple[int, list[str]]:
             except OSError as e:
                 dest_path.unlink(missing_ok=True)
                 if e.errno == errno.ENOSPC and not _redirected:
-                    try:
-                        new_vol = pick_volume()
-                    except (RuntimeError, StorageThresholdExceeded):
-                        new_vol = None
-                    if new_vol and str(new_vol) != move.dest_volume:
+                    new_vol = pick_volume_for_size(size, exclude={move.dest_volume})
+                    if new_vol:
                         new_dest = content_path(sha256, new_vol)
                         old_vol_name = Path(move.dest_volume).name
                         move.dest_volume = str(new_vol)
