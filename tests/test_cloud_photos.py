@@ -46,6 +46,12 @@ def index():
     return media.indexer.run_once(lambda: m.SessionLocal(), should_continue=lambda: True)
 
 
+@pytest.fixture(autouse=True)
+def _no_rest(monkeypatch):
+    # O descanso entre fotos (photos.rest_factor) só atrasaria a suíte.
+    monkeypatch.setattr(media.Indexer, "MAX_REST", 0)
+
+
 def photos(c, **params):
     r = c.get("/cloud/photos", params=params)
     assert r.status_code == 200, r.text
@@ -239,6 +245,39 @@ def test_window(monkeypatch, start, end, hour, expected):
     vals = {"photos.window_start_hour": start, "photos.window_end_hour": end}
     monkeypatch.setattr(media.config, "get", lambda k: vals[k])
     assert media.in_window(datetime(2026, 1, 1, hour)) is expected
+
+
+@pytest.mark.parametrize("limit,temp,paused", [
+    (0, 95.0, False), (70, 80.0, True), (70, 70.0, True), (70, 60.0, False), (70, None, False),
+])
+def test_thermal_pause(monkeypatch, limit, temp, paused):
+    vals = {"photos.indexing_enabled": True, "photos.window_start_hour": 0,
+            "photos.window_end_hour": 0, "photos.max_temp_c": limit}
+    monkeypatch.setattr(media.config, "get", lambda k: vals[k])
+    monkeypatch.setattr(media.sysmetrics, "snapshot", lambda: {"temp_c": temp})
+    reason = media.pause_reason()
+    assert (reason is not None) is paused
+    if paused:
+        assert reason.startswith("CPU a ")
+
+
+@pytest.mark.parametrize("factor,worked,expected", [(0, 2.0, None), (2, 0.5, 1.0), (20, 60.0, 300)])
+def test_rest_between_items(monkeypatch, factor, worked, expected):
+    monkeypatch.setattr(media.Indexer, "MAX_REST", 300)
+    monkeypatch.setattr(media.config, "get", lambda k: {"photos.rest_factor": factor}[k])
+    ix = media.Indexer()
+    waits = []
+    monkeypatch.setattr(ix._stop, "wait", lambda t: waits.append(t))
+    ix._rest(worked)
+    assert waits == ([] if expected is None else [pytest.approx(expected)])
+
+
+def test_saving_photos_settings_wakes_indexer(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(media.indexer, "wake", lambda: calls.append(1))
+    r = client.put("/api/settings", json={"photos": {"rest_factor": 3}})
+    assert r.status_code == 200, r.text
+    assert calls == [1]
 
 
 def test_finishing_a_version_wakes_indexer(client, monkeypatch):

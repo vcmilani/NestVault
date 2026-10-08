@@ -754,6 +754,7 @@ class SettingsUpdate(BaseModel):
     db_backup: Optional[dict] = None
     digest:    Optional[dict] = None
     rclone:    Optional[dict] = None
+    photos:    Optional[dict] = None
     confirm_encryption_change: bool = False
 
 
@@ -3413,6 +3414,8 @@ def update_settings(req: SettingsUpdate, db: Session = Depends(get_db)):
         raise HTTPException(400, str(e))
     if changed:
         log.info(f"[settings] {len(changed)} parametro(s) alterado(s): {', '.join(sorted(changed))}")
+        if any(k.startswith("photos.") for k in changed):
+            cloud_media.indexer.wake()  # reavalia pausa/ritmo já, sem esperar o ciclo de 10 min
     return config.public()
 
 
