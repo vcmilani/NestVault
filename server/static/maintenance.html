@@ -149,7 +149,7 @@
   }
 </style>
 </head>
-<body>
+<body data-admin-page>
 
 <div id="loginOverlay">
   <div class="login-box">
@@ -171,7 +171,9 @@
   </div>
   <div class="header-right">
     <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
-    <a class="hbtn" href="/" style="text-decoration:none" title="Voltar">←<span class="hbtn-label"> Voltar</span></a>
+    <a class="hbtn" href="/admin" style="text-decoration:none" title="Voltar">←<span class="hbtn-label"> Voltar</span></a>
+    <a class="hbtn" href="/cloud" title="Cloud">☁<span class="hbtn-label"> Cloud</span></a>
+    <a class="hbtn" href="/" title="Fotos">▣<span class="hbtn-label"> Fotos</span></a>
     <a class="hbtn" href="/activity" style="text-decoration:none" title="Atividade">◎<span class="hbtn-label"> Atividade</span></a>
     <a class="hbtn" href="/rclone-jobs" style="text-decoration:none" title="rclone">⟳<span class="hbtn-label"> rclone</span></a>
     <a class="hbtn" href="/stats" style="text-decoration:none" title="Stats">∑<span class="hbtn-label"> Stats</span></a>
@@ -183,7 +185,9 @@
 </header>
 
 <nav class="mobile-nav">
-  <a href="/">← Voltar</a>
+  <a href="/admin">← Voltar</a>
+  <a href="/cloud">☁ Cloud</a>
+  <a href="/">▣ Fotos</a>
   <a href="/activity">◎ Atividade</a>
   <a href="/rclone-jobs">⟳ rclone</a>
   <a href="/stats">∑ Stats</a>
@@ -775,7 +779,7 @@ async function runOp(key) {
   try {
     const r = await apiCall('POST', op.endpoint);
     if (r.status === 401) { showLogin('API Key inválida.'); setRunning(key, false); return; }
-    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); setRunning(key, false); return; }
+    if (r.status === 403) { nvNotAdmin(); setRunning(key, false); return; }
     if (!r.ok) {
       let detail = `HTTP ${r.status}`;
       try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}
@@ -915,7 +919,7 @@ async function runRebalance() {
   try {
     const r = await fetch('/maintenance/rebalance-disks/preview', {headers: H()});
     if (r.status === 401) { showLogin('API Key inválida.'); setRunning('rebalance', false); return; }
-    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); setRunning('rebalance', false); return; }
+    if (r.status === 403) { nvNotAdmin(); setRunning('rebalance', false); return; }
     if (!r.ok) {
       let detail = `HTTP ${r.status}`;
       try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}
@@ -949,7 +953,7 @@ async function runRebalance() {
   try {
     const r = await apiCall('POST', '/maintenance/rebalance-disks');
     if (r.status === 401) { showLogin('API Key inválida.'); setRunning('rebalance', false); return; }
-    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); setRunning('rebalance', false); return; }
+    if (r.status === 403) { nvNotAdmin(); setRunning('rebalance', false); return; }
     if (!r.ok) {
       let detail = `HTTP ${r.status}`;
       try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}
@@ -986,7 +990,7 @@ async function loadCleanupPreview() {
   try {
     const r = await fetch(`/maintenance/cleanup-versions/preview?${qs}`, {headers: H()});
     if (r.status === 401) { showLogin('API Key inválida.'); wrap.innerHTML = ''; return; }
-    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); wrap.innerHTML = ''; return; }
+    if (r.status === 403) { nvNotAdmin(); wrap.innerHTML = ''; return; }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
     if (d.total === 0) {
@@ -1022,7 +1026,7 @@ async function runCleanup() {
   try {
     const r = await apiCall('POST', `/maintenance/cleanup-versions?${qs}`);
     if (r.status === 401) { showLogin('API Key inválida.'); setRunning('cleanup', false); return; }
-    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); setRunning('cleanup', false); return; }
+    if (r.status === 403) { nvNotAdmin(); setRunning('cleanup', false); return; }
     if (!r.ok) {
       let detail = `HTTP ${r.status}`;
       try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}
@@ -1062,7 +1066,7 @@ async function runDeleteLabel() {
   try {
     const r = await apiCall('DELETE', `/backups/${encodeURIComponent(label)}`);
     if (r.status === 401) { showLogin('API Key inválida.'); setRunning('delete-label', false, '✕ Excluir'); return; }
-    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); setRunning('delete-label', false, '✕ Excluir'); return; }
+    if (r.status === 403) { nvNotAdmin(); setRunning('delete-label', false, '✕ Excluir'); return; }
     if (!r.ok) {
       let detail = `HTTP ${r.status}`;
       try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}
@@ -1089,7 +1093,7 @@ async function runRenameLabel() {
   try {
     const r = await apiCall('PATCH', `/backups/${encodeURIComponent(label)}`, { new_label: newLbl });
     if (r.status === 401) { showLogin('API Key inválida.'); setRunning('rename-label', false, '✎ Renomear'); return; }
-    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); setRunning('rename-label', false, '✎ Renomear'); return; }
+    if (r.status === 403) { nvNotAdmin(); setRunning('rename-label', false, '✎ Renomear'); return; }
     if (!r.ok) {
       const data = await r.json().catch(() => ({}));
       showError('rename-label', data.detail || `Erro ${r.status}`);
@@ -1131,7 +1135,7 @@ async function loadLabels() {
       ownerSel.disabled = false;
       ownerSel.innerHTML = '<option value="">— selecione —</option>';
       setAll(ALL_OPT, false);
-      showLogin(r.status === 403 ? 'Esta chave não tem permissão de administrador.' : 'API Key inválida.');
+      if (r.status === 403) nvNotAdmin(); else showLogin('API Key inválida.');
       return;
     }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -1195,7 +1199,7 @@ async function runReassignOwner() {
   try {
     const r = await apiCall('PATCH', `/backups/${encodeURIComponent(label)}/owner`, {owner_user_id: Number(userId)});
     if (r.status === 401) { showLogin('API Key inválida.'); setRunning('reassign-owner', false, '⇄ Reatribuir'); return; }
-    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); setRunning('reassign-owner', false, '⇄ Reatribuir'); return; }
+    if (r.status === 403) { nvNotAdmin(); setRunning('reassign-owner', false, '⇄ Reatribuir'); return; }
     const data = await r.json().catch(() => ({}));
     if (!r.ok) {
       showError('reassign-owner', data.detail || `Erro ${r.status}`);
@@ -1224,7 +1228,7 @@ async function loadCleanupByDatePreview() {
     const qs = `before=${encodeURIComponent(before)}` + (label ? `&label=${encodeURIComponent(label)}` : '');
     const r = await fetch(`/maintenance/cleanup-by-date/preview?${qs}`, {headers: H()});
     if (r.status === 401) { showLogin('API Key inválida.'); wrap.innerHTML = ''; return; }
-    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); wrap.innerHTML = ''; return; }
+    if (r.status === 403) { nvNotAdmin(); wrap.innerHTML = ''; return; }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
     if (d.total === 0) {
@@ -1259,7 +1263,7 @@ async function runCleanupByDate() {
     const qs = `before=${encodeURIComponent(before)}` + (label ? `&label=${encodeURIComponent(label)}` : '');
     const r = await apiCall('POST', `/maintenance/cleanup-by-date?${qs}`);
     if (r.status === 401) { showLogin('API Key inválida.'); setRunning('cleanupdate', false, '✕ Excluir versões'); return; }
-    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); setRunning('cleanupdate', false, '✕ Excluir versões'); return; }
+    if (r.status === 403) { nvNotAdmin(); setRunning('cleanupdate', false, '✕ Excluir versões'); return; }
     if (!r.ok) {
       let detail = `HTTP ${r.status}`;
       try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}
@@ -1301,7 +1305,7 @@ async function openMigrateModal() {
   try {
     const r = await fetch('/storage/disks', {headers: H()});
     if (r.status === 401) { showLogin('API Key inválida.'); closeMigrateModal(); return; }
-    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); closeMigrateModal(); return; }
+    if (r.status === 403) { nvNotAdmin(); closeMigrateModal(); return; }
     const disks = await r.json();
     _migrateDisks = disks.filter(d => !d.is_cache);
 
@@ -1400,7 +1404,7 @@ async function runMigratePreview() {
     const qs = `source=${encodeURIComponent(source)}&` + dests.map(d => `destinations=${encodeURIComponent(d)}`).join('&');
     const r = await fetch(`/maintenance/migrate-disk/preview?${qs}`, {headers: H()});
     if (r.status === 401) { showLogin('API Key inválida.'); closeMigrateModal(); return; }
-    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); closeMigrateModal(); return; }
+    if (r.status === 403) { nvNotAdmin(); closeMigrateModal(); return; }
     if (!r.ok) {
       let detail = `HTTP ${r.status}`;
       try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}
@@ -1466,7 +1470,7 @@ async function runMigrate() {
       body: JSON.stringify({source, destinations: dests}),
     });
     if (r.status === 401) { showLogin('API Key inválida.'); closeMigrateModal(); return; }
-    if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); closeMigrateModal(); return; }
+    if (r.status === 403) { nvNotAdmin(); closeMigrateModal(); return; }
     if (!r.ok) {
       let detail = `HTTP ${r.status}`;
       try { const e = await r.json(); detail = e.detail || detail; } catch(_) {}

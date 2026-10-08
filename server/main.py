@@ -1,5 +1,5 @@
 """
-NestVault  v9.3.2
+NestVault  v10.0.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -177,6 +177,8 @@ from nightly_cleanup import _cleanup_orphan_contents as _cleanup_orphan_contents
 from nightly_cleanup import orphan_filter as _orphan_filter
 from auth import get_current_user, require_admin, require_owner_or_admin
 from cloud.rclone_router import router as rclone_router
+from cloud_ui import router as cloud_ui_router
+from cloud_ui import media as cloud_media
 import scheduler as sched
 from cache_state import (_activity_wake, activity_generation, invalidate_activity,
                           mark_backup_activity, seconds_since_backup_activity)
@@ -576,6 +578,9 @@ async def lifespan(_: FastAPI):
     # Aquece o cache de stats fora do request, para que o primeiro acesso à página
     # depois do boot já encontre os dados prontos.
     _refresh_stats_async()
+    if cloud_media.AUTOSTART:
+        # lambda, e não SessionLocal direto: resolve o global na hora (os testes o trocam)
+        cloud_media.indexer.start(lambda: SessionLocal())
     log.info(f"Servidor iniciado — {len(storage.STORAGE_VOLUMES)} volume(s): {[str(v) for v in storage.STORAGE_VOLUMES]}")
     if storage.SSD_CACHE_ENABLED and storage.SSD_CACHE_DIR:
         log.info(f"SSD cache: habilitado — {storage.SSD_CACHE_DIR} (max {storage.SSD_CACHE_MAX_GB} GB)")
@@ -589,11 +594,13 @@ async def lifespan(_: FastAPI):
     ssd_monitor.cancel()
     activity_refresh.cancel()
     system_metrics.cancel()
+    cloud_media.indexer.stop()
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="9.3.2", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="10.0.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
+app.include_router(cloud_ui_router, prefix="/cloud", tags=["cloud"])
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -1992,7 +1999,9 @@ def _process_rebalance_check() -> None:
 
 
 # -- Dashboard ----------------------------------------------------------------
-@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+# Página inicial = Fotos, para qualquer perfil. O dashboard administrativo fica
+# em /admin, atrás da credencial de admin (ver static/app.js, nvGuardAdmin).
+@app.get("/admin", response_class=HTMLResponse, include_in_schema=False)
 def dashboard():
     index = STATIC_DIR / "index.html"
     if not index.exists():
@@ -2011,6 +2020,23 @@ def disks_page():
 @app.get("/explorer", response_class=HTMLResponse, include_in_schema=False)
 def explorer_page():
     page = STATIC_DIR / "explorer.html"
+    if not page.exists():
+        return HTMLResponse("<h1>Página não encontrada</h1>", status_code=404)
+    return HTMLResponse(page.read_text(encoding="utf-8"))
+
+
+@app.get("/cloud", response_class=HTMLResponse, include_in_schema=False)
+def cloud_page():
+    page = STATIC_DIR / "cloud.html"
+    if not page.exists():
+        return HTMLResponse("<h1>Página não encontrada</h1>", status_code=404)
+    return HTMLResponse(page.read_text(encoding="utf-8"))
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/photos", response_class=HTMLResponse, include_in_schema=False)
+def photos_page():
+    page = STATIC_DIR / "photos.html"
     if not page.exists():
         return HTMLResponse("<h1>Página não encontrada</h1>", status_code=404)
     return HTMLResponse(page.read_text(encoding="utf-8"))
@@ -3388,6 +3414,7 @@ def finish_version(label: str, version_key: str, req: VersionFinish, background_
     log.info(f"[versao] {label}/{version_key} → {req.status}")
     if req.status == "done":
         background_tasks.add_task(_bg_auto_cleanup)
+        cloud_media.indexer.wake()  # fotos novas entram na timeline
         if _should_process_ssd_moves(db):
             background_tasks.add_task(_bg_process_ssd_pending_moves)
         # Caso contrário, o _ssd_space_monitor dispara quando ficar ocioso.
@@ -4012,23 +4039,10 @@ def download_file(file_id: int, db: Session = Depends(get_db), user: User = Depe
     is_encrypted = fc.encrypted if fc else False
     filename     = Path(row.original_path).name
 
-    copies = (db.query(FileContentCopy)
-              .filter(FileContentCopy.sha256 == row.sha256)
-              .filter(~FileContentCopy.volume_path.in_([str(v) for v in _degraded_volumes]))
-              .all())
+    log.info(f"[download] ativando {row.original_path!r} (file_id={file_id}) — sha256={row.sha256[:8]}…")
 
-    log.info(f"[download] ativando {row.original_path!r} (file_id={file_id}) — sha256={row.sha256[:8]}…, {len(copies)} cópia(s)")
-
-    for copy in copies:
-        p = Path(copy.stored_at)
-        try:
-            p.stat()
-        except FileNotFoundError:
-            log.error(f"[download] {row.sha256[:8]}… ausente no disco em {p}")
-            continue
-        except OSError as exc:
-            log.error(f"[download] {row.sha256[:8]}… erro ao acessar {p}: {exc}")
-            continue
+    p, has_degraded = storage.readable_copy(db, row.sha256, "download")
+    if p is not None:
         log.info(f"[download] {row.sha256[:8]}… encontrado no disco em {p}")
         if is_encrypted:
             # filename* (RFC 5987) evita quebra de header / injecao via aspas ou
@@ -4042,11 +4056,6 @@ def download_file(file_id: int, db: Session = Depends(get_db), user: User = Depe
         return FileResponse(p, filename=filename)
 
     # 503 apenas se há cópias em volumes degraded (recuperáveis); 410 se o dado sumiu mesmo
-    degraded_str = [str(v) for v in _degraded_volumes]
-    has_degraded = bool(degraded_str) and db.query(FileContentCopy).filter(
-        FileContentCopy.sha256 == row.sha256,
-        FileContentCopy.volume_path.in_(degraded_str),
-    ).count()
     log.error(f"[download] {row.sha256[:8]}… nenhuma cópia válida encontrada no disco para file_id={file_id}")
     raise HTTPException(503 if has_degraded else 410,
                         "Arquivo em volume degraded" if has_degraded else "Conteudo fisico nao encontrado")

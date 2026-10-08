@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v9.3.2`
+# 🗄️ NestVault  `v10.0.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **backup por usuário** — cada conta só cria, lista e restaura seus próprios backups.
 
@@ -286,6 +286,15 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+Opcionais para a página **[Fotos](#-cloud-e--fotos)** *(v10.0)*:
+
+```bash
+pip install pillow-heif        # miniaturas de HEIC/HEIF (fotos de iPhone)
+sudo apt install -y ffmpeg     # miniatura, duração e data de vídeos
+```
+
+Sem eles, essas fotos e vídeos aparecem na galeria normalmente, só sem miniatura.
 
 ### 2. Configuração (`config.json`)
 
@@ -1103,6 +1112,8 @@ pytest tests/ --cov=server --cov-report=term-missing
 | `test_user_isolation.py` *(v7.9)* | Backup por usuário: listagem escopada por dono, bloqueio de leitura/escrita/download cruzado entre usuários, admin com acesso irrestrito |
 | `test_replication.py` | `/maintenance/rereplicate` e `/maintenance/reconcile-replication` — sub-replicação e sobre-replicação |
 | `test_disks.py` | `GET /storage/disks` — status de volumes, contagem de cópias físicas por volume |
+| `test_cloud_drive.py` *(v10.0)* | `/cloud`: raiz por usuário, prefixo comum, pastas/paginação, versões e histórico, busca, lixeira, cookie de sessão (adulterado, chave rotacionada), Range em arquivo plano e cifrado, HTML servido como texto |
+| `test_cloud_photos.py` *(v10.0)* | Indexação: backfill, EXIF e rotação, dedup entre backups, miniatura cifrada, limite de tentativas, órfãos; timeline paginada, meses e isolamento entre usuários; escolha de quais backups entram (só o dono, não por cookie) e migração da coluna |
 | `test_rclone_walk.py` | Walk incremental do rclone — conclusão + limpeza de checkpoint, resume de diretório falho, falha de listagem isolada, skip por mtime, dispatch por backend, override de `strategy`, `_MAX_RESUMES`, batching cross-directory, pastas protegidas |
 
 ---
@@ -1363,12 +1374,15 @@ Deixar o campo vazio desabilita o agendamento (execução manual apenas).
 Acessível pelo browser, servido diretamente pelo FastAPI:
 
 ```
-http://<ip-da-pi>:8000/
+http://<ip-da-pi>:8000/        # Fotos (página inicial)
+http://<ip-da-pi>:8000/admin   # área do administrador
 ```
 
 Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Para trocar, clique em **⌀ API Key** no header.
 
 > **v7.9 — dashboard é admin-only.** O painel web (stats, discos, manutenção, atividade, rclone, usuários) exige uma chave com `role=admin`; uma chave de usuário comum recebe a tela de login novamente com "Esta chave não tem permissão de administrador." O caminho de backup/restore do usuário comum é o CLI (`nestvault.py`), cuja API (`/backups`, `/files`, etc.) já é escopada por dono.
+
+> **v10.0 — página inicial é Fotos; painel em `/admin`.** Para qualquer perfil, `/` (e o app instalado no celular) abre **[Fotos](#-cloud-e--fotos)**, com **Cloud** ao lado. O dashboard passou para **`/admin`**, a entrada da **área do administrador** (botão **⚙ Admin**), que dá acesso a todos os painéis desta seção. A área exige uma **chave de administrador**: se a chave com que você entrou já é de admin, entra direto; se não, ela pede uma, guardada à parte (`localStorage.nvAdminKey`), sem trocar a chave que você usa nas fotos. **⎋ Sair do admin** apaga só a chave de admin e volta para as fotos. Chave de admin revogada ou rotacionada faz a área pedir a credencial de novo. As URLs das outras páginas (`/disks`, `/activity`, `/explorer`...) não mudaram.
 
 > **v9.1.1 — layout e leitura.** Todas as telas usam a mesma coluna centrada, em duas larguras: 1440px nas páginas de dados e 960px em Configurações e Usuários, que são formulários. O cabeçalho ocupa a largura toda mas alinha os botões com a borda do conteúdo, então a coluna não muda de posição ao navegar. As cores foram calibradas para atender WCAG AA em texto pequeno nos dois temas — inclusive os badges de status, que antes não passavam em nenhum —, e a navegação por `Tab` passa a mostrar um anel de foco visível.
 
@@ -1394,7 +1408,39 @@ Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Par
 - **Configurações** *(v8.0)* — página `/settings`, ver abaixo
 - **Discos** — página `/disks` com painel de volumes: espaço total/livre/usado, arquivos físicos por volume e status (ok/degraded)
 - **Explorer de arquivos** — navegação e download de arquivos de uma versão específica via `/explorer`
+- **Cloud e Fotos** *(v10.0)* — `/cloud` e `/photos`, ver abaixo. Ao contrário do resto do painel, funcionam com chave de **usuário comum**
 - **Backups em tempo real** — indicador no cabeçalho com contagem de backups em andamento; polling automático a cada 3 s com botão ⏸ para pausar
+
+### ☁ Cloud e ▣ Fotos
+
+*(v10.0)* Duas páginas para usar os backups como um serviço de nuvem, pelo navegador ou pelo celular. Cada usuário vê **só os próprios backups** — inclusive o admin, para quem o `/explorer` continua sendo a visão de todos.
+
+**`/cloud` — drive (estilo OneDrive)**
+
+- A raiz lista seus backups como pastas. Dentro de cada um, a navegação começa no prefixo comum dos arquivos: um backup de `/Users/voce/Pictures` abre direto nas pastas de dentro
+- Grade ou lista, busca por nome dentro do backup, ordenação por nome, data ou tamanho
+- Mostra a **última versão concluída**; o seletor no topo troca para qualquer versão anterior
+- **⟲ Versões** no visualizador lista as versões em que o arquivo existe e marca onde o conteúdo mudou — clique para abrir aquela versão
+- Visualiza imagem, vídeo (com seek), áudio, PDF e texto; os demais tipos são baixados. Arquivos `.html` e scripts aparecem como texto, nunca executam
+
+**`/photos` — galeria (estilo Google Fotos)**
+
+- Fotos e vídeos da última versão de **todos** os seus backups numa linha do tempo, por data de captura (EXIF), agrupados por dia e mês; a mesma foto em dois backups aparece uma vez
+- Rolagem infinita, **Ir para…** um mês, visualizador com setas/swipe, data, dimensões, backup de origem e atalho para a pasta no `/cloud`
+- **Live Photos** do iPhone (`IMG_1234.HEIC` + `IMG_1234.MOV` na mesma pasta) aparecem como um item só, com o selo **◉ LIVE**; o vídeo toca ao abrir, ao passar o mouse ou ao segurar o dedo. O MOV costuma ser HEVC, que só o Safari (e o Edge com a extensão HEVC) reproduz — nos outros navegadores o botão avisa "LIVE indisponível" e o vídeo fica para baixar em ⓘ Info
+- **▤ Backups** escolhe quais backups entram na galeria (todos, por padrão), com a contagem de fotos e vídeos de cada um. Um backup desmarcado também **não é indexado** — bom para backups de documentos com PDFs escaneados em JPG, por exemplo. A escolha é por backup e só o dono a altera
+
+**Indexação.** Miniaturas e datas são geradas por um processo em segundo plano no servidor, que pega também os backups que já existiam antes da atualização — não é preciso refazer backup. Ele processa um arquivo por vez, das versões mais novas para as mais antigas; enquanto isso, as fotos já aparecem com a data do arquivo, e a página mostra o progresso. Novos backups entram assim que a versão termina. Cada arquivo processado deixa uma linha no log do servidor (`[photos] … miniaturas ok` ou o motivo da falha), e cada ciclo com trabalho aparece na **Atividade** como *Indexação de Fotos*. Em Configurações, grupo **Fotos**:
+
+| Parâmetro | Padrão | O que faz |
+|---|---|---|
+| `photos.indexing_enabled` | `true` | Liga/desliga a indexação |
+| `photos.window_start_hour` | `0` | Hora local em que a indexação pode começar |
+| `photos.window_end_hour` | `0` | Hora local em que para. Igual ao início = o dia todo; `1` e `7` = só de madrugada |
+
+Num Raspberry Pi, a primeira indexação de um acervo grande leva horas (algo como 0,3–1 s por foto) — use a janela de horário se preferir que ela rode só de madrugada. As miniaturas ficam em `<volume>/_thumbs/` e, com criptografia ligada, são gravadas cifradas.
+
+> **Sessão.** Como `<img>` e `<video>` não enviam a API key, as duas páginas trocam a chave por um cookie de sessão (`HttpOnly`, `SameSite=Strict`, 7 dias) que só vale para leitura no `/cloud`. Rotacionar a chave do usuário encerra as sessões. O segredo de assinatura fica em `server/session.key`, gerado no primeiro uso — apagá-lo derruba todas as sessões.
 
 ### ⚒ Tela de Configurações
 
@@ -2306,7 +2352,8 @@ Endpoints que usam headers customizados:
 ## 📊 Documentação automática
 
 Com o servidor rodando:
-- **Dashboard**: `http://<ip-da-pi>:8000/`
+- **Fotos (página inicial)**: `http://<ip-da-pi>:8000/`
+- **Área do administrador (dashboard)**: `http://<ip-da-pi>:8000/admin`
 - **Swagger UI**: `http://<ip-da-pi>:8000/docs`
 - **ReDoc**: `http://<ip-da-pi>:8000/redoc`
 

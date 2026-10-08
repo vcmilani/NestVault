@@ -236,6 +236,36 @@ def content_path(sha256: str, volume: Path) -> Path:
     return dest
 
 
+def readable_copy(db, sha256: str, what: str = "download") -> tuple["Path | None", bool]:
+    """Primeira cópia legível de `sha256` fora de volumes degraded.
+
+    Retorna (path, False) ou (None, has_degraded). has_degraded=True quando a única
+    saída é uma cópia em volume degraded — recuperável (503), ao contrário de 410."""
+    from database import FileContentCopy
+
+    degraded = [str(v) for v in _degraded_volumes]
+    copies = (db.query(FileContentCopy)
+              .filter(FileContentCopy.sha256 == sha256)
+              .filter(~FileContentCopy.volume_path.in_(degraded))
+              .all())
+    for copy in copies:
+        p = Path(copy.stored_at)
+        try:
+            p.stat()
+        except FileNotFoundError:
+            log.error(f"[{what}] {sha256[:8]}… ausente no disco em {p}")
+            continue
+        except OSError as exc:
+            log.error(f"[{what}] {sha256[:8]}… erro ao acessar {p}: {exc}")
+            continue
+        return p, False
+    has_degraded = bool(degraded) and db.query(FileContentCopy).filter(
+        FileContentCopy.sha256 == sha256,
+        FileContentCopy.volume_path.in_(degraded),
+    ).count() > 0
+    return None, has_degraded
+
+
 class ReplicaSourceCorrupt(Exception):
     """A origem de uma cópia não tem o conteúdo esperado — não deve ser propagada."""
 

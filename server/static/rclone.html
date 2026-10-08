@@ -69,7 +69,7 @@
   .log-content{flex:1;overflow-y:auto;background:var(--bg3);border:1px solid var(--border);padding:12px 14px;font-size:11px;line-height:1.7;color:var(--text-dim);white-space:pre-wrap;word-break:break-all;font-family:var(--mono)}
 </style>
 </head>
-<body>
+<body data-admin-page>
 
 <header>
   <div class="logo">
@@ -79,7 +79,9 @@
   <div class="header-right">
     <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
     <button class="hbtn" onclick="loadAll()" title="Refresh">↻<span class="hbtn-label"> Refresh</span></button>
-    <a class="hbtn" href="/" title="Dashboard">←<span class="hbtn-label"> Dashboard</span></a>
+    <a class="hbtn" href="/admin" title="Dashboard">←<span class="hbtn-label"> Dashboard</span></a>
+    <a class="hbtn" href="/cloud" title="Cloud">☁<span class="hbtn-label"> Cloud</span></a>
+    <a class="hbtn" href="/" title="Fotos">▣<span class="hbtn-label"> Fotos</span></a>
     <a class="hbtn" href="/activity" title="Atividade">◎<span class="hbtn-label"> Atividade</span></a>
     <a class="hbtn active" href="/rclone-jobs" title="rclone">⟳<span class="hbtn-label"> rclone</span></a>
     <a class="hbtn" href="/stats" title="Stats">∑<span class="hbtn-label"> Stats</span></a>
@@ -92,7 +94,9 @@
 
 <nav class="mobile-nav">
   <button onclick="loadAll();closeNav()">↻ Refresh</button>
-  <a href="/">← Dashboard</a>
+  <a href="/admin">← Dashboard</a>
+  <a href="/cloud">☁ Cloud</a>
+  <a href="/">▣ Fotos</a>
   <a href="/activity">◎ Atividade</a>
   <a class="active" href="/rclone-jobs">⟳ rclone</a>
   <a href="/stats">∑ Stats</a>
@@ -214,7 +218,7 @@
     try {
       const r = await fetch('/rclone/remotes', {headers: H()});
       if (r.status === 401) { showLogin('API Key inválida.'); return; }
-      if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); return; }
+      if (r.status === 403) { nvNotAdmin(); return; }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const {remotes} = await r.json();
       _remotes = remotes;
@@ -238,7 +242,7 @@
     try {
       const r = await fetch('/rclone/jobs', {headers: H()});
       if (r.status === 401) { showLogin('API Key inválida.'); return; }
-      if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); return; }
+      if (r.status === 403) { nvNotAdmin(); return; }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const jobs = await r.json();
       jobs.forEach(j => { if (j.last_run_message) _jobsLogCache[j.id] = j.last_run_message; });
