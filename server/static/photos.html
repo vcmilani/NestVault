@@ -199,7 +199,9 @@
   const fmtMonth = ts => { const s = new Date(ts * 1000).toLocaleDateString('pt-BR', {month: 'long', year: 'numeric'}); return s[0].toUpperCase() + s.slice(1); };
   const fmtFull  = ts => new Date(ts * 1000).toLocaleString('pt-BR', {dateStyle: 'full', timeStyle: 'short'});
   const fmtDur   = s => s ? Math.floor(s / 60) + ':' + String(Math.round(s % 60)).padStart(2, '0') : '';
-  const thumbUrl = (it, size) => `/cloud/thumb/${it.sha256}?size=${size}`;
+  // v = revisão da miniatura: quando o servidor a refaz, a URL muda e o cache de 7 dias não segura a antiga.
+  const thumbUrl = (it, size) => `/cloud/thumb/${it.sha256}?size=${size}&v=${it.tv || 0}`;
+  const fullUrl = it => `/cloud/photo/${it.id}/full`;
   const contentUrl = (it, dl) => `/cloud/content/${it.id}` + (dl ? '?download=true' : '');
   const ext = n => (n.split('.').pop() || '').toLowerCase();
 
@@ -578,6 +580,21 @@
   }
   function dirOf(p) { const i = p.lastIndexOf('/'); return i > 0 ? p.slice(0, i) : ''; }
 
+  // Mostra a miniatura grande na hora e troca pelo original em resolução total
+  // assim que ele chega (HEIC/TIFF vêm convertidos pelo servidor). Se falhar,
+  // fica a miniatura.
+  function upgradeToFull(img, it) {
+    if (!img) return;
+    const url = fullUrl(it);
+    if (img.getAttribute('src') === url) return;
+    const full = new Image();
+    full.decoding = 'async';
+    full.onload = () => {
+      if (st.items[vw.idx] === it && img.isConnected) img.src = url;
+    };
+    full.src = url;
+  }
+
   function show() {
     const it = st.items[vw.idx];
     document.getElementById('vName').textContent = it.name;
@@ -588,7 +605,7 @@
     stage.querySelectorAll('video').forEach(v => v.pause());
     let media;
     const still = stillThumb(it) ? thumbUrl(stillThumb(it), 'lg')
-                : BROWSER_IMG.includes(ext(it.name)) ? contentUrl(it) : null;
+                : BROWSER_IMG.includes(ext(it.name)) ? fullUrl(it) : null;
     if (it.live && still) {
       // Foto parada por baixo, vídeo da Live Photo por cima (invisível até tocar).
       media = `<button class="v-live" id="vLive" title="Reproduzir a Live Photo (ou passe o mouse sobre a foto)">◉ LIVE</button>
@@ -601,7 +618,7 @@
     } else if (it.thumb) {
       media = `<img alt="${esc(it.name)}" src="${thumbUrl(it, 'lg')}">`;
     } else if (BROWSER_IMG.includes(ext(it.name))) {
-      media = `<img alt="${esc(it.name)}" src="${contentUrl(it)}">`;
+      media = `<img alt="${esc(it.name)}" src="${fullUrl(it)}">`;
     } else {
       media = `<div class="v-none">Miniatura ainda não gerada para este formato.<br><a class="vbtn" href="${contentUrl(it, true)}">↓ Baixar original</a></div>`;
     }
@@ -609,6 +626,7 @@
       (vw.idx > 0 ? '<button class="v-nav v-prev" id="vPrev" aria-label="Anterior">‹</button>' : '') +
       (vw.idx < st.items.length - 1 || !st.done ? '<button class="v-nav v-next" id="vNext" aria-label="Próxima">›</button>' : '');
     if (it.live && still) wireLive();
+    if (it.kind === 'image') upgradeToFull(stage.querySelector('img'), it);
     const drive = `/cloud?label=${encodeURIComponent(it.label)}` + (dirOf(it.path) ? `&path=${encodeURIComponent(dirOf(it.path))}` : '');
     document.getElementById('vInfo').innerHTML = `<dl>
       <dt>Data</dt><dd>${esc(fmtFull(it.ts))}${it.dated ? '' : '<br><span style="color:#8a9b98">sem data de captura — usando a data do arquivo</span>'}</dd>

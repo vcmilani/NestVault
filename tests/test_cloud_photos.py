@@ -561,3 +561,61 @@ def test_hidden_pin_admin_only_and_validated(two_users):
         assert h.startswith("scrypt$") and "1234" not in h
     finally:
         db.close()
+
+
+def test_old_thumb_rev_is_regenerated(client):
+    backup(client, "fotos", {"/p/a.jpg": (jpeg(size=(1600, 1200)), 1)})
+    assert index() == 1
+    item = photos(client)["items"][0]
+    assert item["tv"] == media.THUMB_REV
+    r = client.get(f"/cloud/thumb/{item['sha256']}")
+    assert Image.open(io.BytesIO(r.content)).size == (800, 600)
+    # Simula um acervo indexado antes de THUMB_REV subir (e que esgotou as tentativas)
+    db = session()
+    mi = db.query(db_mod.MediaInfo).one()
+    mi.thumb_rev, mi.attempts = 1, media.MAX_ATTEMPTS
+    db.commit()
+    db.close()
+    media.indexer._scanned.clear()
+    assert index() == 1
+    db = session()
+    mi = db.query(db_mod.MediaInfo).one()
+    assert mi.thumb_rev == media.THUMB_REV and mi.status == "done" and mi.attempts == 1
+    db.close()
+    media.indexer._scanned.clear()
+    assert index() == 0
+
+
+def test_thumb_keeps_icc_profile(client):
+    icc = b"perfil-de-cor-ficticio"
+    buf = io.BytesIO()
+    Image.new("RGB", (300, 200), (10, 200, 10)).save(buf, "JPEG", icc_profile=icc)
+    backup(client, "fotos", {"/p/p3.jpg": (buf.getvalue(), 1)})
+    index()
+    sha = photos(client)["items"][0]["sha256"]
+    for size in ("sm", "lg"):
+        r = client.get(f"/cloud/thumb/{sha}", params={"size": size})
+        assert Image.open(io.BytesIO(r.content)).info.get("icc_profile") == icc
+
+
+def test_full_photo_serves_original_or_converts(client):
+    data = jpeg(size=(3000, 2000))
+    tif = io.BytesIO()
+    Image.new("RGB", (2400, 1800), (1, 2, 3)).save(tif, "TIFF")
+    backup(client, "fotos", {"/p/a.jpg": (data, 1), "/p/b.tif": (tif.getvalue(), 2),
+                             "/p/c.mp4": (b"nao e foto", 3)})
+    items = {i["name"]: i for i in photos(client)["items"]}
+    r = client.get(f"/cloud/photo/{items['a.jpg']['id']}/full")
+    assert r.status_code == 200 and r.content == data
+    r = client.get(f"/cloud/photo/{items['b.tif']['id']}/full")
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
+    assert Image.open(io.BytesIO(r.content)).size == (2400, 1800)
+    assert client.get(f"/cloud/photo/{items['c.mp4']['id']}/full").status_code == 404
+
+
+def test_full_photo_is_owner_only(two_users):
+    _admin, alice, bob = two_users
+    backup(alice, "alice-fotos", {"/a/1.jpg": (jpeg(), 1)})
+    fid = photos(alice)["items"][0]["id"]
+    assert alice.get(f"/cloud/photo/{fid}/full").status_code == 200
+    assert bob.get(f"/cloud/photo/{fid}/full").status_code in (403, 404)

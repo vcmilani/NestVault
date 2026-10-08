@@ -13,7 +13,8 @@ para Pi. photos.rest_factor descansa entre fotos e photos.max_temp_c pausa com a
 quente; ambos são lidos a cada foto, então valem assim que salvos em /settings.
 
 Miniaturas ficam em <volume>/_thumbs/; se o original está cifrado, a miniatura
-também é cifrada (é tão pessoal quanto a foto).
+também é cifrada (é tão pessoal quanto a foto). Subir THUMB_REV faz o indexador
+refazer as miniaturas já geradas, no mesmo ritmo (e janela) da indexação.
 """
 import json
 import logging
@@ -45,8 +46,13 @@ log = logging.getLogger("backup-server")
 IMAGE_EXT = ("jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "avif", "bmp", "tif", "tiff")
 VIDEO_EXT = ("mp4", "m4v", "mov", "3gp", "mkv", "webm", "avi")
 
-SM_BOX = (960, 320)   # grade: altura ~320px, panorâmica até 960 de largura
-LG_MAX = 1600         # visualizador
+# Grade: a linha tem 190px CSS (110 no celular) e estica até ~1,5x para fechar a
+# largura; em tela 2x/3x isso pede ~600px reais. Panorâmica (proporção até 3) até 1800.
+SM_BOX = (1800, 600)
+LG_MAX = 1600         # visualizador: aparece na hora, enquanto o original carrega
+THUMB_QUALITY = 85
+THUMB_REV = 2         # 1 = 320px/q82 sem perfil de cor; 2 = 600px/q85 com ICC
+FULL_QUALITY = 92     # HEIC/TIFF convertidos na hora para o visualizador
 MAX_ATTEMPTS = 3
 RETRY_AFTER = timedelta(hours=1)
 BATCH = 50
@@ -119,6 +125,8 @@ def _image(path: Path) -> tuple[dict, "object"]:
 
     with Image.open(path) as im:
         w, h = im.size
+        # Perfil de cor (Display P3 do iPhone): sem ele a miniatura sai desbotada.
+        icc = im.info.get("icc_profile")
         exif = im.getexif()
         orientation = exif.get(274)
         sub = exif.get_ifd(0x8769)
@@ -135,6 +143,8 @@ def _image(path: Path) -> tuple[dict, "object"]:
             img = bg
         else:
             img = img.convert("RGB")
+    if icc:
+        img.info["icc_profile"] = icc
     if orientation in (5, 6, 7, 8):
         w, h = h, w
     return {"width": w, "height": h, "taken_ts": taken, "duration": None}, img
@@ -223,16 +233,58 @@ def _plain_copy(src: Path, fc: FileContent, kind: str, workdir: Path) -> Path | 
 
 
 def _save_thumb(img, box, dest: Path, encrypt: bool, workdir: Path) -> str:
+    from PIL import Image
+
     t = img.copy()
-    t.thumbnail(box)
+    t.thumbnail(box, Image.Resampling.LANCZOS)
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = workdir / dest.name
-    t.save(tmp, "JPEG", quality=82, optimize=True, progressive=True)
+    t.save(tmp, "JPEG", quality=THUMB_QUALITY, optimize=True, progressive=True,
+           icc_profile=img.info.get("icc_profile"))
     if encrypt:
         crypto.encrypt_stream(tmp, workdir / (dest.name + ".enc"), storage.encryption_key)
         tmp = workdir / (dest.name + ".enc")
     os.replace(tmp, dest)
     return str(dest)
+
+
+# -- Original no visualizador --------------------------------------------------
+
+BROWSER_IMG_EXT = ("jpg", "jpeg", "png", "gif", "webp", "avif", "bmp")
+# Cada conversão segura a foto inteira decodificada (~36 MB para 12 MP): navegar
+# rápido no visualizador não pode empilhar várias ao mesmo tempo num Pi.
+_full_gate = threading.Semaphore(2)
+
+
+def full_jpeg(db: Session, sha256: str, name: str, encrypted: bool) -> bytes | None:
+    """O original em resolução total como JPEG, para formatos que o navegador não
+    abre (HEIC, TIFF). Rotação EXIF aplicada e perfil de cor preservado. None se
+    o Pillow não abre o formato (HEIC sem pillow-heif)."""
+    import io
+    from PIL import Image, ImageOps, UnidentifiedImageError
+
+    src, has_degraded = storage.readable_copy(db, sha256, "photos")
+    if src is None:
+        raise FileNotFoundError("nenhuma copia legivel" + (" (so em volume degraded)" if has_degraded else ""))
+    with _full_gate, _workdir() as wd:
+        plain = src
+        if encrypted:
+            plain = wd / "plain"
+            with open(plain, "wb") as f:
+                for chunk in crypto.decrypt_chunks(src, storage.encryption_key):
+                    f.write(chunk)
+        try:
+            im = Image.open(plain)
+        except UnidentifiedImageError:
+            return None
+        with im:
+            icc = im.info.get("icc_profile")
+            img = ImageOps.exif_transpose(im)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            out = io.BytesIO()
+            img.save(out, "JPEG", quality=FULL_QUALITY, progressive=True, icc_profile=icc)
+    return out.getvalue()
 
 
 def _remove_thumbs(mi: MediaInfo) -> None:
@@ -258,6 +310,10 @@ def process_one(db: Session, sha256: str, name: str) -> bool:
     kind = kind_of(name)
     fc = db.get(FileContent, sha256)
     mi = db.get(MediaInfo, sha256) or MediaInfo(sha256=sha256, kind=kind or "image", attempts=0)
+    if mi.status == "done":
+        # Refazendo só por THUMB_REV: falhar agora não pode virar desistência
+        # herdada das tentativas da primeira indexação.
+        mi.attempts = 0
     mi.attempts = (mi.attempts or 0) + 1
     mi.processed_at = datetime.now()
 
@@ -300,6 +356,7 @@ def process_one(db: Session, sha256: str, name: str) -> bool:
         mi.width, mi.height = meta["width"], meta["height"]
         mi.taken_ts, mi.duration = meta["taken_ts"], meta["duration"]
         mi.status, mi.error = "done", None
+        mi.thumb_rev = THUMB_REV
         ok = True
     except Exception as exc:
         mi.status, mi.error = "failed", f"{type(exc).__name__}: {exc}"[:500]
@@ -321,13 +378,15 @@ def process_one(db: Session, sha256: str, name: str) -> bool:
 
 
 def _not_done_filter():
-    """Sem MediaInfo, ou falhou com tentativas sobrando e já passou o intervalo."""
+    """Sem MediaInfo, ou falhou com tentativas sobrando e já passou o intervalo, ou
+    tem miniatura de uma revisão antiga (THUMB_REV)."""
     retry_before = datetime.now() - RETRY_AFTER
     settled = exists().where(and_(
         MediaInfo.sha256 == VersionFile.sha256,
-        or_(MediaInfo.status == "done",
-            MediaInfo.attempts >= MAX_ATTEMPTS,
-            MediaInfo.processed_at > retry_before),
+        or_(and_(MediaInfo.status == "done",
+                 or_(MediaInfo.thumb_rev >= THUMB_REV, MediaInfo.thumb_sm.is_(None))),
+            and_(MediaInfo.status == "failed",
+                 or_(MediaInfo.attempts >= MAX_ATTEMPTS, MediaInfo.processed_at > retry_before))),
     ))
     return ~settled
 
@@ -601,7 +660,8 @@ def timeline(db: Session, user: User) -> list[dict]:
         rows = (db.query(VersionFile.id, VersionFile.sha256, VersionFile.original_path,
                          VersionFile.mtime, VersionFile.version_id,
                          MediaInfo.status, MediaInfo.attempts, MediaInfo.taken_ts, MediaInfo.width,
-                         MediaInfo.height, MediaInfo.duration, MediaInfo.thumb_sm)
+                         MediaInfo.height, MediaInfo.duration, MediaInfo.thumb_sm,
+                         MediaInfo.thumb_rev)
                 .outerjoin(MediaInfo, MediaInfo.sha256 == VersionFile.sha256)
                 .filter(VersionFile.version_id.in_(list(by_vid)), media_path_filter())
                 .all())
@@ -632,7 +692,7 @@ def timeline(db: Session, user: User) -> list[dict]:
                 "ts": r.taken_ts if r.taken_ts else r.mtime,
                 "dated": bool(r.taken_ts),
                 "w": r.width, "h": r.height, "duration": r.duration,
-                "thumb": bool(r.thumb_sm), "state": state,
+                "thumb": bool(r.thumb_sm), "tv": r.thumb_rev or 0, "state": state,
                 "label": label, "path": rel, "name": name,
                 "hidden": r.sha256 in hidden_shas,
             })

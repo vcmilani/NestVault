@@ -121,11 +121,7 @@ def get_history(label: str, path: str, db: Session = Depends(get_db),
     return tree.history(db, label, base + tree.norm_rel(path))
 
 
-@router.get("/content/{file_id}")
-def get_content(file_id: int, request: Request, download: bool = False,
-                db: Session = Depends(get_db),
-                user: User = Depends(get_user_header_or_cookie)):
-    """Conteúdo do arquivo inline (preview) ou como download, com suporte a Range."""
+def _file_row(db: Session, file_id: int, user: User):
     row = (db.query(VersionFile.original_path, VersionFile.sha256, BackupID.owner_user_id,
                     FileContent.size, FileContent.encrypted)
            .join(BackupVersion, BackupVersion.id == VersionFile.version_id)
@@ -138,6 +134,15 @@ def get_content(file_id: int, request: Request, download: bool = False,
     if not row:
         raise HTTPException(404, "Arquivo nao encontrado")
     require_owner_or_admin(row.owner_user_id, user)
+    return row
+
+
+@router.get("/content/{file_id}")
+def get_content(file_id: int, request: Request, download: bool = False,
+                db: Session = Depends(get_db),
+                user: User = Depends(get_user_header_or_cookie)):
+    """Conteúdo do arquivo inline (preview) ou como download, com suporte a Range."""
+    row = _file_row(db, file_id, user)
     return content.stream(request, db, sha256=row.sha256, name=Path(row.original_path).name,
                           size=row.size, encrypted=bool(row.encrypted), download=download,
                           who=f"{user.username} file_id={file_id}")
@@ -276,6 +281,34 @@ def set_photo_label(label: str, req: PhotoLabelUpdate, db: Session = Depends(get
     return {"label": label, "enabled": req.enabled}
 
 
+@router.get("/photo/{file_id}/full")
+def get_photo_full(file_id: int, request: Request, db: Session = Depends(get_db),
+                   user: User = Depends(get_user_header_or_cookie)):
+    """A foto em resolução total para o visualizador de /photos: o próprio original
+    quando o navegador abre o formato, senão (HEIC, TIFF) convertido para JPEG."""
+    row = _file_row(db, file_id, user)
+    name = Path(row.original_path).name
+    if media.kind_of(name) != "image":
+        raise HTTPException(404, "Nao e uma foto")
+    if name.rsplit(".", 1)[-1].lower() in media.BROWSER_IMG_EXT:
+        return content.stream(request, db, sha256=row.sha256, name=name, size=row.size,
+                              encrypted=bool(row.encrypted), download=False,
+                              who=f"{user.username} file_id={file_id}")
+    headers = {"Cache-Control": "private, max-age=86400", "ETag": f'"{row.sha256}-full"'}
+    if request.headers.get("if-none-match") == headers["ETag"]:
+        return Response(status_code=304, headers=headers)
+    try:
+        data = media.full_jpeg(db, row.sha256, name, bool(row.encrypted))
+    except FileNotFoundError as exc:
+        log.error(f"[photos] {user.username} file_id={file_id} {name!r}: {exc}")
+        raise HTTPException(410, "Conteudo fisico nao encontrado")
+    if data is None:
+        raise HTTPException(415, "Formato sem suporte no servidor")
+    log.info(f"[photos] {user.username} abriu {name!r} em resolucao total "
+             f"(convertido, {len(data) // 1024} KB)")
+    return Response(data, media_type="image/jpeg", headers=headers)
+
+
 @router.get("/thumb/{sha256}")
 def get_thumb(sha256: str, request: Request, size: Literal["sm", "lg"] = "sm",
               db: Session = Depends(get_db),
@@ -295,7 +328,8 @@ def get_thumb(sha256: str, request: Request, size: Literal["sm", "lg"] = "sm",
         media.bump_generation()
         media.indexer.wake()
         raise HTTPException(404, "Miniatura nao encontrada")
-    headers = {"Cache-Control": "private, max-age=604800", "ETag": f'"{sha256}-{size}"'}
+    headers = {"Cache-Control": "private, max-age=604800",
+               "ETag": f'"{sha256}-{size}-{mi.thumb_rev or 0}"'}
     if request.headers.get("if-none-match") == headers["ETag"]:
         return Response(status_code=304, headers=headers)
     if mi.thumb_encrypted:

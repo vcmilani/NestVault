@@ -283,6 +283,9 @@ class MediaInfo(Base):
     thumb_sm     = Column(String, nullable=True)
     thumb_lg     = Column(String, nullable=True)
     thumb_encrypted = Column(Boolean, nullable=False, default=False)
+    # Revisão do formato das miniaturas (media.THUMB_REV): abaixo da atual, o
+    # indexador refaz — é como miniaturas maiores chegam ao acervo já indexado.
+    thumb_rev    = Column(Integer, nullable=False, default=0, server_default="0")
     processed_at = Column(DateTime, nullable=True)
 
 
@@ -489,6 +492,7 @@ def init_db():
         # Fotos: default constante, então o ALTER continua O(1) (SQLite e PG 11+).
         ("backup_ids",      "photos_enabled",      "BOOLEAN NOT NULL DEFAULT TRUE"),
         ("users",           "hidden_pin_hash",     "TEXT"),
+        ("media_info",      "thumb_rev",           "INTEGER NOT NULL DEFAULT 0"),
     ):
         with engine.connect() as conn:
             try:
