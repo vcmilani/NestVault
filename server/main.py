@@ -1111,6 +1111,14 @@ class ReclaimableLabelEntry(BaseModel):
     old_version_count: int
     old_versions_size_bytes: int
 
+class ExclusiveLabelEntry(BaseModel):
+    label: str
+    client_name: Optional[str]
+    file_count: int
+    exclusive_file_count: int
+    exclusive_pct: float
+    exclusive_size_bytes: int
+
 class DiskUsageDay(BaseModel):
     date: str
     used_pct: float
@@ -1150,6 +1158,7 @@ class StatsResponse(BaseModel):
     bytes_freed_by_cleanup: int
     backups_activity: list[BackupActivityEntry]
     reclaimable_by_label: list[ReclaimableLabelEntry]
+    exclusive_by_label: list[ExclusiveLabelEntry]
     disk_usage_days: list[DiskUsageDay]
     freed_days: list[FreedDay]
     server_time: str
@@ -2457,6 +2466,53 @@ def _build_stats_data(db: Session) -> StatsResponse:
             if row.old_versions_size_bytes > 0
         ]
 
+    # --- Q12: exclusividade da versão mais recente de cada label ---
+    # Arquivo exclusivo = conteúdo (sha256) que não aparece na versão mais recente
+    # de nenhum outro label. NOT EXISTS coberto por idx_vf_sha_version.
+    exclusive_by_label: list[ExclusiveLabelEntry] = []
+    if latest_ids:
+        _of = aliased(VersionFile)
+        _excl_flag = case(
+            (exists().where(and_(_of.sha256 == VersionFile.sha256,
+                                 _of.version_id.in_(latest_ids),
+                                 _of.version_id != VersionFile.version_id)), 0),
+            else_=1,
+        )
+        _excl_sq = (
+            db.query(
+                VersionFile.version_id.label("vid"),
+                FileContent.size.label("size"),
+                _excl_flag.label("excl"),
+            )
+            .join(FileContent, FileContent.sha256 == VersionFile.sha256)
+            .filter(VersionFile.version_id.in_(latest_ids))
+            .subquery()
+        )
+        excl_rows = (
+            db.query(
+                _excl_sq.c.vid,
+                func.count().label("fc"),
+                func.coalesce(func.sum(_excl_sq.c.excl), 0).label("ec"),
+                func.coalesce(func.sum(_excl_sq.c.excl * _excl_sq.c.size), 0).label("es"),
+            )
+            .group_by(_excl_sq.c.vid)
+            .all()
+        )
+        excl_map = {r.vid: (int(r.fc), int(r.ec), int(r.es)) for r in excl_rows}
+        for r in label_stats:
+            fc, ec, es = excl_map.get(r.latest_id, (0, 0, 0))
+            if not fc:
+                continue
+            exclusive_by_label.append(ExclusiveLabelEntry(
+                label=r.label,
+                client_name=names_map.get(r.label),
+                file_count=fc,
+                exclusive_file_count=ec,
+                exclusive_pct=round(ec / fc * 100, 1),
+                exclusive_size_bytes=es,
+            ))
+        exclusive_by_label.sort(key=lambda e: e.exclusive_pct, reverse=True)
+
     # --- Q9: histórico diário de uso de disco (gráfico de flutuação) ---
     disk_usage_days = [
         DiskUsageDay(date=r.date, used_pct=r.used_pct, used_bytes=r.used_bytes, total_bytes=r.total_bytes)
@@ -2492,6 +2548,7 @@ def _build_stats_data(db: Session) -> StatsResponse:
         bytes_freed_by_cleanup=bytes_freed_by_cleanup,
         backups_activity=backups_activity,
         reclaimable_by_label=reclaimable_by_label,
+        exclusive_by_label=exclusive_by_label,
         disk_usage_days=disk_usage_days,
         freed_days=freed_days,
         server_time=datetime.now().isoformat(),

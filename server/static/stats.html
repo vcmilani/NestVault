@@ -296,6 +296,20 @@
     <div class="loading">Carregando</div>
   </div>
 
+  <!-- 4d. Exclusividade por backup -->
+  <section id="sec-exclusive" style="display:none;margin-bottom:28px">
+    <div class="section-head" style="margin-bottom:10px">
+      <div class="section-title">Arquivos exclusivos por backup</div>
+      <span class="section-sub">% de arquivos da versão mais recente que não existem na versão mais recente de outros backups</span>
+    </div>
+    <div class="table-wrap">
+      <table id="tblExclusive">
+        <thead><tr><th>Backup</th><th>Cliente</th><th style="text-align:right">Exclusivos</th><th style="text-align:right">Arquivos</th><th style="text-align:right">%</th><th style="text-align:right">Tamanho exclusivo</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
   <!-- 5. Atividade por Backup -->
   <section id="sec-activity" style="display:none;margin-bottom:28px">
     <div class="section-head" style="margin-bottom:10px">
@@ -426,6 +440,7 @@
     renderChanges(data.changes_days);
     renderFreed(data.freed_days || []);
     renderTopBackups(data.top_backups);
+    renderExclusiveByLabel(data.exclusive_by_label || []);
     renderDedup(data);
     renderMaintenance(data);
     renderCloud(data);
@@ -580,6 +595,21 @@
       <td>${esc(e.client_name || '—')}</td>
       <td>${e.old_version_count.toLocaleString('pt-BR')}</td>
       <td style="text-align:right;color:var(--amber)">${esc(fmtSize(e.old_versions_size_bytes))}</td>
+    </tr>`).join('');
+  }
+
+  function renderExclusiveByLabel(entries) {
+    const sec = document.getElementById('sec-exclusive');
+    if (!entries.length) { sec.style.display = 'none'; return; }
+    sec.style.display = '';
+    const tbody = document.querySelector('#tblExclusive tbody');
+    tbody.innerHTML = entries.map(e => `<tr>
+      <td>${esc(e.label)}</td>
+      <td>${esc(e.client_name || '—')}</td>
+      <td style="text-align:right">${e.exclusive_file_count.toLocaleString('pt-BR')}</td>
+      <td style="text-align:right">${e.file_count.toLocaleString('pt-BR')}</td>
+      <td style="text-align:right;color:var(--amber)">${e.exclusive_pct.toLocaleString('pt-BR', {minimumFractionDigits:1, maximumFractionDigits:1})}%</td>
+      <td style="text-align:right">${esc(fmtSize(e.exclusive_size_bytes))}</td>
     </tr>`).join('');
   }
 

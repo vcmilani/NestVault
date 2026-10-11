@@ -148,6 +148,32 @@ def test_stats_changes_days_empty_without_versions(client):
     assert stats.changes_days == []
 
 
+def test_stats_exclusive_by_label_compares_latest_versions(client):
+    make_backup(client, "a")
+    make_backup(client, "b")
+    # Versão antiga de "b" tem /x.txt — não conta, só a mais recente é comparada.
+    _done_version(client, "b", "v1", {"/x.txt": b"x"})
+    _done_version(client, "b", "v2", {"/shared.txt": b"shared"})
+    _done_version(client, "a", "v1", {
+        "/shared.txt": b"shared",
+        "/x.txt":      b"x",
+        "/only-a.txt": b"only-a",
+        "/dup.txt":    b"only-a",  # mesmo conteúdo, mesmo label: continua exclusivo
+    })
+    db = m.SessionLocal()
+    try:
+        stats = m._build_stats_data(db)
+    finally:
+        db.close()
+
+    by_label = {e.label: e for e in stats.exclusive_by_label}
+    assert (by_label["a"].file_count, by_label["a"].exclusive_file_count) == (4, 3)
+    assert by_label["a"].exclusive_pct == 75.0
+    assert by_label["a"].exclusive_size_bytes == len(b"x") + 2 * len(b"only-a")
+    assert (by_label["b"].file_count, by_label["b"].exclusive_file_count) == (1, 0)
+    assert by_label["b"].exclusive_pct == 0.0
+
+
 # -- daily_digest._version_diff -----------------------------------------------
 
 def test_digest_version_diff_matches_historical(client):
