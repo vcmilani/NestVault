@@ -280,6 +280,20 @@ def test_write_requires_header_and_ownership(two_users):
         alice.headers["X-API-Key"] = key
 
 
+def test_admin_versions_list_shows_live_and_trash(client):
+    label = _drive(client)
+    _put(client, label, "a.txt", b"a")
+    _put(client, label, "b.txt", b"bb")
+    _post(client, "/cloud/drive/delete", {"label": label, "items": ["b.txt"]})
+    r = client.get(f"/backups/{label}/versions")
+    assert r.status_code == 200, r.text
+    by = {v["version_key"]: v for v in r.json()}
+    assert by["live"]["status"] == "done" and by["live"]["file_count"] == 1
+    assert by["trash"]["status"] == "server-trash" and by["trash"]["file_count"] == 1
+    r = client.get(f"/backups/{label}/versions/trash")
+    assert r.status_code == 200 and r.json()["status"] == "server-trash"
+
+
 def test_delete_drive_label(client):
     label = _drive(client)
     _put(client, label, "a.txt", b"a")

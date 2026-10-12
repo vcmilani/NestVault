@@ -854,7 +854,8 @@ class VersionInfo(BaseModel):
     id: int
     version_key: str
     backup_label: str
-    status: Literal["running", "incomplete", "done", "failed"]
+    # "server-trash": lixeira de uma pasta do servidor do /cloud (SERVER_TRASH_STATUS)
+    status: Literal["running", "incomplete", "done", "failed", "server-trash"]
     created_at: str
     finished_at: Optional[str] = None
     duration_seconds: Optional[float] = Field(None, description="Duracao do backup em segundos")
