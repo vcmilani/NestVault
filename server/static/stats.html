@@ -54,6 +54,14 @@
   .td-num{color:var(--blue);font-variant-numeric:tabular-nums}
   .td-amber{color:var(--amber)}
 
+  .repl-ok{color:var(--green)}
+  .repl-no{color:var(--red)}
+  .repl-cur td{background:rgba(232,169,64,.07)}
+  .repl-vol{display:flex;align-items:center;gap:8px;font-size:10px;color:var(--text-dim);white-space:nowrap}
+  .repl-bar{width:70px;height:5px;background:var(--bg3);flex-shrink:0}
+  .repl-bar div{height:100%;background:var(--amber)}
+  .repl-bar.no div{background:var(--red)}
+  .repl-note{font-size:10px;color:var(--text-mute);margin-top:6px;letter-spacing:.04em;line-height:1.6}
   .empty-state{padding:32px;text-align:center;color:var(--text-mute);font-size:11px;letter-spacing:.08em;border:1px solid var(--border);background:var(--bg2)}
 
   /* Trend chart */
@@ -233,6 +241,15 @@
     <div class="section-title">Armazenamento</div>
   </div>
   <div id="storageSection" style="margin-bottom:28px">
+    <div class="loading">Carregando</div>
+  </div>
+
+  <!-- 2a. Replicação: quanto espaço precisaria -->
+  <div class="section-head" style="margin-bottom:10px">
+    <div class="section-title">Replicação — quanto espaço precisa</div>
+    <span class="section-sub" id="replSub">estimativa para o acervo atual, por nº de cópias</span>
+  </div>
+  <div id="replSection" style="margin-bottom:28px">
     <div class="loading">Carregando</div>
   </div>
 
@@ -426,6 +443,7 @@
       clearError();
       nvMarkUpdated();
       render(data);
+      loadReplication();
     } catch(e) {
       showError('Não foi possível conectar: '+e.message);
     }
@@ -445,6 +463,67 @@
     renderMaintenance(data);
     renderCloud(data);
     if (typeof _updateOverflowHints === 'function') _updateOverflowHints();
+  }
+
+  // ── Replicação: estimativa ────────────────────────────────────────────────
+  // Endpoint à parte (varre file_content_copies; cache de 10 min no servidor).
+  let replLoaded = false;
+  async function loadReplication(refresh) {
+    if (replLoaded && !refresh) return;
+    const el = document.getElementById('replSection');
+    try {
+      const r = await fetch('/api/stats/replication-estimate' + (refresh ? '?refresh=true' : ''), {headers: H()});
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      renderReplication(await r.json());
+      replLoaded = true;
+    } catch (e) {
+      el.innerHTML = `<div class="empty-state">Não foi possível calcular a estimativa: ${esc(e.message)}</div>`;
+    }
+  }
+
+  function renderReplication(d) {
+    const el = document.getElementById('replSection');
+    const name = p => p.split('/').filter(Boolean).pop() || p;
+    if (d.volumes.length < 2) {
+      el.innerHTML = '<div class="empty-state">A replicação precisa de pelo menos 2 discos — hoje há 1 volume configurado (storage.dirs).</div>';
+      return;
+    }
+    const pct = x => x == null ? '—' : x.toLocaleString('pt-BR', {maximumFractionDigits: 1}) + '%';
+    const rows = d.options.map(o => {
+      const cur = o.factor === d.current_factor;
+      let fits;
+      if (o.reason === 'faltam discos') fits = `<span class="repl-no">✗ faltam discos</span>`;
+      else if (o.feasible) fits = `<span class="repl-ok">✓ cabe</span>`;
+      else fits = `<span class="repl-no">✗ faltam ${esc(fmtSize(o.shortfall_bytes))}</span>`;
+      const vols = o.per_volume.map(v => {
+        const used = v.used_pct_after == null ? 0 : Math.min(100, Math.max(0, v.used_pct_after));
+        return `<div class="repl-vol" title="${esc(v.path)}: recebe ${esc(fmtSize(v.receives))}, livre depois ${esc(fmtSize(Math.max(0, v.free_after)))}">
+          <span style="min-width:60px">${esc(name(v.path))}</span>
+          <div class="repl-bar ${v.shortfall ? 'no' : ''}"><div style="width:${used}%"></div></div>
+          <span>${pct(v.used_pct_after)} · +${esc(fmtSize(v.receives))}</span></div>`;
+      }).join('');
+      let extra = o.extra_bytes == null ? '—' : o.extra_bytes ? '+' + fmtSize(o.extra_bytes) : '—';
+      if (o.freed_bytes) extra += ` <span style="color:var(--text-mute)">(libera ${esc(fmtSize(o.freed_bytes))})</span>`;
+      return `<tr class="${cur ? 'repl-cur' : ''}">
+        <td>${o.factor} cópia${o.factor > 1 ? 's' : ''}${cur ? ' <span class="badge badge-done">atual</span>' : ''}${o.factor === d.volumes.length ? '<div style="font-size:10px;color:var(--text-mute)">= fator 0 (todos)</div>' : ''}</td>
+        <td style="text-align:right">${extra}</td>
+        <td style="text-align:right">${o.files_to_copy ? o.files_to_copy.toLocaleString('pt-BR') : '—'}</td>
+        <td>${vols || '<span style="color:var(--text-mute)">—</span>'}</td>
+        <td>${fits}</td></tr>`;
+    }).join('');
+    const degraded = d.volumes.filter(v => !v.healthy).map(v => name(v.path));
+    el.innerHTML = `<div class="table-wrap"><table>
+        <thead><tr><th>Fator</th><th style="text-align:right">Espaço a mais</th><th style="text-align:right">Arquivos a copiar</th><th>Uso de cada disco depois</th><th>Cabe?</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>
+      <div class="repl-note">
+        ${d.contents.toLocaleString('pt-BR')} conteúdo(s) únicos. As cópias vão para os discos na ordem de <code>storage.dirs</code>, como faz a replicação.
+        “Cabe” = cada disco continua com pelo menos ${esc(fmtSize(d.floor_bytes))} livres (<code>storage.fallback_threshold_gb</code>), abaixo disso ele para de receber backups.
+        Não inclui o crescimento com backups novos. Para mudar: Configurações → <code>storage.replication_factor</code> e depois Manutenção → Re-replicar.
+        ${degraded.length ? `<br><span class="repl-no">Disco(s) fora do ar, fora da conta: ${esc(degraded.join(', '))}.</span>` : ''}
+        ${d.unreplicable_contents ? `<br><span class="repl-no">${d.unreplicable_contents.toLocaleString('pt-BR')} conteúdo(s) (${esc(fmtSize(d.unreplicable_bytes))}) sem cópia num disco saudável, que não dá para replicar.</span>` : ''}
+        · calculado ${esc(fmtDate(d.computed_at))} <a href="#" id="replRefresh" style="color:var(--amber)">recalcular</a>
+      </div>`;
+    document.getElementById('replRefresh').onclick = e => { e.preventDefault(); loadReplication(true); };
   }
 
   function renderSummary(d) {

@@ -931,7 +931,8 @@ Força a re-replicação de todos os arquivos que possuem menos cópias físicas
 
 - Adicionar um disco novo ao cluster (arquivos existentes não são replicados automaticamente)
 - Recuperar um disco que ficou `degraded` por um longo período
-- Aumentar o valor de `storage.replication_factor`
+- Aumentar o valor de `storage.replication_factor`. Antes, veja em **Stats → Replicação — quanto espaço precisa** *(v10.1)* se cabe
+
 
 ```bash
 nestvault rereplicate \
@@ -1115,6 +1116,7 @@ pytest tests/ --cov=server --cov-report=term-missing
 | `test_cloud_drive.py` *(v10.0)* | `/cloud`: raiz por usuário, prefixo comum, pastas/paginação, versões e histórico, busca, lixeira, cookie de sessão (adulterado, chave rotacionada), Range em arquivo plano e cifrado, HTML servido como texto |
 | `test_cloud_server_drive.py` *(v10.1)* | Pastas do servidor: criar, upload (e substituição), pastas vazias, mover/renomear com colisão, lixeira (restaurar, excluir de vez, vencimento na limpeza noturna), copiar de backup sem conteúdo novo, backup somente leitura, cliente e limpezas recusando a pasta, escrita só com header e só pelo dono |
 | `test_cloud_zip.py` *(v10.1)* | Download em .zip: estrutura de pastas, seleção aninhada, raiz inteira, nomes repetidos, conteúdo cifrado, arquivo sem cópia legível, nome do zip, `dry_run`, cookie de sessão e isolamento entre usuários |
+| `test_replication_estimate.py` *(v10.1)* | Estimativa de replicação: cópias na ordem dos volumes, grupos com vários conteúdos, falta de espaço (piso de livre), disco fora do ar, overhead da cifragem, quarentena fora, conteúdo sem cópia saudável, só admin |
 | `test_cloud_photos.py` *(v10.0)* | Indexação: backfill, EXIF e rotação, dedup entre backups, miniatura cifrada, limite de tentativas, órfãos; timeline paginada, meses e isolamento entre usuários; escolha de quais backups entram (só o dono, não por cookie) e migração da coluna |
 | `test_rclone_walk.py` | Walk incremental do rclone — conclusão + limpeza de checkpoint, resume de diretório falho, falha de listagem isolada, skip por mtime, dispatch por backend, override de `strategy`, `_MAX_RESUMES`, batching cross-directory, pastas protegidas |
 
@@ -1396,6 +1398,7 @@ Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Par
 **O que o dashboard exibe:**
 
 - **Stats globais** — total de backups, versões, arquivos, storage total
+- **Replicação — quanto espaço precisa** *(v10.1)* — em `/stats`, uma linha para cada fator de replicação possível (1 cópia até uma por disco). Cada linha mostra quanto espaço a mais seria gravado, quantos arquivos seriam copiados, o uso de cada disco depois das cópias e se **cabe**. Cabe quando todo disco continua acima de `storage.fallback_threshold_gb` livres. A conta simula a política real da replicação: as cópias que faltam vão para os discos saudáveis que ainda não têm o arquivo, na ordem de `storage.dirs`, sem olhar o espaço livre. Por isso o resultado por disco é exato para o acervo atual. Fatores menores que o atual mostram quanto seria liberado. Não entra o crescimento com backups novos. Endpoint: `GET /api/stats/replication-estimate` (admin, cache de 10 min, `?refresh=true` recalcula)
 - **Disco livre** — espaço disponível no disco montado com barra visual de uso e percentual *(v2.7)*
 - **Espaço liberável** — quanto seria recuperado apagando versões antigas (mantendo 1 por label) *(v2.7)*
 - **Tabela de backups** — clique em um label para expandir as versões; coluna **Usuário** mostra o dono de cada backup *(v7.9)*

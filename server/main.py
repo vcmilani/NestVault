@@ -2596,6 +2596,15 @@ def _refresh_stats_async() -> None:
     threading.Thread(target=_work, name="stats-refresh", daemon=True).start()
 
 
+@app.get("/api/stats/replication-estimate", dependencies=[Depends(require_admin)])
+def get_replication_estimate(refresh: bool = False, db: Session = Depends(get_db)):
+    """Quanto espaço cada fator de replicação exigiria e se cabe nos discos atuais
+    (ver replication_estimate.py). Separado do /api/stats: varre file_content_copies
+    e fica em cache por 10 min."""
+    import replication_estimate
+    return replication_estimate.get(db, refresh=refresh)
+
+
 @app.get("/api/stats", response_model=StatsResponse, dependencies=[Depends(require_admin)])
 def get_stats(db: Session = Depends(get_db)):
     data = _stats_cache["data"]
