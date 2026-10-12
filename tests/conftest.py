@@ -27,11 +27,18 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.pool import NullPool
 from sqlalchemy.orm import sessionmaker
 
+import auth as auth_mod
 import config as config_mod
 import database as db_mod
 import main as m
 import storage as storage_mod
 import sysmetrics
+from cloud_ui import media as cloud_media
+from cloud_ui import tree as cloud_tree
+
+# O indexador de fotos rodaria num thread paralelo aos testes, disputando o banco;
+# os testes de fotos chamam indexer.run_once() de forma síncrona.
+cloud_media.AUTOSTART = False
 
 ADMIN_KEY = "testkey"
 
@@ -112,6 +119,11 @@ def _reset_module_caches():
     m._activity_wake.clear()
     m._activity_loop_stop.clear()
     sysmetrics.reset()
+    # Chaves por label/version id/user id — repetem entre testes (banco recriado)
+    cloud_tree._base_cache.clear()
+    cloud_media._timeline_cache.clear()
+    cloud_media.indexer._scanned.clear()
+    auth_mod._pin_fails.clear()
 
 
 @pytest.fixture

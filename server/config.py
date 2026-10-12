@@ -82,6 +82,7 @@ GROUP_LABELS = {
     "db_backup": "Backup do banco",
     "digest":    "Digest diário",
     "rclone":    "rclone",
+    "photos":    "Fotos",
 }
 
 SCHEMA: list[Field] = [
@@ -208,6 +209,30 @@ SCHEMA: list[Field] = [
     Field("rclone.config_path", "RCLONE_CONFIG", "str", "",
           "Caminho do rclone.conf",
           "Repassado ao binário rclone via RCLONE_CONFIG. Vazio usa o padrão do rclone."),
+
+    # -- photos (lidos a cada ciclo do indexador: valem sem reinício) --
+    Field("photos.indexing_enabled", None, "bool", True,
+          "Indexar fotos e vídeos",
+          "Gera miniaturas e lê a data de captura (EXIF) para a página Fotos. Roda em "
+          "segundo plano, uma foto por vez e com prioridade baixa de CPU (nice 19)."),
+    Field("photos.rest_factor", None, "float", 1.0,
+          "Descanso entre fotos",
+          "Para cada segundo trabalhando, o indexador descansa N segundos. 0 = velocidade "
+          "máxima; 1 = metade da CPU de um núcleo; 4 = ~20%. Vale na hora.",
+          min=0, max=20),
+    Field("photos.max_temp_c", None, "int", 0,
+          "Pausar acima de (°C)",
+          "Se a temperatura da CPU chegar a este valor, a indexação espera esfriar. "
+          "0 = desligado.",
+          min=0, max=100),
+    Field("photos.window_start_hour", None, "int", 0,
+          "Início da janela de indexação",
+          "Hora local em que a indexação pode começar. Igual ao fim = o dia todo.",
+          min=0, max=23),
+    Field("photos.window_end_hour", None, "int", 0,
+          "Fim da janela de indexação",
+          "Hora local em que a indexação para. Ex.: início 1 e fim 7 = só de madrugada.",
+          min=0, max=23),
 ]
 
 BY_KEY: dict[str, Field] = {f.key: f for f in SCHEMA}

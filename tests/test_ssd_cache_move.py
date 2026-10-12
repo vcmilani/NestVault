@@ -18,8 +18,8 @@ def _make_session(db_path):
 
 
 def test_process_ssd_pending_moves_survives_all_volumes_below_threshold(tmp_path, monkeypatch):
-    """Quando pick_volume() levanta StorageThresholdExceeded (todos os volumes abaixo
-    do limiar) durante o redirect de ENOSPC, o worker deve tratar como 'sem volume
+    """Quando nenhum volume comporta o arquivo (todos abaixo do limiar) durante
+    o redirect de ENOSPC, o worker deve tratar como 'sem volume
     disponível' e seguir para o retry normal, em vez de propagar a exceção e abortar
     o lote inteiro (Bug A — regressão do commit d8c109b7)."""
     db = _make_session(tmp_path / "test.db")
@@ -43,13 +43,9 @@ def test_process_ssd_pending_moves_survives_all_volumes_below_threshold(tmp_path
     def fake_copy_raises_enospc(_src, _dst):
         raise OSError(errno.ENOSPC, "No space left on device")
 
-    def fake_pick_volume_all_below_threshold():
-        raise storage_mod.StorageThresholdExceeded("todos os volumes abaixo do limiar")
-
     monkeypatch.setattr(storage_mod, "_copy_with_sha256", fake_copy_raises_enospc)
-    monkeypatch.setattr(storage_mod, "pick_volume", fake_pick_volume_all_below_threshold)
+    monkeypatch.setattr(storage_mod, "pick_volume_for_size", lambda _size, exclude=frozenset(): None)
 
-    # Não deve propagar StorageThresholdExceeded.
     completed, moved = storage_mod.process_ssd_pending_moves(db)
 
     assert completed == 0
@@ -184,3 +180,42 @@ def test_move_esgotado_estaciona_sem_marcar_versoes_failed(tmp_path, monkeypatch
     # ...e de volta à fila no boot.
     assert storage_mod.unpark_ssd_moves(db) == 1
     assert storage_mod.active_ssd_moves_query(db).count() == 1
+
+
+def test_move_escolhe_disco_com_espaco_na_hora_de_mover(tmp_path, monkeypatch):
+    """O destino gravado no upload pode ter enchido até o move rodar (vários
+    arquivos do SSD apontavam para o mesmo disco → ENOSPC). O worker reavalia o
+    destino com o tamanho do arquivo e troca para um disco que o comporte."""
+    from collections import namedtuple
+    db = _make_session(tmp_path / "test.db")
+    sha = "e" * 64
+    ssd_dir = tmp_path / "ssd"
+    (ssd_dir / "_content" / "ee").mkdir(parents=True)
+    ssd_file = ssd_dir / "_content" / "ee" / sha
+    ssd_file.write_bytes(b"x" * 4096)
+    cheio, livre = tmp_path / "hdd1", tmp_path / "hdd2"
+    cheio.mkdir(); livre.mkdir()
+
+    db.add(db_mod.FileContent(sha256=sha, stored_at=str(ssd_file), size=4096))
+    db.add(db_mod.FileContentCopy(sha256=sha, stored_at=str(ssd_file), volume_path=str(ssd_dir)))
+    db.add(db_mod.SsdCachePendingMove(
+        sha256=sha, ssd_path=str(ssd_file), dest_volume=str(cheio),
+        dest_path=str(cheio / "_content" / "ee" / sha),
+    ))
+    db.commit()
+
+    Usage = namedtuple("Usage", "total used free")
+    gb = 1024 ** 3
+    free = {cheio: 1000, livre: 100 * gb}
+    monkeypatch.setattr(storage_mod, "STORAGE_VOLUMES", [cheio, livre])
+    monkeypatch.setattr(storage_mod, "STORAGE_FALLBACK_THRESHOLD_GB", 1)
+    monkeypatch.setattr(storage_mod, "safe_disk_usage", lambda v: Usage(0, 0, free[v]))
+    monkeypatch.setattr(storage_mod, "target_replicas", lambda: 1)
+
+    assert storage_mod.process_ssd_pending_moves(db) == (1, [sha])
+
+    dest = livre / "_content" / "ee" / sha
+    assert dest.exists() and not ssd_file.exists()
+    assert not (cheio / "_content" / "ee" / sha).exists()
+    assert db.get(db_mod.FileContent, sha).stored_at == str(dest)
+    assert [c.volume_path for c in db.query(db_mod.FileContentCopy).all()] == [str(livre)]

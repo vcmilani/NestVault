@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#e8a940">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="NestVault">
+<link rel="icon" type="image/png" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<link rel="manifest" href="/static/manifest.json">
+<title>NestVault — Cloud</title>
+<link rel="stylesheet" href="/static/theme.css">
+<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/nav.css">
+<script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
+<style>
+  .breadcrumb{display:flex;align-items:center;gap:6px;margin-bottom:16px;font-size:12px;color:var(--text-dim);flex-wrap:wrap;min-height:20px}
+  .bc-link{background:none;border:none;padding:0;font-family:var(--mono);color:var(--amber);font-size:12px;cursor:pointer}
+  .bc-link:hover{text-decoration:underline}
+  .bc-sep{color:var(--text-mute)}
+  .bc-cur{color:var(--text)}
+
+  .toolbar{display:flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid var(--border);background:var(--bg2);flex-wrap:wrap}
+  .search{flex:1;min-width:160px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:12px;padding:7px 12px;outline:none}
+  .search:focus{border-color:var(--amber)}
+  .search::placeholder{color:var(--text-mute)}
+  .sel{background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:11px;padding:7px 8px;outline:none;cursor:pointer;max-width:240px}
+  .sel:focus{border-color:var(--amber)}
+  .cbtn{background:none;border:1px solid var(--border2);color:var(--text-dim);padding:5px 10px;font-family:var(--mono);font-size:11px;cursor:pointer;min-height:34px;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;text-decoration:none}
+  .cbtn:hover{border-color:var(--amber);color:var(--amber)}
+  .cbtn.on{border-color:var(--amber);color:var(--amber)}
+  .hidden{display:none !important}
+
+  .old-banner{display:flex;align-items:center;gap:10px;padding:8px 14px;border:1px solid var(--border);border-top:none;background:rgba(232,169,64,.08);color:var(--amber);font-size:11px;flex-wrap:wrap}
+  .old-banner button{background:none;border:none;color:var(--amber);font-family:var(--mono);font-size:11px;text-decoration:underline;cursor:pointer;padding:0}
+
+  .pane{border:1px solid var(--border);border-top:none;background:var(--bg);min-height:300px;padding:14px}
+  .section-h{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-mute);margin:4px 0 10px}
+  .section-h + .grid, .section-h + .list{margin-bottom:18px}
+
+  /* Grade */
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
+  .tile{border:1px solid var(--border);background:var(--bg2);cursor:pointer;display:flex;flex-direction:column;min-width:0;transition:border-color .12s;text-align:left;padding:0;font-family:var(--mono);color:inherit}
+  .tile:hover,.tile:focus-visible{border-color:var(--amber);outline:none}
+  .tile-thumb{aspect-ratio:1;display:grid;place-items:center;background:var(--bg3);overflow:hidden;position:relative}
+  .tile-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+  .tile-thumb svg{width:42%;height:42%}
+  .tile-badge{position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.6);color:#fff;font-size:9px;padding:2px 5px;letter-spacing:.06em}
+  .tile-name{font-size:11px;color:var(--text);padding:7px 8px 2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tile-meta{font-size:10px;color:var(--text-mute);padding:0 8px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .grid.folders{grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
+  .grid.folders .tile{flex-direction:row;align-items:center}
+  .grid.folders .tile-thumb{aspect-ratio:auto;width:44px;height:44px;flex-shrink:0;background:none}
+  .grid.folders .tile-thumb svg{width:22px;height:22px}
+  .grid.folders .tile-text{min-width:0;flex:1}
+  .grid.folders .tile-name{padding:8px 8px 2px 0}
+  .grid.folders .tile-meta{padding:0 8px 8px 0}
+
+  /* Lista */
+  .list{display:flex;flex-direction:column;border:1px solid var(--border)}
+  .row{display:flex;align-items:center;gap:10px;padding:7px 12px;border-bottom:1px solid var(--border);cursor:pointer;min-height:40px;background:var(--bg);font-family:var(--mono);color:inherit;text-align:left;border-left:none;border-right:none;border-top:none;width:100%}
+  .row:last-child{border-bottom:none}
+  .row:hover,.row:focus-visible{background:var(--bg3);outline:none}
+  .row svg{width:16px;height:16px;flex-shrink:0}
+  .row-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--text)}
+  .row-sub{font-size:10px;color:var(--text-mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .row-meta{font-size:11px;color:var(--text-mute);white-space:nowrap;font-variant-numeric:tabular-nums}
+  .row-size{font-size:11px;color:var(--blue);white-space:nowrap;min-width:70px;text-align:right;font-variant-numeric:tabular-nums}
+
+  .ico-folder{color:var(--amber)}
+  .ico-file{color:var(--text-mute)}
+  .more{display:flex;justify-content:center;margin-top:14px}
+  .empty{padding:50px 20px;text-align:center;color:var(--text-mute);font-size:12px;line-height:1.8}
+
+  /* Visualizador */
+  .viewer{position:fixed;inset:0;background:#070808;z-index:50;display:flex;flex-direction:column}
+  .v-head{display:flex;align-items:center;gap:8px;padding:10px 14px;color:#e8ecea;border-bottom:1px solid rgba(255,255,255,.1);flex-wrap:wrap}
+  .v-title{flex:1;min-width:0}
+  .v-name{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .v-sub{font-size:10px;color:#9fb0ad;margin-top:2px}
+  .v-head .cbtn{color:#cfd8d6;border-color:rgba(255,255,255,.25)}
+  .v-head .cbtn:hover,.v-head .cbtn.on{color:#e8a940;border-color:#e8a940}
+  .v-main{flex:1;display:flex;min-height:0}
+  .v-stage{flex:1;position:relative;display:flex;align-items:center;justify-content:center;min-width:0;padding:12px}
+  .v-stage img,.v-stage video{max-width:100%;max-height:100%;object-fit:contain}
+  .v-stage iframe{width:100%;height:100%;border:none;background:#fff}
+  .v-stage audio{width:min(520px,100%)}
+  .v-none{color:#9fb0ad;font-size:12px;text-align:center;line-height:2}
+  .v-nav{position:absolute;top:50%;transform:translateY(-50%);background:rgba(0,0,0,.5);color:#fff;border:1px solid rgba(255,255,255,.2);width:44px;height:64px;font-size:20px;cursor:pointer;font-family:var(--mono)}
+  .v-nav:hover{border-color:#e8a940;color:#e8a940}
+  .v-prev{left:10px}.v-next{right:10px}
+  .v-side{width:300px;border-left:1px solid rgba(255,255,255,.1);overflow-y:auto;color:#cfd8d6;flex-shrink:0;background:#0d0f0f}
+  .v-side-h{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#9fb0ad;padding:12px 14px 8px}
+  .h-row{display:block;width:100%;text-align:left;background:none;border:none;border-top:1px solid rgba(255,255,255,.07);padding:9px 14px;color:#cfd8d6;font-family:var(--mono);font-size:11px;cursor:pointer}
+  .h-row:hover{background:rgba(255,255,255,.05)}
+  .h-row.cur{box-shadow:inset 2px 0 0 #e8a940;color:#e8a940}
+  .h-meta{font-size:10px;color:#8a9b98;margin-top:3px}
+  .h-same{opacity:.55}
+
+  @media(max-width:768px){
+    .grid{grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:8px}
+    .grid.folders{grid-template-columns:repeat(auto-fill,minmax(160px,1fr))}
+    .search{font-size:16px;flex-basis:100%}
+    .sel{flex:1;max-width:none;min-width:0}
+    #spacer{display:none}
+    .row-meta{display:none}
+    .v-side{position:absolute;right:0;top:0;bottom:0;width:min(300px,85vw);background:#111}
+    .v-nav{width:36px;height:52px}
+    .pane{padding:10px}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">◈</div>
+    <div><div class="logo-text">NestVault</div><div class="logo-sub">Cloud</div></div>
+  </div>
+  <div class="header-right">
+    <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
+    <a class="hbtn" href="/" title="Fotos">▣<span class="hbtn-label"> Fotos</span></a>
+    <a class="hbtn active" href="/cloud" title="Cloud">☁<span class="hbtn-label"> Cloud</span></a>
+    <a class="hbtn" href="/admin" title="Área do administrador (pede chave de admin)">⚙<span class="hbtn-label"> Admin</span></a>
+    <button class="hbtn always-visible" id="logoutBtn" title="Sair">⎋<span class="hbtn-label"> Sair</span></button>
+    <button class="nav-hamburger"></button>
+  </div>
+</header>
+
+<nav class="mobile-nav">
+  <a href="/">▣ Fotos</a>
+  <a class="active" href="/cloud">☁ Cloud</a>
+  <a href="/admin">⚙ Admin</a>
+</nav>
+<div class="mobile-nav-backdrop"></div>
+
+<main>
+  <div class="error-bar" id="errorBar"></div>
+
+  <nav class="breadcrumb" id="crumbs" aria-label="Caminho"></nav>
+
+  <div class="toolbar">
+    <input class="search hidden" id="search" type="search" placeholder="Buscar neste backup…" autocomplete="off">
+    <select class="sel hidden" id="verSel" title="Versão"></select>
+    <select class="sel hidden" id="sortSel" title="Ordenar">
+      <option value="name">Nome</option>
+      <option value="mtime">Modificado</option>
+      <option value="size">Tamanho</option>
+    </select>
+    <span style="flex:1" id="spacer"></span>
+    <button class="cbtn" id="viewGrid" title="Grade">▦</button>
+    <button class="cbtn" id="viewList" title="Lista">☰</button>
+  </div>
+  <div class="old-banner hidden" id="oldBanner"></div>
+
+  <div class="pane" id="pane"><div class="loading">Carregando</div></div>
+</main>
+
+<div class="viewer hidden" id="viewer" role="dialog" aria-modal="true" aria-labelledby="vName">
+  <div class="v-head">
+    <div class="v-title"><div class="v-name" id="vName"></div><div class="v-sub" id="vSub"></div></div>
+    <button class="cbtn" id="vHistBtn" title="Versões deste arquivo">⟲ Versões</button>
+    <a class="cbtn" id="vDl" title="Baixar">↓ Baixar</a>
+    <button class="cbtn" id="vClose" title="Fechar (Esc)">✕</button>
+  </div>
+  <div class="v-main">
+    <div class="v-stage" id="vStage"></div>
+    <aside class="v-side hidden" id="vSide"></aside>
+  </div>
+</div>
+
+<div class="login-overlay" id="loginOverlay" style="display:none">
+  <div class="login-box">
+    <div class="login-title">◈ NestVault</div>
+    <div class="login-sub">Informe a API Key para continuar</div>
+    <form id="loginForm">
+      <label class="login-label" for="apiKeyInput">API Key</label>
+      <input class="login-input" id="apiKeyInput" type="password" placeholder="sua-api-key-aqui" autocomplete="off">
+      <button class="login-btn" type="submit">Entrar →</button>
+      <div class="login-error" id="loginError"></div>
+    </form>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+  // ── Estado ────────────────────────────────────────────────────────────────
+  // label/path/version vivem na URL (voltar/avançar e recarregar funcionam).
+  const PAGE = 500;
+  const st = {
+    label: '', path: '', version: '', q: '',
+    sort: localStorage.getItem('nv-cloud-sort') || 'name',
+    view: localStorage.getItem('nv-cloud-view') || 'grid',
+    labels: [], folders: [], files: [], total: 0, versionKey: '', isLatest: true,
+    versions: [], versionsFor: '', results: null,
+  };
+  let sessionReady = false;
+
+  const ICON_FOLDER = '<svg class="ico-folder" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.6l2 2.2h8.4A1.5 1.5 0 0 1 21 8.7v9.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/></svg>';
+  const ICON_DRIVE  = '<svg class="ico-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="1.5"/><path d="M3 14h18"/><circle cx="17" cy="16.5" r=".9" fill="currentColor"/></svg>';
+  const ICON_FILE   = '<svg class="ico-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>';
+  const ICON_PLAY   = '<svg class="ico-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="1.5"/><path d="M10 9.5v5l4.5-2.5z" fill="currentColor"/></svg>';
+  const ICON_IMG    = '<svg class="ico-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="1.5"/><circle cx="9" cy="10" r="1.6"/><path d="M4 17l5-4.5 4 3.5 3-2.5 4 3.5"/></svg>';
+
+  const EXT = s => (s.split('.').pop() || '').toLowerCase();
+  const KINDS = {
+    image: ['jpg','jpeg','png','gif','webp','avif','bmp','svg','heic','heif'],
+    video: ['mp4','m4v','mov','webm','mkv','3gp'],
+    audio: ['mp3','m4a','aac','wav','ogg','flac','opus'],
+    pdf:   ['pdf'],
+    text:  ['txt','md','csv','log','json','xml','yml','yaml','toml','ini','cfg','conf','sh','py','js','ts','css','html','htm','sql','c','h','cpp','java','go','rs','rb','php'],
+  };
+  function kindOf(name) {
+    const e = EXT(name);
+    for (const k in KINDS) if (KINDS[k].includes(e)) return k;
+    return 'other';
+  }
+  const iconFor = name => ({image: ICON_IMG, video: ICON_PLAY})[kindOf(name)] || ICON_FILE;
+  const contentUrl = (id, dl) => `/cloud/content/${id}` + (dl ? '?download=true' : '');
+  const fmtTime = t => t ? new Date(t * 1000).toLocaleString('pt-BR', {dateStyle: 'short', timeStyle: 'short'}) : '—';
+  const fmtVer = s => s ? fmtDate(String(s)) : '—';
+  const fmtDay = t => t ? new Date(t * 1000).toLocaleDateString('pt-BR') : '—';
+  const fmtVerDay = s => s ? new Date(String(s).replace(' ', 'T')).toLocaleDateString('pt-BR') : '—';
+
+  // ── URL ───────────────────────────────────────────────────────────────────
+  function readUrl() {
+    const q = new URLSearchParams(location.search);
+    st.label = q.get('label') || '';
+    st.path = (q.get('path') || '').split('/').filter(Boolean).join('/');
+    st.version = q.get('version') || '';
+  }
+  function go(label, path, version, replace) {
+    const q = new URLSearchParams();
+    if (label) q.set('label', label);
+    if (label && path) q.set('path', path);
+    if (label && version) q.set('version', version);
+    const url = '/cloud' + (q.toString() ? '?' + q : '');
+    replace ? history.replaceState(null, '', url) : history.pushState(null, '', url);
+    readUrl();
+    resetSearch();
+    load();
+  }
+  window.addEventListener('popstate', () => { readUrl(); resetSearch(); closeViewer(); load(); });
+
+  // ── API ───────────────────────────────────────────────────────────────────
+  async function api(path, params) {
+    const url = path + (params ? '?' + new URLSearchParams(params) : '');
+    const r = await fetch(url, {headers: H(), credentials: 'same-origin'});
+    if (r.status === 401) { sessionReady = false; showLogin('Sessão expirada — informe a API Key'); throw new Error('401'); }
+    if (!r.ok) {
+      let msg = r.status + '';
+      try { msg = (await r.json()).detail || msg; } catch (_) {}
+      throw new Error(msg);
+    }
+    return r.json();
+  }
+  // <img>/<video> não mandam o header: o cookie de sessão autentica a mídia.
+  async function ensureSession() {
+    if (sessionReady) return;
+    const r = await fetch('/cloud/session', {method: 'POST', headers: H(), credentials: 'same-origin'});
+    if (r.status === 401) { showLogin(API_KEY ? 'API Key inválida' : ''); throw new Error('401'); }
+    if (!r.ok) throw new Error('Falha ao abrir sessão (' + r.status + ')');
+    sessionReady = true;
+  }
+
+  async function loadAll() {
+    if (!API_KEY) { showLogin(); return; }
+    try { await ensureSession(); } catch (_) { return; }
+    load();
+  }
+
+  async function load() {
+    clearError();
+    const pane = document.getElementById('pane');
+    pane.innerHTML = '<div class="loading">Carregando</div>';
+    try {
+      if (!st.label) {
+        st.labels = (await api('/cloud/tree')).labels;
+      } else {
+        const params = {label: st.label, path: st.path, sort: st.sort, limit: PAGE, offset: 0};
+        if (st.version) params.version = st.version;
+        const [d] = await Promise.all([api('/cloud/tree', params), loadVersions()]);
+        st.folders = d.folders; st.files = d.files; st.total = d.total_files;
+        st.versionKey = d.version_key; st.isLatest = d.is_latest;
+      }
+      render();
+    } catch (e) {
+      if (e.message !== '401') { pane.innerHTML = ''; showError(e.message); renderChrome(); }
+    }
+  }
+
+  async function loadVersions() {
+    if (st.versionsFor === st.label) return;
+    st.versions = await api('/cloud/versions', {label: st.label});
+    st.versionsFor = st.label;
+  }
+
+  async function loadMore(btn) {
+    btn.disabled = true;
+    const params = {label: st.label, path: st.path, sort: st.sort, limit: PAGE, offset: st.files.length};
+    if (st.version) params.version = st.version;
+    try {
+      const d = await api('/cloud/tree', params);
+      st.files = st.files.concat(d.files);
+      render();
+    } catch (e) { if (e.message !== '401') showError(e.message); btn.disabled = false; }
+  }
+
+  // ── Render ────────────────────────────────────────────────────────────────
+  function renderChrome() {
+    const c = document.getElementById('crumbs');
+    const parts = [`<button class="bc-link" data-crumb="-1">☁ Drive</button>`];
+    if (st.label) {
+      const segs = st.path ? st.path.split('/') : [];
+      parts.push('<span class="bc-sep">/</span>');
+      parts.push(segs.length ? `<button class="bc-link" data-crumb="0">${esc(st.label)}</button>`
+                             : `<span class="bc-cur">${esc(st.label)}</span>`);
+      segs.forEach((s, i) => {
+        parts.push('<span class="bc-sep">/</span>');
+        parts.push(i === segs.length - 1 ? `<span class="bc-cur">${esc(s)}</span>`
+                                         : `<button class="bc-link" data-crumb="${i + 1}">${esc(s)}</button>`);
+      });
+    } else {
+      parts[0] = '<span class="bc-cur">☁ Drive</span>';
+    }
+    c.innerHTML = parts.join(' ');
+
+    const inLabel = !!st.label;
+    document.getElementById('search').classList.toggle('hidden', !inLabel);
+    document.getElementById('sortSel').classList.toggle('hidden', !inLabel);
+    document.getElementById('sortSel').value = st.sort;
+    const vs = document.getElementById('verSel');
+    vs.classList.toggle('hidden', !inLabel || !st.versions.length);
+    if (inLabel && st.versions.length) {
+      vs.innerHTML = st.versions.map((v, i) =>
+        `<option value="${i === 0 ? '' : esc(v.version_key)}">${i === 0 ? 'Mais recente · ' : ''}${esc(fmtVer(v.created_at))}</option>`).join('');
+      vs.value = st.isLatest ? '' : st.versionKey;
+    }
+    const banner = document.getElementById('oldBanner');
+    banner.classList.toggle('hidden', !inLabel || st.isLatest || !st.versionKey);
+    if (inLabel && !st.isLatest) {
+      const v = st.versions.find(x => x.version_key === st.versionKey);
+      banner.innerHTML = `⟲ Vendo a versão de ${esc(fmtVer(v ? v.created_at : st.versionKey))} <button id="toLatest">voltar para a mais recente</button>`;
+    }
+    document.getElementById('viewGrid').classList.toggle('on', st.view === 'grid');
+    document.getElementById('viewList').classList.toggle('on', st.view === 'list');
+  }
+
+  function folderHtml(items, grid) {
+    // items: [{key, name, sub, icon}]
+    if (grid) {
+      return `<div class="grid folders">${items.map(it => `
+        <button class="tile" data-open-folder="${esc(it.key)}">
+          <div class="tile-thumb">${it.icon}</div>
+          <div class="tile-text"><div class="tile-name" title="${esc(it.name)}">${esc(it.name)}</div>
+          <div class="tile-meta">${esc(it.sub)}</div></div>
+        </button>`).join('')}</div>`;
+    }
+    return `<div class="list">${items.map(it => `
+      <button class="row" data-open-folder="${esc(it.key)}">${it.icon}
+        <span class="row-name" title="${esc(it.name)}">${esc(it.name)}</span>
+        <span class="row-meta">${esc(it.sub)}</span></button>`).join('')}</div>`;
+  }
+
+  function filesHtml(files, grid, showPath) {
+    if (grid) {
+      return `<div class="grid">${files.map((f, i) => {
+        const k = kindOf(f.name);
+        const thumb = k === 'image'
+          ? `<img loading="lazy" decoding="async" alt="" src="${contentUrl(f.id)}" data-fallback="1">`
+          : iconFor(f.name);
+        const badge = k === 'video' ? '<span class="tile-badge">VÍDEO</span>' : '';
+        return `<button class="tile" data-open-file="${i}">
+          <div class="tile-thumb">${thumb}${badge}</div>
+          <div class="tile-name" title="${esc(showPath ? f.path : f.name)}">${esc(f.name)}</div>
+          <div class="tile-meta">${esc(fmtSize(f.size))} · ${esc(fmtDay(f.mtime))}</div>
+        </button>`;
+      }).join('')}</div>`;
+    }
+    return `<div class="list">${files.map((f, i) => `
+      <button class="row" data-open-file="${i}">${iconFor(f.name)}
+        <span class="row-name" title="${esc(f.path)}">${esc(f.name)}${showPath ? `<div class="row-sub">${esc(f.path)}</div>` : ''}</span>
+        <span class="row-meta">${esc(fmtTime(f.mtime))}</span>
+        <span class="row-size">${esc(fmtSize(f.size))}</span></button>`).join('')}</div>`;
+  }
+
+  function render() {
+    renderChrome();
+    const pane = document.getElementById('pane');
+    const grid = st.view === 'grid';
+
+    if (!st.label) {
+      if (!st.labels.length) {
+        pane.innerHTML = '<div class="empty">Nenhum backup seu ainda.<br>Faça um backup com o cliente NestVault e ele aparece aqui como uma pasta.</div>';
+        return;
+      }
+      pane.innerHTML = '<div class="section-h">Meus backups</div>' + folderHtml(st.labels.map(l => ({
+        key: l.label, name: l.label, icon: ICON_DRIVE,
+        sub: l.last_backup_at ? 'backup de ' + fmtVerDay(l.last_backup_at) : 'sem versão concluída',
+      })), grid);
+      return;
+    }
+
+    if (st.results) {
+      pane.innerHTML = st.results.length
+        ? `<div class="section-h">${st.results.length} resultado(s)</div>` + filesHtml(st.results, grid, true)
+        : '<div class="empty">Nada encontrado.</div>';
+      return;
+    }
+
+    let html = '';
+    if (st.folders.length) {
+      html += '<div class="section-h">Pastas</div>' + folderHtml(st.folders.map(f => ({
+        key: f.name, name: f.name, icon: ICON_FOLDER,
+        sub: `${f.count} arquivo(s) · ${fmtSize(f.size)}`,
+      })), grid);
+    }
+    if (st.files.length) {
+      html += `<div class="section-h">Arquivos · ${st.total}</div>` + filesHtml(st.files, grid, false);
+      if (st.files.length < st.total) {
+        html += `<div class="more"><button class="cbtn" id="moreBtn">Carregar mais (${st.total - st.files.length})</button></div>`;
+      }
+    }
+    pane.innerHTML = html || '<div class="empty">Pasta vazia.</div>';
+  }
+
+  // Imagem que o navegador não decodifica (HEIC fora do Safari, arquivo corrompido)
+  // vira ícone em vez de quadro quebrado. 'error' não borbulha: captura.
+  document.getElementById('pane').addEventListener('error', e => {
+    const img = e.target;
+    if (img.tagName === 'IMG' && img.dataset.fallback) img.replaceWith(document.createRange().createContextualFragment(ICON_IMG));
+  }, true);
+
+  // ── Interação ─────────────────────────────────────────────────────────────
+  document.getElementById('pane').addEventListener('click', e => {
+    const fo = e.target.closest('[data-open-folder]');
+    if (fo) {
+      const key = fo.dataset.openFolder;
+      if (!st.label) go(key, '', '');
+      else go(st.label, st.path ? st.path + '/' + key : key, st.version);
+      return;
+    }
+    const fi = e.target.closest('[data-open-file]');
+    if (fi) { openViewer(st.results || st.files, +fi.dataset.openFile); return; }
+    if (e.target.id === 'moreBtn') loadMore(e.target);
+  });
+  document.getElementById('crumbs').addEventListener('click', e => {
+    const b = e.target.closest('[data-crumb]');
+    if (!b) return;
+    const n = +b.dataset.crumb;
+    if (n < 0) go('', '', '');
+    else go(st.label, st.path.split('/').slice(0, n).join('/'), st.version);
+  });
+  document.getElementById('oldBanner').addEventListener('click', e => {
+    if (e.target.id === 'toLatest') go(st.label, st.path, '');
+  });
+  document.getElementById('verSel').addEventListener('change', e => go(st.label, st.path, e.target.value));
+  document.getElementById('sortSel').addEventListener('change', e => {
+    st.sort = e.target.value; localStorage.setItem('nv-cloud-sort', st.sort); load();
+  });
+  for (const [id, v] of [['viewGrid', 'grid'], ['viewList', 'list']]) {
+    document.getElementById(id).addEventListener('click', () => {
+      st.view = v; localStorage.setItem('nv-cloud-view', v); render();
+    });
+  }
+
+  let searchTimer = null;
+  function resetSearch() { st.q = ''; st.results = null; document.getElementById('search').value = ''; }
+  document.getElementById('search').addEventListener('input', e => {
+    clearTimeout(searchTimer);
+    const q = e.target.value.trim();
+    searchTimer = setTimeout(async () => {
+      st.q = q;
+      if (!q) { st.results = null; render(); return; }
+      try {
+        const params = {label: st.label, q};
+        if (st.version) params.version = st.version;
+        const d = await api('/cloud/search', params);
+        if (st.q === q) { st.results = d.results; render(); }
+      } catch (err) { if (err.message !== '401') showError(err.message); }
+    }, 300);
+  });
+
+  // ── Visualizador ──────────────────────────────────────────────────────────
+  const vw = {list: [], idx: -1, file: null, histOpen: false};
+
+  function openViewer(list, idx) {
+    vw.list = list; vw.idx = idx;
+    showFile(list[idx], null);
+    document.getElementById('viewer').classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+  }
+  function closeViewer() {
+    const stage = document.getElementById('vStage');
+    stage.querySelectorAll('video,audio').forEach(m => m.pause());
+    stage.innerHTML = '';
+    document.getElementById('viewer').classList.add('hidden');
+    document.body.style.overflow = '';
+  }
+
+  // `ver` = entrada do histórico quando o arquivo aberto é de outra versão.
+  function showFile(f, ver) {
+    vw.file = f;
+    const id = ver ? ver.file_id : f.id;
+    const name = f.name;
+    document.getElementById('vName').textContent = name;
+    const size = ver ? ver.size : f.size, mtime = ver ? ver.mtime : f.mtime;
+    document.getElementById('vSub').textContent =
+      `${fmtSize(size)} · modificado ${fmtTime(mtime)}` + (ver ? ` · versão ${fmtVer(ver.created_at)}` : '');
+    document.getElementById('vDl').href = contentUrl(id, true);
+
+    const url = contentUrl(id);
+    const stage = document.getElementById('vStage');
+    stage.querySelectorAll('video,audio').forEach(m => m.pause());
+    const k = kindOf(name);
+    let media;
+    if (k === 'image') media = `<img alt="${esc(name)}" src="${url}">`;
+    else if (k === 'video') media = `<video controls autoplay playsinline preload="metadata" src="${url}"></video>`;
+    else if (k === 'audio') media = `<audio controls autoplay src="${url}"></audio>`;
+    else if (k === 'pdf' || k === 'text') media = `<iframe title="${esc(name)}" src="${url}"></iframe>`;
+    else media = `<div class="v-none">Sem pré-visualização para este tipo de arquivo.<br><a class="cbtn" href="${contentUrl(id, true)}">↓ Baixar ${esc(fmtSize(size))}</a></div>`;
+    const multi = !ver && vw.list.length > 1;
+    stage.innerHTML = media +
+      (multi && vw.idx > 0 ? '<button class="v-nav v-prev" id="vPrev" aria-label="Anterior">‹</button>' : '') +
+      (multi && vw.idx < vw.list.length - 1 ? '<button class="v-nav v-next" id="vNext" aria-label="Próximo">›</button>' : '');
+    const img = stage.querySelector('img');
+    if (img) img.addEventListener('error', () => {
+      img.replaceWith(document.createRange().createContextualFragment(
+        `<div class="v-none">O navegador não consegue exibir este arquivo.<br><a class="cbtn" href="${contentUrl(id, true)}">↓ Baixar</a></div>`));
+    });
+    if (vw.histOpen) loadHistory(ver ? ver.file_id : f.id);
+  }
+
+  function step(d) {
+    const n = vw.idx + d;
+    if (n < 0 || n >= vw.list.length) return;
+    vw.idx = n;
+    showFile(vw.list[n], null);
+  }
+
+  async function loadHistory(currentId) {
+    const side = document.getElementById('vSide');
+    side.innerHTML = '<div class="v-side-h">Versões deste arquivo</div><div class="loading">Carregando</div>';
+    const f = vw.file;
+    // Na busca, f.path já é relativo à raiz do label; na pasta, é relativo à pasta.
+    const rel = st.results ? f.path : (st.path ? st.path + '/' + f.path : f.path);
+    try {
+      const h = await api('/cloud/history', {label: st.label, path: rel});
+      side.innerHTML = '<div class="v-side-h">Versões deste arquivo · ' + h.length + '</div>' + h.map((x, i) => `
+        <button class="h-row ${x.file_id === currentId ? 'cur' : ''} ${x.changed ? '' : 'h-same'}" data-h="${i}">
+          ${esc(fmtVer(x.created_at))}${i === 0 ? ' · mais recente' : ''}
+          <div class="h-meta">${esc(fmtSize(x.size))} · ${x.changed ? 'conteúdo alterado' : 'sem alteração'}</div>
+        </button>`).join('');
+      side._hist = h;
+    } catch (e) {
+      if (e.message !== '401') side.innerHTML = '<div class="v-side-h">Erro: ' + esc(e.message) + '</div>';
+    }
+  }
+
+  document.getElementById('vClose').addEventListener('click', closeViewer);
+  document.getElementById('vHistBtn').addEventListener('click', () => {
+    vw.histOpen = !vw.histOpen;
+    document.getElementById('vSide').classList.toggle('hidden', !vw.histOpen);
+    document.getElementById('vHistBtn').classList.toggle('on', vw.histOpen);
+    if (vw.histOpen) loadHistory(vw.file.id);
+  });
+  document.getElementById('vSide').addEventListener('click', e => {
+    const b = e.target.closest('[data-h]');
+    if (!b) return;
+    const x = document.getElementById('vSide')._hist[+b.dataset.h];
+    showFile(vw.file, x);
+  });
+  document.getElementById('vStage').addEventListener('click', e => {
+    if (e.target.id === 'vPrev') step(-1);
+    else if (e.target.id === 'vNext') step(1);
+  });
+  document.addEventListener('keydown', e => {
+    if (document.getElementById('viewer').classList.contains('hidden')) return;
+    if (e.key === 'Escape') closeViewer();
+    else if (e.key === 'ArrowLeft') step(-1);
+    else if (e.key === 'ArrowRight') step(1);
+  });
+  // Swipe horizontal no celular troca de arquivo
+  (function () {
+    let x0 = null;
+    const stage = document.getElementById('vStage');
+    stage.addEventListener('touchstart', e => { x0 = e.touches[0].clientX; }, {passive: true});
+    stage.addEventListener('touchend', e => {
+      if (x0 === null) return;
+      const dx = e.changedTouches[0].clientX - x0; x0 = null;
+      if (Math.abs(dx) > 60) step(dx < 0 ? 1 : -1);
+    }, {passive: true});
+  })();
+
+  // Sair também encerra a sessão por cookie
+  document.getElementById('logoutBtn').addEventListener('click', () => {
+    sessionReady = false;
+    fetch('/cloud/session', {method: 'DELETE', credentials: 'same-origin'}).catch(() => {});
+  });
+
+  readUrl();
+  loadAll();
+</script>
+<script src="/static/nav.js"></script>
+</body>
+</html>

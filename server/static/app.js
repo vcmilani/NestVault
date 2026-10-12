@@ -148,24 +148,115 @@ function nvConfirm(title, message, opts) {
   });
 }
 
+// ── Área do administrador ───────────────────────────────────────────────────
+// A página inicial (Fotos/Cloud) usa a chave PESSOAL (backupApiKey). As páginas
+// administrativas (<body data-admin-page>) usam a chave de ADMIN (nvAdminKey) —
+// ou a pessoal, quando ela já é de admin. Uma chave de usuário comum nunca vira
+// admin: a área pede uma credencial de admin, guardada à parte, e sair da área
+// não desloga das fotos.
+const NV_ADMIN_PAGE = !!(document.body && document.body.hasAttribute('data-admin-page'));
+if (NV_ADMIN_PAGE) {
+  // Síncrono, antes do <script> da página: o loadAll() dela já sai com a chave certa.
+  API_KEY = localStorage.getItem('nvAdminKey') || API_KEY;
+}
+
+function nvRoleCacheClear() { try { sessionStorage.removeItem('nv-role'); } catch (_) {} }
+
+// Papel da chave: 'admin' | 'user' | 'invalid' (401) | null (erro de rede).
+// Cacheado na aba, amarrado ao fim da chave.
+async function nvRole(key) {
+  if (!key) return 'invalid';
+  const tag = key.slice(-8);
+  try {
+    const c = JSON.parse(sessionStorage.getItem('nv-role') || 'null');
+    if (c && c.k === tag) return c.role;
+  } catch (_) {}
+  let r;
+  try { r = await fetch('/cloud/me', {headers: {'X-API-Key': key}}); } catch (_) { return null; }
+  if (r.status === 401) return 'invalid';
+  if (!r.ok) return null;
+  const role = (await r.json()).role;
+  try { sessionStorage.setItem('nv-role', JSON.stringify({k: tag, role})); } catch (_) {}
+  return role;
+}
+
+function nvAdminLoginTexts() {
+  const t = document.querySelector('#loginOverlay .login-title');
+  const sub = document.querySelector('#loginOverlay .login-sub');
+  if (t) t.textContent = '◈ Área do administrador';
+  if (sub) sub.textContent = 'Informe uma chave de administrador para acessar os painéis.';
+}
+
+function nvAdminLogin(msg) {
+  nvAdminLoginTexts();
+  const inp = document.getElementById('apiKeyInput');
+  if (inp) inp.value = '';
+  showLogin(msg || '');
+}
+
+// Chamado pelas páginas admin quando a API responde 403 (chave sem papel de admin).
+function nvNotAdmin() {
+  localStorage.removeItem('nvAdminKey');
+  nvRoleCacheClear();
+  nvAdminLogin('Esta chave não é de administrador.');
+}
+
+// true = pode seguir; false = está pedindo a credencial de admin.
+async function nvGuardAdmin() {
+  if (!NV_ADMIN_PAGE) return true;
+  if (!API_KEY) { nvAdminLogin(); return false; }
+  const role = await nvRole(API_KEY);
+  if (role === 'admin' || role === null) return true;  // null: rede — a página mostra o erro
+  if (localStorage.getItem('nvAdminKey') === API_KEY) localStorage.removeItem('nvAdminKey');
+  nvAdminLogin(role === 'invalid' ? 'Chave de administrador inválida ou revogada.' : '');
+  return false;
+}
+
 // ── Wiring (login padrão, tema, service worker) ─────────────────────────────
 (function () {
   function init() {
     updateThemeBtn();
+    if (NV_ADMIN_PAGE) nvAdminLoginTexts();  // o 401 das próprias páginas usa o mesmo overlay
     const form = document.getElementById('loginForm');
     if (form) {
-      form.addEventListener('submit', e => {
+      form.addEventListener('submit', async e => {
         e.preventDefault();
         const key = document.getElementById('apiKeyInput').value.trim();
         if (!key) return;
-        API_KEY = key; localStorage.setItem('backupApiKey', key);
+        if (NV_ADMIN_PAGE) {
+          // Área admin: só aceita chave de admin, e guarda à parte — a chave
+          // pessoal (das fotos) nunca é sobrescrita aqui.
+          const role = await nvRole(key);
+          if (role !== 'admin') {
+            showLogin(role === 'user' ? 'Esta chave não é de administrador.'
+                    : role === 'invalid' ? 'API Key inválida.' : 'Não foi possível validar a chave.');
+            return;
+          }
+          localStorage.setItem('nvAdminKey', key);
+        } else {
+          localStorage.setItem('backupApiKey', key);
+        }
+        API_KEY = key;
         hideLogin(); _nvRefresh();
       });
       const logout = document.getElementById('logoutBtn');
-      if (logout) logout.addEventListener('click', () => {
-        localStorage.removeItem('backupApiKey'); API_KEY = ''; showLogin();
-      });
+      if (logout) {
+        if (NV_ADMIN_PAGE) {
+          logout.innerHTML = '⎋<span class="hbtn-label"> Sair do admin</span>';
+          logout.title = 'Sair da área do administrador (continua logado nas fotos)';
+        }
+        logout.addEventListener('click', () => {
+          nvRoleCacheClear();
+          if (NV_ADMIN_PAGE) {
+            localStorage.removeItem('nvAdminKey');
+            location.href = '/';
+            return;
+          }
+          localStorage.removeItem('backupApiKey'); API_KEY = ''; showLogin();
+        });
+      }
     }
+    nvGuardAdmin();
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

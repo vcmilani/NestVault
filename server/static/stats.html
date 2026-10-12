@@ -140,7 +140,7 @@
   }
 </style>
 </head>
-<body>
+<body data-admin-page>
 
 <header>
   <div class="logo">
@@ -150,9 +150,11 @@
   <div class="header-right">
     <span class="last-updated" id="lastUpdated"></span>
     <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
-    <a class="hbtn" href="/" title="Dashboard">←<span class="hbtn-label"> Dashboard</span></a>
+    <a class="hbtn" href="/admin" title="Dashboard">←<span class="hbtn-label"> Dashboard</span></a>
     <a class="hbtn" href="/disks" title="Discos">⊞<span class="hbtn-label"> Discos</span></a>
     <a class="hbtn" href="/maintenance" title="Manutenção">⚙<span class="hbtn-label"> Manutenção</span></a>
+    <a class="hbtn" href="/cloud" title="Cloud">☁<span class="hbtn-label"> Cloud</span></a>
+    <a class="hbtn" href="/" title="Fotos">▣<span class="hbtn-label"> Fotos</span></a>
     <a class="hbtn" href="/activity" title="Atividade">◎<span class="hbtn-label"> Atividade</span></a>
     <a class="hbtn" href="/rclone-jobs" title="rclone">⟳<span class="hbtn-label"> rclone</span></a>
     <a class="hbtn active" href="/stats" title="Stats">∑<span class="hbtn-label"> Stats</span></a>
@@ -164,9 +166,11 @@
 </header>
 
 <nav class="mobile-nav">
-  <a href="/">← Dashboard</a>
+  <a href="/admin">← Dashboard</a>
   <a href="/disks">⊞ Discos</a>
   <a href="/maintenance">⚙ Manutenção</a>
+  <a href="/cloud">☁ Cloud</a>
+  <a href="/">▣ Fotos</a>
   <a href="/activity">◎ Atividade</a>
   <a href="/rclone-jobs">⟳ rclone</a>
   <a class="active" href="/stats">∑ Stats</a>
@@ -292,6 +296,20 @@
     <div class="loading">Carregando</div>
   </div>
 
+  <!-- 4d. Exclusividade por backup -->
+  <section id="sec-exclusive" style="display:none;margin-bottom:28px">
+    <div class="section-head" style="margin-bottom:10px">
+      <div class="section-title">Arquivos exclusivos por backup</div>
+      <span class="section-sub">% de arquivos da versão mais recente que não existem na versão mais recente de outros backups</span>
+    </div>
+    <div class="table-wrap">
+      <table id="tblExclusive">
+        <thead><tr><th>Backup</th><th>Cliente</th><th style="text-align:right">Exclusivos</th><th style="text-align:right">Arquivos</th><th style="text-align:right">%</th><th style="text-align:right">Tamanho exclusivo</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
   <!-- 5. Atividade por Backup -->
   <section id="sec-activity" style="display:none;margin-bottom:28px">
     <div class="section-head" style="margin-bottom:10px">
@@ -395,13 +413,14 @@
     'disk-rebalance':        'Rebalanceamento de discos',
     'db-backup':             'Backup do banco',
     'rclone-backup':         'Backup rclone',
+    'photos-index':          'Indexação de fotos',
   };
 
   async function load() {
     try {
       const r = await fetch('/api/stats', {headers: H()});
       if (r.status === 401) { showLogin('API Key inválida.'); return; }
-      if (r.status === 403) { showLogin('Esta chave não tem permissão de administrador.'); return; }
+      if (r.status === 403) { nvNotAdmin(); return; }
       if (!r.ok) throw new Error('HTTP '+r.status);
       const data = await r.json();
       clearError();
@@ -421,6 +440,7 @@
     renderChanges(data.changes_days);
     renderFreed(data.freed_days || []);
     renderTopBackups(data.top_backups);
+    renderExclusiveByLabel(data.exclusive_by_label || []);
     renderDedup(data);
     renderMaintenance(data);
     renderCloud(data);
@@ -575,6 +595,21 @@
       <td>${esc(e.client_name || '—')}</td>
       <td>${e.old_version_count.toLocaleString('pt-BR')}</td>
       <td style="text-align:right;color:var(--amber)">${esc(fmtSize(e.old_versions_size_bytes))}</td>
+    </tr>`).join('');
+  }
+
+  function renderExclusiveByLabel(entries) {
+    const sec = document.getElementById('sec-exclusive');
+    if (!entries.length) { sec.style.display = 'none'; return; }
+    sec.style.display = '';
+    const tbody = document.querySelector('#tblExclusive tbody');
+    tbody.innerHTML = entries.map(e => `<tr>
+      <td>${esc(e.label)}</td>
+      <td>${esc(e.client_name || '—')}</td>
+      <td style="text-align:right">${e.exclusive_file_count.toLocaleString('pt-BR')}</td>
+      <td style="text-align:right">${e.file_count.toLocaleString('pt-BR')}</td>
+      <td style="text-align:right;color:var(--amber)">${e.exclusive_pct.toLocaleString('pt-BR', {minimumFractionDigits:1, maximumFractionDigits:1})}%</td>
+      <td style="text-align:right">${esc(fmtSize(e.exclusive_size_bytes))}</td>
     </tr>`).join('');
   }
 

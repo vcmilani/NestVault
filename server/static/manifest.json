@@ -2,7 +2,7 @@
   "id": "/",
   "name": "NestVault",
   "short_name": "NestVault",
-  "description": "Dashboard de backups NestVault",
+  "description": "Fotos e arquivos dos seus backups",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

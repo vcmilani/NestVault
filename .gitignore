@@ -19,6 +19,8 @@ __pycache__/
 
 # Configuração do servidor (contém segredos: chave de criptografia, tokens, DSN)
 server/config.json
+# Segredo de assinatura do cookie de sessão do front cloud (gerado no 1º uso)
+server/session.key
 
 # Variáveis de ambiente
 .env

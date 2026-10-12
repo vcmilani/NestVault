@@ -18,7 +18,7 @@ from typing import Generator
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.exceptions import InvalidTag  # re-exportado para os callers
 
-__all__ = ["load_key", "encrypt_stream", "decrypt_chunks", "InvalidTag"]
+__all__ = ["load_key", "encrypt_stream", "decrypt_chunks", "decrypt_range", "InvalidTag"]
 
 NONCE_SIZE = 12       # bytes — padrão AES-GCM
 CHUNK_SIZE = 1 << 20  # 1 MB de plaintext por chunk
@@ -87,4 +87,41 @@ def decrypt_chunks(path: Path, key: bytes) -> Generator[bytes, None, None]:
             if len(ct) < ct_len:
                 raise ValueError("Arquivo cifrado corrompido: chunk truncado")
             yield aesgcm.decrypt(_chunk_nonce(base_nonce, chunk_idx), ct, None)
+            chunk_idx += 1
+
+
+# Todo chunk, exceto o último, carrega exatamente CHUNK_SIZE de plaintext — então
+# o chunk i começa num offset fixo e dá para pular direto até ele.
+_TAG_SIZE   = 16
+_CHUNK_SPAN = 4 + CHUNK_SIZE + _TAG_SIZE
+
+
+def decrypt_range(path: Path, key: bytes, start: int, end: int) -> Generator[bytes, None, None]:
+    """Plaintext dos bytes [start, end] (inclusivo) sem decifrar o arquivo inteiro —
+    é o que permite Range/seek de vídeo em arquivo cifrado."""
+    if end < start:
+        return
+    aesgcm    = AESGCM(key)
+    chunk_idx = start // CHUNK_SIZE
+    skip      = start - chunk_idx * CHUNK_SIZE
+    remaining = end - start + 1
+
+    with open(path, "rb") as f:
+        base_nonce = f.read(NONCE_SIZE)
+        if len(base_nonce) < NONCE_SIZE:
+            raise ValueError("Arquivo cifrado corrompido: nonce ausente")
+        f.seek(NONCE_SIZE + chunk_idx * _CHUNK_SPAN)
+        while remaining > 0:
+            raw_len = f.read(4)
+            if len(raw_len) < 4:
+                raise ValueError("Arquivo cifrado corrompido: range além do fim")
+            ct_len = int.from_bytes(raw_len, "little")
+            ct     = f.read(ct_len)
+            if len(ct) < ct_len:
+                raise ValueError("Arquivo cifrado corrompido: chunk truncado")
+            plain = aesgcm.decrypt(_chunk_nonce(base_nonce, chunk_idx), ct, None)
+            piece = plain[skip:skip + remaining]
+            skip = 0
+            remaining -= len(piece)
+            yield piece
             chunk_idx += 1

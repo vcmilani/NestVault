@@ -91,6 +91,27 @@ def hash_api_key(raw: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def hash_pin(pin: str) -> str:
+    """PIN das fotos ocultas: scrypt com salt — PIN curto pede hash lento, não SHA-256."""
+    import hashlib, secrets
+    salt = secrets.token_bytes(16)
+    h = hashlib.scrypt(pin.encode(), salt=salt, n=2**14, r=8, p=1)
+    return f"scrypt${salt.hex()}${h.hex()}"
+
+
+def check_pin(pin: str, stored: str) -> bool:
+    import hashlib, hmac
+    try:
+        algo, salt_hex, h_hex = stored.split("$")
+        salt = bytes.fromhex(salt_hex)
+    except (ValueError, AttributeError):
+        return False
+    if algo != "scrypt":
+        return False
+    h = hashlib.scrypt(pin.encode(), salt=salt, n=2**14, r=8, p=1)
+    return hmac.compare_digest(h.hex(), h_hex)
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -100,6 +121,25 @@ class User(Base):
     role         = Column(String, nullable=False, default="user")  # "admin" | "user"
     is_active    = Column(Boolean, nullable=False, default=True)
     created_at   = Column(DateTime, default=_now)
+    # PIN numérico (hash, ver hash_pin) que destrava as fotos ocultas em /photos.
+    # Definido pelo admin em Usuários; NULL = sem PIN, ocultas sem trava.
+    hidden_pin_hash = Column(String, nullable=True)
+
+
+class ApiKey(Base):
+    """Chaves adicionais de um usuário, além da principal (users.api_key_hash).
+    Escopo "client": autentica o mesmo usuário (mesmos backups), mas nunca com
+    poderes de admin — é a chave que vai no CLI/PWA de um admin, para que a
+    principal fique só no navegador. Ver auth.is_admin."""
+    __tablename__ = "api_keys"
+
+    id           = Column(Integer, primary_key=True)
+    user_id      = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    name         = Column(String, nullable=False)
+    key_hash     = Column(String(64), nullable=False, unique=True, index=True)
+    scope        = Column(String, nullable=False, default="client")
+    created_at   = Column(DateTime, default=_now)
+    last_used_at = Column(DateTime, nullable=True)
 
 
 class BackupID(Base):
@@ -119,6 +159,9 @@ class BackupID(Base):
     # main._trash_versions; a limpeza noturna apaga de vez após o prazo.
     trashed_at    = Column(DateTime, nullable=True)
     trashed_by    = Column(Integer, nullable=True)
+    # Front cloud: o dono escolhe quais backups entram na galeria /photos (e são
+    # indexados). Ligado por padrão — um backup de fotos não deveria precisar de opt-in.
+    photos_enabled = Column(Boolean, nullable=False, default=True, server_default="1")
 
     versions = relationship("BackupVersion", back_populates="backup",
                             order_by="BackupVersion.version_key.desc()", lazy="dynamic")
@@ -214,6 +257,36 @@ class VersionFile(Base):
 
     version = relationship("BackupVersion", back_populates="files")
     content = relationship("FileContent", back_populates="refs")
+
+
+class MediaInfo(Base):
+    """Metadados e miniaturas de foto/vídeo do front cloud — um registro por
+    CONTEÚDO (sha256): com dedup, a mesma foto em 100 versões é processada uma vez.
+
+    Sem FK para file_contents de propósito: com foreign_keys=ON ela travaria a
+    limpeza de órfãos, que apaga FileContent sem saber desta tabela. O indexador
+    (cloud_ui/media.py) varre e remove as linhas órfãs e suas miniaturas."""
+    __tablename__ = "media_info"
+    __table_args__ = (Index("idx_media_status", "status"),)
+
+    sha256       = Column(String(64), primary_key=True)
+    kind         = Column(String, nullable=False)                 # "image" | "video"
+    status       = Column(String, nullable=False, default="done") # "done" | "failed"
+    attempts     = Column(Integer, nullable=False, default=0)
+    error        = Column(Text, nullable=True)
+    width        = Column(Integer, nullable=True)                 # já com a rotação EXIF aplicada
+    height       = Column(Integer, nullable=True)
+    # Momento da captura (epoch, hora local) — EXIF DateTimeOriginal ou creation_time
+    # do vídeo. NULL = sem data confiável; a timeline cai para o mtime do arquivo.
+    taken_ts     = Column(Float, nullable=True)
+    duration     = Column(Float, nullable=True)
+    thumb_sm     = Column(String, nullable=True)
+    thumb_lg     = Column(String, nullable=True)
+    thumb_encrypted = Column(Boolean, nullable=False, default=False)
+    # Revisão do formato das miniaturas (media.THUMB_REV): abaixo da atual, o
+    # indexador refaz — é como miniaturas maiores chegam ao acervo já indexado.
+    thumb_rev    = Column(Integer, nullable=False, default=0, server_default="0")
+    processed_at = Column(DateTime, nullable=True)
 
 
 class MaintenanceJob(Base):
@@ -416,6 +489,10 @@ def init_db():
         ("backup_versions", "trashed_by",          "INTEGER"),
         ("backup_ids",      "trashed_at",          "TIMESTAMP"),
         ("backup_ids",      "trashed_by",          "INTEGER"),
+        # Fotos: default constante, então o ALTER continua O(1) (SQLite e PG 11+).
+        ("backup_ids",      "photos_enabled",      "BOOLEAN NOT NULL DEFAULT TRUE"),
+        ("users",           "hidden_pin_hash",     "TEXT"),
+        ("media_info",      "thumb_rev",           "INTEGER NOT NULL DEFAULT 0"),
     ):
         with engine.connect() as conn:
             try:
