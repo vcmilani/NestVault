@@ -3553,7 +3553,10 @@ def list_versions(label: str, db: Session = Depends(get_db), user: User = Depend
     versions = (db.query(BackupVersion)
                 .filter(BackupVersion.backup_label == label,
                         BackupVersion.status != TRASHED_STATUS)
-                .order_by(BackupVersion.created_at.desc())
+                # Pasta do servidor: live e trash nascem juntas (mesmo created_at);
+                # a lixeira vai sempre por último, a live é a "versão final".
+                .order_by(case((BackupVersion.status == SERVER_TRASH_STATUS, 1), else_=0),
+                          BackupVersion.created_at.desc(), BackupVersion.id.desc())
                 .all())
     if not versions:
         return []

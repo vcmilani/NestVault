@@ -287,6 +287,7 @@ def test_admin_versions_list_shows_live_and_trash(client):
     _post(client, "/cloud/drive/delete", {"label": label, "items": ["b.txt"]})
     r = client.get(f"/backups/{label}/versions")
     assert r.status_code == 200, r.text
+    assert [v["version_key"] for v in r.json()] == ["live", "trash"]  # a final primeiro
     by = {v["version_key"]: v for v in r.json()}
     assert by["live"]["status"] == "done" and by["live"]["file_count"] == 1
     assert by["trash"]["status"] == "server-trash" and by["trash"]["file_count"] == 1

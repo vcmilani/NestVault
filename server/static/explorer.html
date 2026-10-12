@@ -531,8 +531,11 @@
     try {
       const r = await fetch(`/backups/${encodeURIComponent(LABEL)}/versions`, { headers: H() });
       if (!r.ok) return;
+      // Ordem cronológica pela chave; a lixeira de uma pasta do servidor
+      // (server-trash) fica antes da live, que é a versão final.
+      const rank = v => v.status === 'server-trash' ? 0 : 1;
       allVersions = (await r.json()).sort((a, b) =>
-        a.version_key < b.version_key ? -1 : 1);
+        rank(a) - rank(b) || (a.version_key < b.version_key ? -1 : 1));
       currentVerIdx = allVersions.findIndex(v => v.version_key === currentVersion);
       renderVerNav();
     } catch(e) { /* non-critical */ }
