@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -21,7 +21,9 @@ import crypto
 import storage
 from database import (BackupID, BackupVersion, FileContent, MediaInfo, User, VersionFile, get_db,
                       SERVER_KIND, TRASHED_STATUS, check_pin)
-from . import content, drive, media, tree
+from urllib.parse import quote
+
+from . import archive, content, drive, media, tree
 
 router = APIRouter()
 log = logging.getLogger("backup-server")
@@ -151,6 +153,29 @@ def get_content(file_id: int, request: Request, download: bool = False,
     return content.stream(request, db, sha256=row.sha256, name=Path(row.original_path).name,
                           size=row.size, encrypted=bool(row.encrypted), download=download,
                           who=f"{user.username} file_id={file_id}")
+
+
+@router.post("/zip")
+def download_zip(label: str = Form(...), items: list[str] = Form(...),
+                 version: Optional[str] = Form(None),
+                 dry_run: bool = Form(False),
+                 db: Session = Depends(get_db),
+                 user: User = Depends(get_user_header_or_cookie)):
+    """Vários arquivos/pastas de um label (backup ou pasta do servidor) num .zip,
+    gerado em streaming. Formulário (e não JSON) para o navegador poder baixar
+    direto, com o cookie de sessão — é leitura, como /content. dry_run só valida
+    e conta: a página confere antes, para um erro não virar uma página de JSON."""
+    entries, name = archive.collect(db, label, version or None, items, user)
+    if dry_run:
+        return {"name": name, "files": len(entries), "size": sum(e.size for e in entries),
+                "unreadable": sum(1 for e in entries if e.path is None)}
+    who = f"{user.username} {label}"
+    log.info(f"[cloud] {who}: zip de {len(items)} item(ns), {len(entries)} arquivo(s) "
+             f"({sum(e.size for e in entries) // (1024 * 1024)} MB) → {name!r}")
+    return StreamingResponse(
+        archive.stream(entries, who), media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}",
+                 "Cache-Control": "no-store"})
 
 
 # -- Pastas do servidor (edição) ----------------------------------------------

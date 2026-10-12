@@ -1114,6 +1114,7 @@ pytest tests/ --cov=server --cov-report=term-missing
 | `test_disks.py` | `GET /storage/disks` — status de volumes, contagem de cópias físicas por volume |
 | `test_cloud_drive.py` *(v10.0)* | `/cloud`: raiz por usuário, prefixo comum, pastas/paginação, versões e histórico, busca, lixeira, cookie de sessão (adulterado, chave rotacionada), Range em arquivo plano e cifrado, HTML servido como texto |
 | `test_cloud_server_drive.py` *(v10.1)* | Pastas do servidor: criar, upload (e substituição), pastas vazias, mover/renomear com colisão, lixeira (restaurar, excluir de vez, vencimento na limpeza noturna), copiar de backup sem conteúdo novo, backup somente leitura, cliente e limpezas recusando a pasta, escrita só com header e só pelo dono |
+| `test_cloud_zip.py` *(v10.1)* | Download em .zip: estrutura de pastas, seleção aninhada, raiz inteira, nomes repetidos, conteúdo cifrado, arquivo sem cópia legível, nome do zip, `dry_run`, cookie de sessão e isolamento entre usuários |
 | `test_cloud_photos.py` *(v10.0)* | Indexação: backfill, EXIF e rotação, dedup entre backups, miniatura cifrada, limite de tentativas, órfãos; timeline paginada, meses e isolamento entre usuários; escolha de quais backups entram (só o dono, não por cookie) e migração da coluna |
 | `test_rclone_walk.py` | Walk incremental do rclone — conclusão + limpeza de checkpoint, resume de diretório falho, falha de listagem isolada, skip por mtime, dispatch por backend, override de `strategy`, `_MAX_RESUMES`, batching cross-directory, pastas protegidas |
 
@@ -1428,6 +1429,7 @@ Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Par
 - Mostra a **última versão concluída**; o seletor no topo troca para qualquer versão anterior
 - **⟲ Versões** no visualizador lista as versões em que o arquivo existe e marca onde o conteúdo mudou — clique para abrir aquela versão
 - Visualiza imagem, vídeo (com seek), áudio, PDF e texto; os demais tipos são baixados. Arquivos `.html` e scripts aparecem como texto, nunca executam
+- **Baixar vários** *(v10.1)*: **☐ Selecionar** (num backup) ou **✎ Editar** (numa pasta do servidor) → marque arquivos e pastas → **↓ Baixar (.zip)**. Sem nada marcado, **↓ Baixar esta pasta (.zip)** baixa a pasta aberta (na raiz, o backup inteiro). O zip é gerado em streaming, sem arquivo temporário nem limite de tamanho, até 50.000 arquivos. Fotos, vídeos e arquivos já comprimidos vão sem recompressão, para poupar a CPU do Pi. Num backup, vale a versão aberta. Arquivo sem cópia legível no servidor fica de fora e aparece listado em `_ERROS_NESTVAULT.txt`, dentro do zip
 
 **Pastas do servidor — o Cloud como file server** *(v10.1)*
 

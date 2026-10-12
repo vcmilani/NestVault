@@ -138,6 +138,13 @@ _SORTS = {
 }
 
 
+def files_under(version_id: int, root: str):
+    """Filtro dos VersionFile da versão que são `root` (arquivo) ou estão dentro de `root/`."""
+    return (VersionFile.version_id == version_id,
+            or_(VersionFile.original_path == root,
+                VersionFile.original_path.startswith(root + "/", autoescape=True)))
+
+
 def empty_dirs(db: Session, label: str, rel: str) -> list[str]:
     """Nomes das subpastas diretas de `rel` que existem em server_folders (pastas
     criadas pelo "Nova pasta" de uma pasta do servidor, ainda sem arquivos)."""

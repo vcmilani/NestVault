@@ -147,13 +147,6 @@ def relabel(db: Session, old: str, new: str) -> None:
 
 # -- Consultas -----------------------------------------------------------------
 
-def _files_under(version_id: int, root: str):
-    """Filtro dos VersionFile que são `root` (arquivo) ou estão dentro de `root/`."""
-    return (VersionFile.version_id == version_id,
-            or_(VersionFile.original_path == root,
-                VersionFile.original_path.startswith(root + "/", autoescape=True)))
-
-
 def _is_file(db: Session, d: Drive, path: str) -> bool:
     return db.query(exists().where(VersionFile.version_id == d.live.id,
                                    VersionFile.original_path == path)).scalar()
@@ -273,7 +266,7 @@ TOKEN_LEN = 23  # "%Y%m%d%H%M%S-" + 8 hex
 
 def _trash_one(db: Session, d: Drive, path: str, is_dir: bool, user: User, now: datetime) -> None:
     token = f"{now:%Y%m%d%H%M%S}-{secrets.token_hex(4)}"
-    db.query(VersionFile).filter(*_files_under(d.live.id, path)) \
+    db.query(VersionFile).filter(*tree.files_under(d.live.id, path)) \
         .update({VersionFile.version_id: d.trash.id,
                  VersionFile.original_path: token + "/" + VersionFile.original_path},
                 synchronize_session=False)
@@ -419,7 +412,7 @@ def copy(db: Session, src_label: str, src_version: str | None, items: list[str],
     for raw in items:
         rel = check_path(raw)
         full = base + rel
-        has = db.query(exists().where(*_files_under(v.id, full))).scalar()
+        has = db.query(exists().where(*tree.files_under(v.id, full))).scalar()
         if not has:
             raise HTTPException(404, f"'{rel}' nao encontrado em {src_label}")
         if src_label == d.label and _under(dest_dir, rel):
@@ -437,7 +430,7 @@ def copy(db: Session, src_label: str, src_version: str | None, items: list[str],
             ["version_id", "original_path", "sha256", "mtime"],
             select(literal(d.live.id), literal(dst) + func.substr(VersionFile.original_path, len(full) + 1),
                    VersionFile.sha256, VersionFile.mtime)
-            .where(*_files_under(v.id, full)),
+            .where(*tree.files_under(v.id, full)),
         )
         total += db.execute(stmt).rowcount
     db.commit()

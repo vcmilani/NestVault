@@ -427,8 +427,8 @@
     eb.classList.toggle('hidden', !inLabel);
     eb.classList.toggle('on', st.edit);
     eb.textContent = st.editable ? (st.edit ? '✓ Concluir edição' : '✎ Editar') : (st.edit ? '✓ Concluir' : '☐ Selecionar');
-    eb.title = st.editable ? 'Mover, renomear, excluir, criar pastas e enviar arquivos'
-                           : 'Selecionar para copiar para uma pasta do servidor';
+    eb.title = st.editable ? 'Selecionar, baixar, mover, renomear, excluir, criar pastas e enviar arquivos'
+                           : 'Selecionar arquivos e pastas para baixar (.zip) ou copiar para uma pasta do servidor';
     document.getElementById('pane').classList.toggle('editing', inLabel && st.edit);
     renderEditBar();
     if (inLabel && st.versions.length) {
@@ -632,7 +632,8 @@
     const b = (id, txt, dis, extra) => `<button class="cbtn ${extra || ''}" id="${id}" ${dis ? 'disabled' : ''}>${txt}</button>`;
     const allOn = all.length && all.every(k => st.sel.has(k));
     let html = `<span class="cnt">${n ? n + ' selecionado(s)' : 'Nada selecionado'}</span>` +
-      b('eaAll', allOn ? '☐ Limpar' : '☑ Todos', !all.length);
+      b('eaAll', allOn ? '☐ Limpar' : '☑ Todos', !all.length) +
+      b('eaDl', n ? '↓ Baixar' + (singleFile() ? '' : ' (.zip)') : '↓ Baixar esta pasta (.zip)', !n && !!st.results);
     if (st.editable) {
       html += b('eaUp', '↑ Enviar arquivos', st.results) + b('eaUpDir', '↑ Enviar pasta', st.results) +
         b('eaMkdir', '＋ Pasta', st.results) +
@@ -661,7 +662,8 @@
       const allOn = all.every(k => st.sel.has(k));
       all.forEach(k => allOn ? st.sel.delete(k) : st.sel.add(k));
       render();
-    } else if (id === 'eaUp') document.getElementById('upFiles').click();
+    } else if (id === 'eaDl') downloadSel();
+    else if (id === 'eaUp') document.getElementById('upFiles').click();
     else if (id === 'eaUpDir') document.getElementById('upDir').click();
     else if (id === 'eaMkdir') mkdirDlg();
     else if (id === 'eaMove') pickFolder('move');
@@ -671,6 +673,46 @@
     else if (id === 'eaTrash') trashDlg();
     else if (id === 'eaDrive') driveDlg();
   });
+
+  // ── Baixar ──
+  // Um arquivo só: o próprio arquivo. Pastas ou vários itens: um .zip gerado em
+  // streaming pelo servidor (POST /cloud/zip). Vai por formulário — o navegador
+  // baixa direto, com o cookie de sessão, sem segurar o zip na memória da página.
+  function selFile(path) {
+    return (st.results || st.files).find(f => fileKey(f) === path);
+  }
+  function singleFile() { return st.sel.size === 1 && !!selFile([...st.sel][0]); }
+
+  async function downloadSel() {
+    clearError();
+    try { await ensureSession(); } catch (_) { return; }
+    const items = st.sel.size ? [...st.sel] : [st.path];
+    if (items.length === 1 && selFile(items[0])) {
+      location.href = contentUrl(selFile(items[0]).id, true);
+      return;
+    }
+    const fields = [['label', st.label], ...(st.version ? [['version', st.version]] : []),
+                    ...items.map(it => ['items', it])];
+    let info;
+    try {
+      const fd = new URLSearchParams([...fields, ['dry_run', 'true']]);
+      const r = await fetch('/cloud/zip', {method: 'POST', body: fd, credentials: 'same-origin', headers: H()});
+      if (r.status === 401) { sessionReady = false; showLogin('Sessão expirada — informe a API Key'); return; }
+      if (!r.ok) { let m = r.status + ''; try { m = (await r.json()).detail || m; } catch (_) {} throw new Error(m); }
+      info = await r.json();
+    } catch (e) { showError(e.message); return; }
+    if (!info.files) { showError('Nada para baixar: a seleção não tem arquivos'); return; }
+    const form = document.createElement('form');
+    form.method = 'POST'; form.action = '/cloud/zip'; form.style.display = 'none';
+    for (const [k, v] of fields) {
+      const i = document.createElement('input'); i.type = 'hidden'; i.name = k; i.value = v; form.appendChild(i);
+    }
+    document.body.appendChild(form);
+    form.submit();
+    form.remove();
+    toast(`Baixando ${info.name} · ${info.files} arquivo(s), ${fmtSize(info.size)}` +
+          (info.unreadable ? ` · ${info.unreadable} sem cópia legível (listados em _ERROS_NESTVAULT.txt)` : ''));
+  }
 
   async function act(fn, okMsg) {
     clearError();
