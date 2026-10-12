@@ -84,6 +84,14 @@ Base = declarative_base()
 # Status de BackupID/BackupVersion na lixeira.
 TRASHED_STATUS = "trashed"
 
+# Pasta do servidor (file server do /cloud): BackupID sem cliente, editável pelo
+# navegador. Tem uma versão "live" (done, editada no lugar) e uma "trash" com o
+# que foi excluído — status próprio para ficar fora de tudo que filtra "done".
+SERVER_KIND         = "server"
+SERVER_LIVE_KEY     = "live"
+SERVER_TRASH_KEY    = "trash"
+SERVER_TRASH_STATUS = "server-trash"
+
 
 def hash_api_key(raw: str) -> str:
     """SHA-256 hex — a chave em si nunca é persistida em texto puro."""
@@ -162,6 +170,9 @@ class BackupID(Base):
     # Front cloud: o dono escolhe quais backups entram na galeria /photos (e são
     # indexados). Ligado por padrão — um backup de fotos não deveria precisar de opt-in.
     photos_enabled = Column(Boolean, nullable=False, default=True, server_default="1")
+    # "backup" (escrito por um cliente, somente leitura no /cloud) ou SERVER_KIND.
+    # Numa pasta do servidor, client_name guarda o nome exibido (o label é gerado).
+    kind = Column(String, nullable=False, default="backup", server_default="backup")
 
     versions = relationship("BackupVersion", back_populates="backup",
                             order_by="BackupVersion.version_key.desc()", lazy="dynamic")
@@ -257,6 +268,35 @@ class VersionFile(Base):
 
     version = relationship("BackupVersion", back_populates="files")
     content = relationship("FileContent", back_populates="refs")
+
+
+class ServerFolder(Base):
+    """Pasta vazia de uma pasta do servidor. As demais pastas do drive são
+    derivadas dos caminhos dos arquivos; esta tabela só existe para que "Nova
+    pasta" apareça antes de receber arquivos."""
+    __tablename__ = "server_folders"
+    __table_args__ = (UniqueConstraint("label", "path", name="uq_server_folder"),)
+
+    id    = Column(Integer, primary_key=True)
+    label = Column(String, ForeignKey("backup_ids.label"), nullable=False, index=True)
+    path  = Column(String, nullable=False)  # relativo à raiz da pasta, sem barras nas pontas
+
+
+class ServerTrashEntry(Base):
+    """Um item (arquivo ou pasta) excluído de uma pasta do servidor. Os
+    VersionFile dele vão para a versão "trash" do label com o caminho prefixado
+    por `token/` — o prefixo evita colisão quando o mesmo caminho é excluído de
+    novo e diz quais linhas restaurar. A limpeza noturna apaga as entradas
+    vencidas (storage.trash_retention_days)."""
+    __tablename__ = "server_trash"
+
+    id         = Column(Integer, primary_key=True)
+    label      = Column(String, ForeignKey("backup_ids.label"), nullable=False, index=True)
+    token      = Column(String, nullable=False, unique=True)
+    path       = Column(String, nullable=False)  # caminho original do item
+    is_dir     = Column(Boolean, nullable=False, default=False)
+    deleted_at = Column(DateTime, default=_now, index=True)
+    deleted_by = Column(Integer, nullable=True)
 
 
 class MediaInfo(Base):
@@ -493,6 +533,7 @@ def init_db():
         ("backup_ids",      "photos_enabled",      "BOOLEAN NOT NULL DEFAULT TRUE"),
         ("users",           "hidden_pin_hash",     "TEXT"),
         ("media_info",      "thumb_rev",           "INTEGER NOT NULL DEFAULT 0"),
+        ("backup_ids",      "kind",                "TEXT NOT NULL DEFAULT 'backup'"),
     ):
         with engine.connect() as conn:
             try:

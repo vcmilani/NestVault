@@ -301,7 +301,8 @@ def _set(c, label, enabled):
 def test_labels_default_enabled_with_counts(client):
     backup(client, "fotos", {"/p/a.jpg": (jpeg(), 1), "/p/b.mp4": (b"v", 1), "/p/n.txt": (b"t", 1)})
     assert client.get("/cloud/photos/labels").json() == [
-        {"label": "fotos", "client_name": None, "enabled": True, "media_count": 2}]
+        {"label": "fotos", "client_name": None, "name": "fotos", "enabled": True,
+         "media_count": 2}]
 
 
 def test_disabled_label_leaves_timeline_and_is_not_indexed(client):

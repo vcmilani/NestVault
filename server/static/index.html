@@ -154,7 +154,7 @@
     <a class="hbtn" href="/disks" title="Discos">⊞<span class="hbtn-label"> Discos</span></a>
     <a class="hbtn" href="/maintenance" title="Manutenção">⚙<span class="hbtn-label"> Manutenção</span></a>
     <a class="hbtn" href="/cloud" title="Cloud">☁<span class="hbtn-label"> Cloud</span></a>
-    <a class="hbtn" href="/" title="Fotos">▣<span class="hbtn-label"> Fotos</span></a>
+    <a class="hbtn" href="/photos" title="Fotos">▣<span class="hbtn-label"> Fotos</span></a>
     <a class="hbtn" href="/activity" title="Atividade">◎<span class="hbtn-label"> Atividade</span></a>
     <a class="hbtn" href="/rclone-jobs" title="rclone">⟳<span class="hbtn-label"> rclone</span></a>
     <a class="hbtn" href="/stats" title="Stats">∑<span class="hbtn-label"> Stats</span></a>
@@ -170,7 +170,7 @@
   <a href="/disks">⊞ Discos</a>
   <a href="/maintenance">⚙ Manutenção</a>
   <a href="/cloud">☁ Cloud</a>
-  <a href="/">▣ Fotos</a>
+  <a href="/photos">▣ Fotos</a>
   <a href="/activity">◎ Atividade</a>
   <a href="/rclone-jobs">⟳ rclone</a>
   <a href="/stats">∑ Stats</a>
@@ -455,11 +455,11 @@
             </label>
           </td>
           <td><span class="chevron">▶</span>${esc(v.version_key)}</td>
-          <td>${badge(v.status)}${v.absorbed_count > 0 ? ' <span class="badge badge-absorb" title="'+v.absorbed_count+' arquivo(s) herdados via absorve">⊕ absorve</span>' : ''}</td>
+          <td>${v.status === 'server-trash' ? '<span class="badge">lixeira</span>' : badge(v.status)}${v.absorbed_count > 0 ? ' <span class="badge badge-absorb" title="'+v.absorbed_count+' arquivo(s) herdados via absorve">⊕ absorve</span>' : ''}</td>
           <td class="num-cell">${v.file_count}</td>
           <td class="size-cell">${fmtSize(v.total_size_bytes)}</td>
           <td class="num-cell dim-cell">${fmtDuration(v.duration_seconds)}</td>
-          <td class="date-cell">${window.relTime ? relTime(v.version_key) : fmtDate(v.version_key)}</td>
+          <td class="date-cell">${(k => window.relTime ? relTime(k) : fmtDate(k))(/^\d{4}-/.test(v.version_key) ? v.version_key : v.created_at)}</td>
           <td style="padding:4px 14px 4px 6px">
             <a href="/explorer?label=${encodeURIComponent(label)}&version=${encodeURIComponent(v.version_key)}"
                onclick="event.stopPropagation()"
