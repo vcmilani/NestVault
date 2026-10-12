@@ -1,7 +1,8 @@
 """Front "cloud" — API do drive (estilo OneDrive), montada em /cloud.
 
-Somente leitura. Autentica pelo header X-API-Key ou pelo cookie de sessão emitido
-em POST /cloud/session (ver auth.get_user_header_or_cookie).
+Leitura autentica pelo header X-API-Key ou pelo cookie de sessão emitido em
+POST /cloud/session (ver auth.get_user_header_or_cookie). Escrita — só nas pastas
+do servidor (ver drive.py), backups são somente leitura — exige o header.
 """
 import logging
 from pathlib import Path
@@ -19,8 +20,8 @@ from auth import (HIDDEN_COOKIE, HIDDEN_TTL, SESSION_COOKIE, SESSION_TTL, effect
 import crypto
 import storage
 from database import (BackupID, BackupVersion, FileContent, MediaInfo, User, VersionFile, get_db,
-                      TRASHED_STATUS, check_pin)
-from . import content, media, tree
+                      SERVER_KIND, TRASHED_STATUS, check_pin)
+from . import content, drive, media, tree
 
 router = APIRouter()
 log = logging.getLogger("backup-server")
@@ -75,14 +76,18 @@ def get_tree(label: Optional[str] = None,
     if not label:
         return {"label": None, "labels": tree.list_labels(db, user)}
 
-    tree.get_label_or_404(db, label, user)
+    b = tree.get_label_or_404(db, label, user)
     versions = tree.done_versions(db, label)
     v = tree.pick_version(versions, version)
     base = tree.label_base(db, label, versions)
     rel = tree.norm_rel(path)
-    children = tree.list_children(db, v, base, rel, offset, limit, sort)
+    editable = b.kind == SERVER_KIND
+    extra = tree.empty_dirs(db, label, rel) if editable else []
+    children = tree.list_children(db, v, base, rel, offset, limit, sort, extra)
     return {
         "label": label, "path": rel,
+        "kind": b.kind or "backup", "editable": editable,
+        "name": b.client_name if editable and b.client_name else label,
         "version_key": v.version_key, "version_created_at": str(v.created_at),
         "is_latest": v.id == versions[0].id,
         "offset": offset, "limit": limit,
@@ -146,6 +151,140 @@ def get_content(file_id: int, request: Request, download: bool = False,
     return content.stream(request, db, sha256=row.sha256, name=Path(row.original_path).name,
                           size=row.size, encrypted=bool(row.encrypted), download=download,
                           who=f"{user.username} file_id={file_id}")
+
+
+# -- Pastas do servidor (edição) ----------------------------------------------
+# Todas exigem o header X-API-Key (get_current_user): o cookie de sessão só lê.
+
+def _changed() -> None:
+    # A timeline de fotos é cacheada pelo id das versões, que não muda numa
+    # edição da versão live: força o recálculo.
+    media.bump_generation()
+
+
+class DriveCreate(BaseModel):
+    name: str
+
+
+@router.post("/drives")
+def create_drive(req: DriveCreate, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    b = drive.create(db, user, req.name)
+    return {"label": b.label, "name": b.client_name, "kind": SERVER_KIND}
+
+
+@router.patch("/drives/{label}")
+def rename_drive(label: str, req: DriveCreate, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    d = drive.get(db, label, user)
+    drive.rename_drive(db, d, req.name, user)
+    return {"label": label, "name": d.b.client_name}
+
+
+class MkdirReq(BaseModel):
+    label: str
+    path: str
+
+
+@router.post("/drive/mkdir")
+def drive_mkdir(req: MkdirReq, db: Session = Depends(get_db),
+                user: User = Depends(get_current_user)):
+    d = drive.get(db, req.label, user)
+    return {"path": drive.mkdir(db, d, req.path, user)}
+
+
+class MoveReq(BaseModel):
+    label: str
+    items: list[str]
+    dest_dir: str = ""
+
+
+@router.post("/drive/move")
+def drive_move(req: MoveReq, db: Session = Depends(get_db),
+               user: User = Depends(get_current_user)):
+    d = drive.get(db, req.label, user)
+    n = drive.move(db, d, req.items, req.dest_dir, user)
+    _changed()
+    return {"moved": n}
+
+
+class RenameReq(BaseModel):
+    label: str
+    path: str
+    new_name: str
+
+
+@router.post("/drive/rename")
+def drive_rename(req: RenameReq, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    d = drive.get(db, req.label, user)
+    path = drive.rename(db, d, req.path, req.new_name, user)
+    _changed()
+    return {"path": path}
+
+
+class ItemsReq(BaseModel):
+    label: str
+    items: list[str]
+
+
+@router.post("/drive/delete")
+def drive_delete(req: ItemsReq, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    d = drive.get(db, req.label, user)
+    n = drive.delete(db, d, req.items, user)
+    _changed()
+    return {"trashed": n}
+
+
+@router.get("/drive/trash")
+def drive_trash(label: str, db: Session = Depends(get_db),
+                user: User = Depends(get_user_header_or_cookie)):
+    return drive.trash_list(db, drive.get(db, label, user))
+
+
+class TrashIdsReq(BaseModel):
+    label: str
+    ids: list[int]
+
+
+@router.post("/drive/restore")
+def drive_restore(req: TrashIdsReq, db: Session = Depends(get_db),
+                  user: User = Depends(get_current_user)):
+    d = drive.get(db, req.label, user)
+    n = drive.restore(db, d, req.ids, user)
+    _changed()
+    return {"restored": n}
+
+
+@router.post("/drive/purge")
+def drive_purge(req: TrashIdsReq, db: Session = Depends(get_db),
+                user: User = Depends(get_current_user)):
+    d = drive.get(db, req.label, user)
+    return {"purged": drive.purge(db, d, req.ids, user)}
+
+
+class CopyReq(BaseModel):
+    src_label: str
+    src_version: Optional[str] = None
+    items: list[str]
+    dest_label: str
+    dest_dir: str = ""
+
+
+@router.post("/drive/copy")
+def drive_copy(req: CopyReq, db: Session = Depends(get_db),
+               user: User = Depends(get_current_user)):
+    d = drive.get(db, req.dest_label, user)
+    n = drive.copy(db, req.src_label, req.src_version, req.items, d, req.dest_dir, user)
+    _changed()
+    if n:
+        media.indexer.wake()
+    return {"copied": n}
+
+
+# PUT /cloud/drive/upload fica em main.py: reutiliza o pipeline de gravação do
+# /upload (staging no SSD, dedup, réplicas), que mora lá.
 
 
 # -- Fotos --------------------------------------------------------------------

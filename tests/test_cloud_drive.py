@@ -293,8 +293,8 @@ def test_admin_pages_are_marked_for_the_guard(client):
         assert 'href="/admin"' in html, path  # ⚙ Admin para qualquer perfil
 
 
-def test_home_is_photos_and_dashboard_moved_to_admin(client):
-    assert "NestVault — Fotos" in client.get("/").text
+def test_home_is_cloud_and_dashboard_moved_to_admin(client):
+    assert "NestVault — Cloud" in client.get("/").text
     assert "NestVault — Fotos" in client.get("/photos").text
     admin = client.get("/admin").text
     assert "data-admin-page" in admin and "NestVault — Fotos" not in admin

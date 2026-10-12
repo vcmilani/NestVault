@@ -99,6 +99,52 @@
   .h-meta{font-size:10px;color:#8a9b98;margin-top:3px}
   .h-same{opacity:.55}
 
+  /* Pastas do servidor: edição */
+  .ro-tag{font-size:10px;color:var(--text-mute);border:1px solid var(--border2);padding:2px 6px;white-space:nowrap}
+  .editbar{display:flex;align-items:center;gap:8px;padding:8px 14px;border:1px solid var(--amber);border-top:none;background:rgba(232,169,64,.06);flex-wrap:wrap;font-size:11px}
+  .editbar .cbtn:disabled{opacity:.4;cursor:default;border-color:var(--border2);color:var(--text-mute)}
+  .editbar .cnt{color:var(--amber);margin-right:4px}
+  .cbtn.danger:hover{border-color:var(--red);color:var(--red)}
+  .tile,.row{position:relative}
+  .pick{display:none;width:18px;height:18px;border:1px solid var(--border2);background:var(--bg);flex-shrink:0;align-items:center;justify-content:center;font-size:12px;color:var(--bg);cursor:pointer}
+  .editing .pick{display:inline-flex}
+  .tile .pick{position:absolute;top:6px;left:6px;z-index:1}
+  .grid.folders .tile .pick{position:static;margin-left:10px}
+  .sel .pick{background:var(--amber);border-color:var(--amber)}
+  .tile.sel,.row.sel{border-color:var(--amber);box-shadow:inset 0 0 0 1px var(--amber)}
+  .drop-over{outline:2px dashed var(--amber);outline-offset:-2px}
+  .pane.drop-over{background:rgba(232,169,64,.05)}
+
+  .dlg{position:fixed;inset:0;background:var(--overlay-bg);z-index:60;display:grid;place-items:center;padding:16px}
+  .dlg-box{background:var(--bg2);border:1px solid var(--border2);border-top:2px solid var(--amber);width:min(460px,100%);max-height:calc(100vh - 32px);display:flex;flex-direction:column}
+  .dlg-h{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--amber);padding:16px 18px 10px}
+  .dlg-b{padding:0 18px;overflow-y:auto;font-size:12px;color:var(--text-dim);line-height:1.6;min-height:0}
+  .dlg-f{display:flex;justify-content:flex-end;gap:8px;padding:14px 18px 16px;flex-wrap:wrap}
+  .dlg-l{display:block;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);margin-bottom:8px}
+  .dlg-in{width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:13px;padding:9px 12px;outline:none}
+  .dlg-in:focus{border-color:var(--amber)}
+  .dlg-err{color:var(--red);font-size:11px;min-height:16px;margin-top:6px}
+  .cbtn.primary{border-color:var(--amber);color:var(--amber)}
+  .pk-path{font-size:11px;color:var(--text);margin-bottom:8px;word-break:break-all}
+  .pk-list{border:1px solid var(--border);max-height:300px;overflow-y:auto}
+  .pk-list .row{min-height:36px}
+  .pk-list .row[disabled]{opacity:.4;cursor:default}
+  .tr-row{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)}
+  .tr-row:last-child{border-bottom:none}
+  .tr-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+  .tr-meta{font-size:10px;color:var(--text-mute)}
+
+  .upl{position:fixed;right:16px;bottom:16px;width:min(340px,calc(100vw - 32px));background:var(--bg2);border:1px solid var(--border2);border-top:2px solid var(--amber);z-index:40;font-size:11px}
+  .upl-h{display:flex;align-items:center;gap:8px;padding:9px 12px;color:var(--text)}
+  .upl-h span{flex:1}
+  .upl-l{max-height:200px;overflow-y:auto;border-top:1px solid var(--border)}
+  .upl-i{padding:6px 12px;border-bottom:1px solid var(--border)}
+  .upl-n{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim)}
+  .upl-bar{height:3px;background:var(--bg3);margin-top:4px}
+  .upl-bar div{height:100%;background:var(--amber);width:0}
+  .upl-i.err .upl-n{color:var(--red)}
+  .upl-i.ok .upl-bar div{background:var(--green, #5fb37a)}
+
   @media(max-width:768px){
     .grid{grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:8px}
     .grid.folders{grid-template-columns:repeat(auto-fill,minmax(160px,1fr))}
@@ -121,7 +167,7 @@
   </div>
   <div class="header-right">
     <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
-    <a class="hbtn" href="/" title="Fotos">▣<span class="hbtn-label"> Fotos</span></a>
+    <a class="hbtn" href="/photos" title="Fotos">▣<span class="hbtn-label"> Fotos</span></a>
     <a class="hbtn active" href="/cloud" title="Cloud">☁<span class="hbtn-label"> Cloud</span></a>
     <a class="hbtn" href="/admin" title="Área do administrador (pede chave de admin)">⚙<span class="hbtn-label"> Admin</span></a>
     <button class="hbtn always-visible" id="logoutBtn" title="Sair">⎋<span class="hbtn-label"> Sair</span></button>
@@ -130,7 +176,7 @@
 </header>
 
 <nav class="mobile-nav">
-  <a href="/">▣ Fotos</a>
+  <a href="/photos">▣ Fotos</a>
   <a class="active" href="/cloud">☁ Cloud</a>
   <a href="/admin">⚙ Admin</a>
 </nav>
@@ -150,13 +196,31 @@
       <option value="size">Tamanho</option>
     </select>
     <span style="flex:1" id="spacer"></span>
+    <span class="ro-tag hidden" id="roTag" title="Backups são escritos pelo cliente e ficam somente leitura. Para editar, copie os arquivos para uma pasta do servidor.">🔒 Somente leitura</span>
+    <button class="cbtn hidden" id="editBtn"></button>
     <button class="cbtn" id="viewGrid" title="Grade">▦</button>
     <button class="cbtn" id="viewList" title="Lista">☰</button>
   </div>
+  <div class="editbar hidden" id="editBar"></div>
   <div class="old-banner hidden" id="oldBanner"></div>
 
   <div class="pane" id="pane"><div class="loading">Carregando</div></div>
+  <input type="file" id="upFiles" multiple hidden>
+  <input type="file" id="upDir" webkitdirectory hidden>
 </main>
+
+<div class="dlg hidden" id="dlg" role="dialog" aria-modal="true" aria-labelledby="dlgH">
+  <div class="dlg-box">
+    <div class="dlg-h" id="dlgH"></div>
+    <div class="dlg-b" id="dlgB"></div>
+    <div class="dlg-f" id="dlgF"></div>
+  </div>
+</div>
+
+<div class="upl hidden" id="upl">
+  <div class="upl-h"><span id="uplH"></span><button class="cbtn" id="uplClose" title="Fechar">✕</button></div>
+  <div class="upl-l" id="uplL"></div>
+</div>
 
 <div class="viewer hidden" id="viewer" role="dialog" aria-modal="true" aria-labelledby="vName">
   <div class="v-head">
@@ -195,7 +259,11 @@
     view: localStorage.getItem('nv-cloud-view') || 'grid',
     labels: [], folders: [], files: [], total: 0, versionKey: '', isLatest: true,
     versions: [], versionsFor: '', results: null,
+    // Pasta do servidor (editável) × backup (somente leitura). `edit` liga o modo
+    // de seleção: editar numa pasta do servidor, só copiar num backup.
+    kind: '', editable: false, name: '', edit: false, sel: new Set(),
   };
+  const editKey = l => 'nv-cloud-edit:' + l;
   let sessionReady = false;
 
   const ICON_FOLDER = '<svg class="ico-folder" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.6l2 2.2h8.4A1.5 1.5 0 0 1 21 8.7v9.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/></svg>';
@@ -240,14 +308,27 @@
     replace ? history.replaceState(null, '', url) : history.pushState(null, '', url);
     readUrl();
     resetSearch();
+    st.sel.clear();
     load();
   }
-  window.addEventListener('popstate', () => { readUrl(); resetSearch(); closeViewer(); load(); });
+  window.addEventListener('popstate', () => { readUrl(); resetSearch(); st.sel.clear(); closeViewer(); load(); });
 
   // ── API ───────────────────────────────────────────────────────────────────
   async function api(path, params) {
     const url = path + (params ? '?' + new URLSearchParams(params) : '');
     const r = await fetch(url, {headers: H(), credentials: 'same-origin'});
+    if (r.status === 401) { sessionReady = false; showLogin('Sessão expirada — informe a API Key'); throw new Error('401'); }
+    if (!r.ok) {
+      let msg = r.status + '';
+      try { msg = (await r.json()).detail || msg; } catch (_) {}
+      throw new Error(msg);
+    }
+    return r.json();
+  }
+  // Escrita: sempre com o header (o cookie de sessão só lê).
+  async function send(path, body, method) {
+    const r = await fetch(path, {method: method || 'POST', credentials: 'same-origin',
+      headers: {...H(), 'Content-Type': 'application/json'}, body: body ? JSON.stringify(body) : undefined});
     if (r.status === 401) { sessionReady = false; showLogin('Sessão expirada — informe a API Key'); throw new Error('401'); }
     if (!r.ok) {
       let msg = r.status + '';
@@ -284,6 +365,11 @@
         const [d] = await Promise.all([api('/cloud/tree', params), loadVersions()]);
         st.folders = d.folders; st.files = d.files; st.total = d.total_files;
         st.versionKey = d.version_key; st.isLatest = d.is_latest;
+        st.kind = d.kind; st.editable = d.editable; st.name = d.name || st.label;
+        try { st.edit = localStorage.getItem(editKey(st.label)) === '1'; } catch (_) { st.edit = false; }
+        // Some da seleção o que não está mais na pasta (movido, excluído em outra aba).
+        const here = new Set([...st.folders.map(f => itemPath(f.name)), ...st.files.map(f => itemPath(f.name))]);
+        for (const k of [...st.sel]) if (!here.has(k)) st.sel.delete(k);
       }
       render();
     } catch (e) {
@@ -315,8 +401,9 @@
     if (st.label) {
       const segs = st.path ? st.path.split('/') : [];
       parts.push('<span class="bc-sep">/</span>');
-      parts.push(segs.length ? `<button class="bc-link" data-crumb="0">${esc(st.label)}</button>`
-                             : `<span class="bc-cur">${esc(st.label)}</span>`);
+      const nm = st.name || st.label;
+      parts.push(segs.length ? `<button class="bc-link" data-crumb="0">${esc(nm)}</button>`
+                             : `<span class="bc-cur">${esc(nm)}</span>`);
       segs.forEach((s, i) => {
         parts.push('<span class="bc-sep">/</span>');
         parts.push(i === segs.length - 1 ? `<span class="bc-cur">${esc(s)}</span>`
@@ -332,7 +419,18 @@
     document.getElementById('sortSel').classList.toggle('hidden', !inLabel);
     document.getElementById('sortSel').value = st.sort;
     const vs = document.getElementById('verSel');
-    vs.classList.toggle('hidden', !inLabel || !st.versions.length);
+    // Pasta do servidor tem uma versão só (a atual): sem seletor.
+    vs.classList.toggle('hidden', !inLabel || !st.versions.length || st.editable);
+    document.getElementById('search').placeholder = st.editable ? 'Buscar nesta pasta…' : 'Buscar neste backup…';
+    document.getElementById('roTag').classList.toggle('hidden', !inLabel || st.editable);
+    const eb = document.getElementById('editBtn');
+    eb.classList.toggle('hidden', !inLabel);
+    eb.classList.toggle('on', st.edit);
+    eb.textContent = st.editable ? (st.edit ? '✓ Concluir edição' : '✎ Editar') : (st.edit ? '✓ Concluir' : '☐ Selecionar');
+    eb.title = st.editable ? 'Mover, renomear, excluir, criar pastas e enviar arquivos'
+                           : 'Selecionar para copiar para uma pasta do servidor';
+    document.getElementById('pane').classList.toggle('editing', inLabel && st.edit);
+    renderEditBar();
     if (inLabel && st.versions.length) {
       vs.innerHTML = st.versions.map((v, i) =>
         `<option value="${i === 0 ? '' : esc(v.version_key)}">${i === 0 ? 'Mais recente · ' : ''}${esc(fmtVer(v.created_at))}</option>`).join('');
@@ -348,20 +446,36 @@
     document.getElementById('viewList').classList.toggle('on', st.view === 'list');
   }
 
+  // Caminho do item relativo à raiz do label — a chave da seleção e o que a API de edição recebe.
+  const joinPath = (a, b) => a ? a + '/' + b : b;
+  const itemPath = name => joinPath(st.path, name);
+  const fileKey = f => st.results ? f.path : itemPath(f.name);
+
+  // Atributos comuns de um item selecionável (pasta ou arquivo dentro de um label).
+  function pickAttrs(path) {
+    if (!st.label || !st.edit) return {cls: '', attrs: '', pick: ''};
+    const on = st.sel.has(path);
+    const drag = st.editable ? ' draggable="true"' : '';
+    return {cls: on ? ' sel' : '', attrs: ` data-path="${esc(path)}"${drag}`,
+            pick: `<span class="pick" data-pick="${esc(path)}" role="checkbox" aria-checked="${on}" aria-label="Selecionar">${on ? '✓' : ''}</span>`};
+  }
+
   function folderHtml(items, grid) {
-    // items: [{key, name, sub, icon}]
+    // items: [{key, name, sub, icon, path?}] — path: item selecionável/alvo de soltar
+    const p = it => it.path !== undefined ? pickAttrs(it.path) : {cls: '', attrs: '', pick: ''};
+    const drop = it => it.path !== undefined && st.editable ? ` data-drop="${esc(it.path)}"` : '';
     if (grid) {
-      return `<div class="grid folders">${items.map(it => `
-        <button class="tile" data-open-folder="${esc(it.key)}">
+      return `<div class="grid folders">${items.map(it => { const a = p(it); return `
+        <button class="tile${a.cls}" data-open-folder="${esc(it.key)}"${a.attrs}${drop(it)}>${a.pick}
           <div class="tile-thumb">${it.icon}</div>
           <div class="tile-text"><div class="tile-name" title="${esc(it.name)}">${esc(it.name)}</div>
           <div class="tile-meta">${esc(it.sub)}</div></div>
-        </button>`).join('')}</div>`;
+        </button>`; }).join('')}</div>`;
     }
-    return `<div class="list">${items.map(it => `
-      <button class="row" data-open-folder="${esc(it.key)}">${it.icon}
+    return `<div class="list">${items.map(it => { const a = p(it); return `
+      <button class="row${a.cls}" data-open-folder="${esc(it.key)}"${a.attrs}${drop(it)}>${a.pick}${it.icon}
         <span class="row-name" title="${esc(it.name)}">${esc(it.name)}</span>
-        <span class="row-meta">${esc(it.sub)}</span></button>`).join('')}</div>`;
+        <span class="row-meta">${esc(it.sub)}</span></button>`; }).join('')}</div>`;
   }
 
   function filesHtml(files, grid, showPath) {
@@ -372,18 +486,19 @@
           ? `<img loading="lazy" decoding="async" alt="" src="${contentUrl(f.id)}" data-fallback="1">`
           : iconFor(f.name);
         const badge = k === 'video' ? '<span class="tile-badge">VÍDEO</span>' : '';
-        return `<button class="tile" data-open-file="${i}">
+        const a = pickAttrs(fileKey(f));
+        return `<button class="tile${a.cls}" data-open-file="${i}"${a.attrs}>${a.pick}
           <div class="tile-thumb">${thumb}${badge}</div>
           <div class="tile-name" title="${esc(showPath ? f.path : f.name)}">${esc(f.name)}</div>
           <div class="tile-meta">${esc(fmtSize(f.size))} · ${esc(fmtDay(f.mtime))}</div>
         </button>`;
       }).join('')}</div>`;
     }
-    return `<div class="list">${files.map((f, i) => `
-      <button class="row" data-open-file="${i}">${iconFor(f.name)}
+    return `<div class="list">${files.map((f, i) => { const a = pickAttrs(fileKey(f)); return `
+      <button class="row${a.cls}" data-open-file="${i}"${a.attrs}>${a.pick}${iconFor(f.name)}
         <span class="row-name" title="${esc(f.path)}">${esc(f.name)}${showPath ? `<div class="row-sub">${esc(f.path)}</div>` : ''}</span>
         <span class="row-meta">${esc(fmtTime(f.mtime))}</span>
-        <span class="row-size">${esc(fmtSize(f.size))}</span></button>`).join('')}</div>`;
+        <span class="row-size">${esc(fmtSize(f.size))}</span></button>`; }).join('')}</div>`;
   }
 
   function render() {
@@ -392,14 +507,22 @@
     const grid = st.view === 'grid';
 
     if (!st.label) {
-      if (!st.labels.length) {
-        pane.innerHTML = '<div class="empty">Nenhum backup seu ainda.<br>Faça um backup com o cliente NestVault e ele aparece aqui como uma pasta.</div>';
-        return;
-      }
-      pane.innerHTML = '<div class="section-h">Meus backups</div>' + folderHtml(st.labels.map(l => ({
-        key: l.label, name: l.label, icon: ICON_DRIVE,
-        sub: l.last_backup_at ? 'backup de ' + fmtVerDay(l.last_backup_at) : 'sem versão concluída',
-      })), grid);
+      const drives = st.labels.filter(l => l.kind === 'server');
+      const backups = st.labels.filter(l => l.kind !== 'server');
+      let html = `<div class="section-h">Pastas do servidor</div>`;
+      html += drives.length
+        ? folderHtml(drives.map(l => ({key: l.label, name: l.name || l.label, icon: ICON_FOLDER,
+                                       sub: 'editável'})), grid)
+        : '<div class="empty" style="padding:18px 10px">Nenhuma pasta do servidor ainda. Elas são editáveis: dá para enviar, mover, renomear e excluir arquivos, como num file server.</div>';
+      html += `<div class="more" style="margin:0 0 22px;justify-content:flex-start"><button class="cbtn primary" id="newDriveBtn">＋ Nova pasta do servidor</button></div>`;
+      html += '<div class="section-h">Backups · 🔒 somente leitura</div>';
+      html += backups.length
+        ? folderHtml(backups.map(l => ({
+            key: l.label, name: l.name || l.label, icon: ICON_DRIVE,
+            sub: l.last_backup_at ? 'backup de ' + fmtVerDay(l.last_backup_at) : 'sem versão concluída',
+          })), grid)
+        : '<div class="empty" style="padding:18px 10px">Nenhum backup seu ainda.<br>Faça um backup com o cliente NestVault e ele aparece aqui como uma pasta.</div>';
+      pane.innerHTML = html;
       return;
     }
 
@@ -413,8 +536,8 @@
     let html = '';
     if (st.folders.length) {
       html += '<div class="section-h">Pastas</div>' + folderHtml(st.folders.map(f => ({
-        key: f.name, name: f.name, icon: ICON_FOLDER,
-        sub: `${f.count} arquivo(s) · ${fmtSize(f.size)}`,
+        key: f.name, name: f.name, icon: ICON_FOLDER, path: itemPath(f.name),
+        sub: f.count ? `${f.count} arquivo(s) · ${fmtSize(f.size)}` : 'vazia',
       })), grid);
     }
     if (st.files.length) {
@@ -423,7 +546,9 @@
         html += `<div class="more"><button class="cbtn" id="moreBtn">Carregar mais (${st.total - st.files.length})</button></div>`;
       }
     }
-    pane.innerHTML = html || '<div class="empty">Pasta vazia.</div>';
+    pane.innerHTML = html || (st.editable
+      ? `<div class="empty">Pasta vazia.<br>${st.edit ? 'Arraste arquivos para cá ou use ↑ Enviar.' : 'Clique em ✎ Editar para enviar arquivos e criar pastas.'}</div>`
+      : '<div class="empty">Pasta vazia.</div>');
   }
 
   // Imagem que o navegador não decodifica (HEIC fora do Safari, arquivo corrompido)
@@ -435,6 +560,9 @@
 
   // ── Interação ─────────────────────────────────────────────────────────────
   document.getElementById('pane').addEventListener('click', e => {
+    const pk = e.target.closest('[data-pick]');
+    if (pk) { e.preventDefault(); toggleSel(pk.dataset.pick); return; }
+    if (e.target.id === 'newDriveBtn') { newDrive(); return; }
     const fo = e.target.closest('[data-open-folder]');
     if (fo) {
       const key = fo.dataset.openFolder;
@@ -483,6 +611,437 @@
     }, 300);
   });
 
+  // ── Edição ────────────────────────────────────────────────────────────────
+  // Pasta do servidor: ✎ Editar liga seleção + ações. Backup: ☐ Selecionar só
+  // permite copiar para uma pasta do servidor (o backup em si nunca muda).
+  function toggleSel(path) {
+    st.sel.has(path) ? st.sel.delete(path) : st.sel.add(path);
+    render();
+  }
+  function visibleKeys() {
+    if (st.results) return st.results.map(f => f.path);
+    return [...st.folders.map(f => itemPath(f.name)), ...st.files.map(f => itemPath(f.name))];
+  }
+
+  function renderEditBar() {
+    const bar = document.getElementById('editBar');
+    const on = !!st.label && st.edit;
+    bar.classList.toggle('hidden', !on);
+    if (!on) return;
+    const n = st.sel.size, all = visibleKeys();
+    const b = (id, txt, dis, extra) => `<button class="cbtn ${extra || ''}" id="${id}" ${dis ? 'disabled' : ''}>${txt}</button>`;
+    const allOn = all.length && all.every(k => st.sel.has(k));
+    let html = `<span class="cnt">${n ? n + ' selecionado(s)' : 'Nada selecionado'}</span>` +
+      b('eaAll', allOn ? '☐ Limpar' : '☑ Todos', !all.length);
+    if (st.editable) {
+      html += b('eaUp', '↑ Enviar arquivos', st.results) + b('eaUpDir', '↑ Enviar pasta', st.results) +
+        b('eaMkdir', '＋ Pasta', st.results) +
+        b('eaMove', '⇢ Mover para…', !n) + b('eaRename', '✎ Renomear', n !== 1) +
+        b('eaCopy', '⧉ Copiar para…', !n) + b('eaDel', '🗑 Excluir', !n, 'danger') +
+        '<span style="flex:1"></span>' + b('eaTrash', '♻ Lixeira');
+      if (!st.path && !st.results) html += b('eaDrive', '⚙ Pasta do servidor');
+    } else {
+      html += b('eaCopy', '⧉ Copiar para pasta do servidor…', !n);
+    }
+    bar.innerHTML = html;
+  }
+
+  document.getElementById('editBtn').addEventListener('click', () => {
+    st.edit = !st.edit;
+    if (!st.edit) st.sel.clear();
+    try { st.edit ? localStorage.setItem(editKey(st.label), '1') : localStorage.removeItem(editKey(st.label)); } catch (_) {}
+    render();
+  });
+
+  document.getElementById('editBar').addEventListener('click', e => {
+    const id = e.target.closest('button') && e.target.closest('button').id;
+    if (!id) return;
+    if (id === 'eaAll') {
+      const all = visibleKeys();
+      const allOn = all.every(k => st.sel.has(k));
+      all.forEach(k => allOn ? st.sel.delete(k) : st.sel.add(k));
+      render();
+    } else if (id === 'eaUp') document.getElementById('upFiles').click();
+    else if (id === 'eaUpDir') document.getElementById('upDir').click();
+    else if (id === 'eaMkdir') mkdirDlg();
+    else if (id === 'eaMove') pickFolder('move');
+    else if (id === 'eaCopy') pickFolder('copy');
+    else if (id === 'eaRename') renameDlg([...st.sel][0]);
+    else if (id === 'eaDel') deleteSel();
+    else if (id === 'eaTrash') trashDlg();
+    else if (id === 'eaDrive') driveDlg();
+  });
+
+  async function act(fn, okMsg) {
+    clearError();
+    try { await fn(); st.sel.clear(); if (okMsg) toast(okMsg); await load(); }
+    catch (e) { if (e.message !== '401') showError(e.message); }
+  }
+
+  // ── Diálogo genérico ──
+  // buttons: [{label, cls, value}] → resolve(value) (null ao cancelar/fechar)
+  let dlgResolve = null;
+  function dlg(title, bodyHtml, buttons, onOpen) {
+    const box = document.getElementById('dlg');
+    document.getElementById('dlgH').textContent = title;
+    document.getElementById('dlgB').innerHTML = bodyHtml;
+    document.getElementById('dlgF').innerHTML = buttons.map((b, i) =>
+      `<button class="cbtn ${b.cls || ''}" data-dlg="${i}">${esc(b.label)}</button>`).join('');
+    document.getElementById('dlgF')._buttons = buttons;
+    box.classList.remove('hidden');
+    if (onOpen) onOpen(document.getElementById('dlgB'));
+    return new Promise(r => { dlgResolve = r; });
+  }
+  function closeDlg(v) {
+    document.getElementById('dlg').classList.add('hidden');
+    const r = dlgResolve; dlgResolve = null;
+    if (r) r(v === undefined ? null : v);
+  }
+  document.getElementById('dlg').addEventListener('click', e => {
+    if (e.target.id === 'dlg') return closeDlg(null);
+    const b = e.target.closest('[data-dlg]');
+    if (b) {
+      const spec = document.getElementById('dlgF')._buttons[+b.dataset.dlg];
+      closeDlg(typeof spec.value === 'function' ? spec.value() : spec.value);
+    }
+  });
+  document.addEventListener('keydown', e => {
+    if (document.getElementById('dlg').classList.contains('hidden')) return;
+    if (e.key === 'Escape') closeDlg(null);
+    else if (e.key === 'Enter' && e.target.classList.contains('dlg-in')) {
+      e.preventDefault();
+      document.querySelector('#dlgF .primary')?.click();
+    }
+  });
+
+  // Pede um nome; repete o diálogo mostrando o erro da API até dar certo ou cancelar.
+  async function askName(title, label, initial, okLabel, run) {
+    let err = '';
+    let val = initial || '';
+    for (;;) {
+      const r = await dlg(title,
+        `<label class="dlg-l" for="dlgIn">${esc(label)}</label>
+         <input class="dlg-in" id="dlgIn" value="${esc(val)}" autocomplete="off" spellcheck="false">
+         <div class="dlg-err">${esc(err)}</div>`,
+        [{label: 'Cancelar', value: null},
+         {label: okLabel, cls: 'primary', value: () => document.getElementById('dlgIn').value.trim()}],
+        b => { const i = b.querySelector('input'); i.focus();
+               const dot = i.value.lastIndexOf('.'); i.setSelectionRange(0, dot > 0 ? dot : i.value.length); });
+      if (r === null) return false;
+      val = r;
+      if (!r) { err = 'Informe um nome'; continue; }
+      try { await run(r); return true; }
+      catch (e) { if (e.message === '401') return false; err = e.message; }
+    }
+  }
+
+  async function newDrive() {
+    let label = null;
+    const ok = await askName('Nova pasta do servidor', 'Nome', '', 'Criar', async name => {
+      label = (await send('/cloud/drives', {name})).label;
+    });
+    if (ok && label) { try { localStorage.setItem(editKey(label), '1'); } catch (_) {} go(label, '', ''); }
+  }
+
+  async function mkdirDlg() {
+    const ok = await askName('Nova pasta', 'Nome da pasta', '', 'Criar', async name => {
+      await send('/cloud/drive/mkdir', {label: st.label, path: itemPath(name)});
+    });
+    if (ok) { toast('Pasta criada'); load(); }
+  }
+
+  async function renameDlg(path) {
+    const name = path.split('/').pop();
+    const ok = await askName('Renomear', 'Novo nome', name, 'Renomear', async n => {
+      await send('/cloud/drive/rename', {label: st.label, path, new_name: n});
+    });
+    if (ok) { st.sel.clear(); toast('Renomeado'); load(); }
+  }
+
+  async function deleteSel() {
+    const items = [...st.sel];
+    const what = items.length === 1 ? `"${items[0].split('/').pop()}"` : `${items.length} itens`;
+    const ok = await dlg('Excluir', `<p>Mover ${esc(what)} para a lixeira desta pasta do servidor?</p>
+      <p style="color:var(--text-mute)">Dá para restaurar em ♻ Lixeira até o prazo de retenção.</p>`,
+      [{label: 'Cancelar', value: false}, {label: 'Excluir', cls: 'primary', value: true}]);
+    if (ok) act(() => send('/cloud/drive/delete', {label: st.label, items}), 'Enviado para a lixeira');
+  }
+
+  async function driveDlg() {
+    const r = await dlg('Pasta do servidor', `<p>${esc(st.name)}</p>`,
+      [{label: 'Cancelar', value: null}, {label: 'Excluir pasta do servidor', cls: 'danger', value: 'del'},
+       {label: 'Renomear', cls: 'primary', value: 'ren'}]);
+    if (r === 'ren') {
+      const ok = await askName('Renomear pasta do servidor', 'Novo nome', st.name, 'Renomear', async n => {
+        await send('/cloud/drives/' + encodeURIComponent(st.label), {name: n}, 'PATCH');
+      });
+      if (ok) load();
+    } else if (r === 'del') {
+      const ok = await nvConfirm('Excluir pasta do servidor',
+        `A pasta "${st.name}" e todo o conteúdo dela serão excluídos.`, {word: st.name});
+      if (!ok) return;
+      try { await send('/backups/' + encodeURIComponent(st.label), null, 'DELETE'); go('', '', ''); }
+      catch (e) { if (e.message !== '401') showError(e.message); }
+    }
+  }
+
+  // ── Escolher pasta de destino (mover / copiar) ──
+  // Mover: dentro da pasta do servidor atual. Copiar: qualquer pasta do servidor.
+  async function pickFolder(mode) {
+    const items = [...st.sel];
+    const pk = {label: mode === 'move' ? st.label : '', name: mode === 'move' ? st.name : '', path: ''};
+    if (mode === 'copy' && st.editable) { pk.label = st.label; pk.name = st.name; pk.path = st.path; }
+    const blocked = p => pk.label === st.label && items.some(it => p === it || p.startsWith(it + '/'));
+
+    async function draw(body) {
+      const list = body.querySelector('.pk-list');
+      list.innerHTML = '<div class="loading">Carregando</div>';
+      body.querySelector('.pk-path').textContent = pk.label ? '☁ ' + pk.name + (pk.path ? ' / ' + pk.path.split('/').join(' / ') : '') : '☁ Pastas do servidor';
+      const okBtn = document.querySelector('#dlgF .primary');
+      try {
+        let rows = '';
+        if (!pk.label) {
+          const drives = (await api('/cloud/tree')).labels.filter(l => l.kind === 'server');
+          rows = drives.map(l => `<button class="row" data-pk-drive="${esc(l.label)}" data-pk-name="${esc(l.name)}">${ICON_FOLDER}<span class="row-name">${esc(l.name)}</span></button>`).join('')
+            || '<div class="empty" style="padding:20px">Nenhuma pasta do servidor. Crie uma na raiz do Cloud.</div>';
+          if (okBtn) okBtn.disabled = true;
+        } else {
+          const d = await api('/cloud/tree', {label: pk.label, path: pk.path, limit: 1});
+          rows = (pk.path || mode === 'copy' ? `<button class="row" data-pk-up="1">⬑<span class="row-name">..</span></button>` : '') +
+            d.folders.map(f => { const p = joinPath(pk.path, f.name);
+              return `<button class="row" data-pk-dir="${esc(p)}" ${blocked(p) ? 'disabled' : ''}>${ICON_FOLDER}<span class="row-name">${esc(f.name)}</span></button>`; }).join('');
+          if (okBtn) okBtn.disabled = blocked(pk.path) || (mode === 'move' && pk.path === st.path);
+        }
+        list.innerHTML = rows || '<div class="empty" style="padding:20px">Sem subpastas.</div>';
+      } catch (e) { list.innerHTML = '<div class="dlg-err">' + esc(e.message) + '</div>'; }
+    }
+
+    const title = mode === 'move' ? `Mover ${items.length} item(ns) para…` : `Copiar ${items.length} item(ns) para…`;
+    const r = await dlg(title, `<div class="pk-path"></div><div class="pk-list list"></div>
+        ${mode === 'copy' ? '<p style="color:var(--text-mute);margin-top:8px">A cópia não ocupa espaço extra: o conteúdo é o mesmo do original.</p>' : ''}`,
+      [{label: 'Cancelar', value: null}, {label: mode === 'move' ? 'Mover para cá' : 'Copiar para cá', cls: 'primary', value: true}],
+      body => {
+        body.onclick = e => {
+          const dv = e.target.closest('[data-pk-drive]'), dr = e.target.closest('[data-pk-dir]'), up = e.target.closest('[data-pk-up]');
+          if (dv) { pk.label = dv.dataset.pkDrive; pk.name = dv.dataset.pkName; pk.path = ''; }
+          else if (dr && !dr.disabled) pk.path = dr.dataset.pkDir;
+          else if (up) { if (pk.path) pk.path = pk.path.split('/').slice(0, -1).join('/'); else pk.label = ''; }
+          else return;
+          draw(body);
+        };
+        draw(body);
+      });
+    if (!r || !pk.label) return;
+    if (mode === 'move') {
+      act(() => send('/cloud/drive/move', {label: st.label, items, dest_dir: pk.path}), 'Movido');
+    } else {
+      const body = {src_label: st.label, items, dest_label: pk.label, dest_dir: pk.path};
+      if (st.version) body.src_version = st.version;
+      act(async () => {
+        const res = await send('/cloud/drive/copy', body);
+        toast(`${res.copied} arquivo(s) copiado(s) para ${pk.name}`);
+      });
+    }
+  }
+
+  // ── Lixeira da pasta do servidor ──
+  async function trashDlg() {
+    let entries = [];
+    async function draw(body) {
+      body.innerHTML = '<div class="loading">Carregando</div>';
+      try { entries = await api('/cloud/drive/trash', {label: st.label}); }
+      catch (e) { body.innerHTML = '<div class="dlg-err">' + esc(e.message) + '</div>'; return; }
+      body.innerHTML = entries.length ? entries.map(t => `
+        <div class="tr-row">${t.is_dir ? ICON_FOLDER : iconFor(t.name)}
+          <div class="tr-name" title="${esc(t.path)}">${esc(t.path)}
+            <div class="tr-meta">${t.is_dir ? t.count + ' arquivo(s) · ' : ''}${esc(fmtSize(t.size))} · excluído ${esc(fmtVer(t.deleted_at))}</div></div>
+          <button class="cbtn" data-tr-restore="${t.id}">Restaurar</button>
+          <button class="cbtn danger" data-tr-purge="${t.id}" title="Excluir de vez">✕</button>
+        </div>`).join('') : '<div class="empty" style="padding:24px">A lixeira está vazia.</div>';
+    }
+    await dlg('Lixeira', '', [{label: 'Fechar', value: null}], body => {
+      body.onclick = async e => {
+        const rs = e.target.closest('[data-tr-restore]'), pg = e.target.closest('[data-tr-purge]');
+        if (!rs && !pg) return;
+        try {
+          if (rs) { await send('/cloud/drive/restore', {label: st.label, ids: [+rs.dataset.trRestore]}); toast('Restaurado'); load(); }
+          else {
+            const t = entries.find(x => x.id === +pg.dataset.trPurge);
+            if (!confirm(`Excluir "${t ? t.path : ''}" de vez? Não dá para desfazer.`)) return;
+            await send('/cloud/drive/purge', {label: st.label, ids: [+pg.dataset.trPurge]});
+          }
+          draw(body);
+        } catch (err) {
+          if (err.message !== '401') body.insertAdjacentHTML('afterbegin', '<div class="dlg-err">' + esc(err.message) + '</div>');
+        }
+      };
+      draw(body);
+    });
+  }
+
+  // ── Upload ──
+  // Fila com 2 envios simultâneos; XHR para ter progresso. O caminho vai em base64
+  // (UTF-8) no header, como no /upload do cliente.
+  const b64 = s => { const b = new TextEncoder().encode(s); let o = ''; for (const c of b) o += String.fromCharCode(c); return btoa(o); };
+  const upl = {queue: [], active: 0, done: 0, failed: 0, total: 0, label: ''};
+
+  function enqueue(entries, destDir) {
+    // entries: [{file, rel}] — rel é o caminho relativo (pastas soltas/enviadas)
+    if (!entries.length) return;
+    if (upl.active === 0 && !upl.queue.length) { upl.done = upl.failed = upl.total = 0; document.getElementById('uplL').innerHTML = ''; }
+    upl.label = st.label;
+    for (const {file, rel} of entries) {
+      const el = document.createElement('div');
+      el.className = 'upl-i';
+      el.innerHTML = `<div class="upl-n" title="${esc(rel)}">${esc(rel)} · ${esc(fmtSize(file.size))}</div><div class="upl-bar"><div></div></div>`;
+      document.getElementById('uplL').appendChild(el);
+      upl.queue.push({file, path: joinPath(destDir, rel), el, label: st.label});
+      upl.total++;
+    }
+    document.getElementById('upl').classList.remove('hidden');
+    pump();
+  }
+  function uplHead() {
+    const left = upl.total - upl.done - upl.failed;
+    document.getElementById('uplH').textContent = left
+      ? `Enviando ${upl.done + upl.failed + 1} de ${upl.total}…`
+      : `${upl.done} enviado(s)` + (upl.failed ? ` · ${upl.failed} com erro` : '');
+  }
+  function pump() {
+    uplHead();
+    while (upl.active < 2 && upl.queue.length) {
+      const job = upl.queue.shift();
+      upl.active++;
+      sendFile(job).then(ok => {
+        upl.active--; ok ? upl.done++ : upl.failed++;
+        pump();
+        if (!upl.active && !upl.queue.length && st.label === job.label) load();
+      });
+    }
+  }
+  function sendFile(job) {
+    return new Promise(resolve => {
+      const x = new XMLHttpRequest();
+      x.open('PUT', '/cloud/drive/upload');
+      x.setRequestHeader('X-API-Key', API_KEY);
+      x.setRequestHeader('X-Label', job.label);
+      x.setRequestHeader('X-Path', b64(job.path));
+      x.setRequestHeader('X-Mtime', String((job.file.lastModified || Date.now()) / 1000));
+      const bar = job.el.querySelector('.upl-bar div');
+      x.upload.onprogress = e => { if (e.lengthComputable) bar.style.width = (100 * e.loaded / e.total) + '%'; };
+      x.onload = () => {
+        if (x.status >= 200 && x.status < 300) { bar.style.width = '100%'; job.el.classList.add('ok'); resolve(true); return; }
+        let msg = String(x.status);
+        try { msg = JSON.parse(x.responseText).detail || msg; } catch (_) {}
+        job.el.classList.add('err'); job.el.querySelector('.upl-n').textContent += ' — ' + msg;
+        if (x.status === 401) showLogin('Sessão expirada — informe a API Key');
+        resolve(false);
+      };
+      x.onerror = () => { job.el.classList.add('err'); job.el.querySelector('.upl-n').textContent += ' — falha de rede'; resolve(false); };
+      x.send(job.file);
+    });
+  }
+  document.getElementById('uplClose').addEventListener('click', () => {
+    if (upl.active || upl.queue.length) return;  // não esconde envio em andamento
+    document.getElementById('upl').classList.add('hidden');
+  });
+  window.addEventListener('beforeunload', e => { if (upl.active || upl.queue.length) { e.preventDefault(); e.returnValue = ''; } });
+  for (const id of ['upFiles', 'upDir']) {
+    document.getElementById(id).addEventListener('change', e => {
+      enqueue([...e.target.files].map(f => ({file: f, rel: f.webkitRelativePath || f.name})), st.path);
+      e.target.value = '';
+    });
+  }
+
+  // Pastas soltas do sistema: percorre as entradas (webkitGetAsEntry) recursivamente.
+  async function droppedFiles(dt) {
+    const roots = [...(dt.items || [])].map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+    if (!roots.length) return [...dt.files].map(f => ({file: f, rel: f.name}));
+    const out = [];
+    const readAll = r => new Promise((res, rej) => {
+      const acc = [];
+      const next = () => r.readEntries(b => { if (!b.length) res(acc); else { acc.push(...b); next(); } }, rej);
+      next();
+    });
+    async function walk(entry, prefix) {
+      if (entry.isFile) {
+        const f = await new Promise((res, rej) => entry.file(res, rej));
+        out.push({file: f, rel: prefix + entry.name});
+      } else if (entry.isDirectory) {
+        for (const c of await readAll(entry.createReader())) await walk(c, prefix + entry.name + '/');
+      }
+    }
+    for (const r of roots) await walk(r, '');
+    return out;
+  }
+
+  // ── Arrastar e soltar ──
+  // Itens do drive arrastados para uma pasta (ou para o breadcrumb) = mover.
+  // Arquivos do computador soltos na pasta aberta ou numa subpasta = enviar.
+  const NV_DRAG = 'application/x-nestvault-items';
+  const pane = document.getElementById('pane');
+  pane.addEventListener('dragstart', e => {
+    const it = e.target.closest('[data-path][draggable]');
+    if (!it) return;
+    const p = it.dataset.path;
+    const items = st.sel.has(p) ? [...st.sel] : [p];
+    e.dataTransfer.setData(NV_DRAG, JSON.stringify(items));
+    e.dataTransfer.effectAllowed = 'move';
+  });
+  const isFiles = e => [...e.dataTransfer.types].includes('Files');
+  const isItems = e => [...e.dataTransfer.types].includes(NV_DRAG);
+  function dropTarget(e) {
+    const crumb = e.target.closest('#crumbs [data-crumb]');
+    if (crumb && +crumb.dataset.crumb >= 0) return {el: crumb, dir: st.path.split('/').slice(0, +crumb.dataset.crumb).join('/')};
+    const f = e.target.closest('[data-drop]');
+    if (f) return {el: f, dir: f.dataset.drop};
+    if (e.target.closest('#pane')) return {el: pane, dir: st.path};
+    return null;
+  }
+  let overEl = null;
+  function setOver(el) { if (overEl && overEl !== el) overEl.classList.remove('drop-over'); overEl = el; if (el) el.classList.add('drop-over'); }
+  for (const node of [pane, document.getElementById('crumbs')]) {
+    node.addEventListener('dragover', e => {
+      if (!st.editable || !st.edit || st.results) return;
+      if (!isFiles(e) && !isItems(e)) return;
+      const t = dropTarget(e);
+      if (!t || (isItems(e) && t.el === pane)) { setOver(null); return; }
+      e.preventDefault();
+      e.dataTransfer.dropEffect = isItems(e) ? 'move' : 'copy';
+      setOver(t.el);
+    });
+    node.addEventListener('dragleave', e => { if (!node.contains(e.relatedTarget)) setOver(null); });
+    node.addEventListener('drop', async e => {
+      const t = dropTarget(e);
+      setOver(null);
+      if (!t || !st.editable || !st.edit) return;
+      e.preventDefault();
+      if (isItems(e)) {
+        const items = JSON.parse(e.dataTransfer.getData(NV_DRAG) || '[]')
+          .filter(p => t.dir !== p && !t.dir.startsWith(p + '/'));
+        if (items.length) act(() => send('/cloud/drive/move', {label: st.label, items, dest_dir: t.dir}), 'Movido');
+      } else if (isFiles(e)) {
+        enqueue(await droppedFiles(e.dataTransfer), t.dir);
+      }
+    });
+  }
+  // Fora do pane, soltar arquivo não pode abrir o arquivo no navegador.
+  window.addEventListener('dragover', e => { if (isFiles(e)) e.preventDefault(); });
+  window.addEventListener('drop', e => { if (isFiles(e)) e.preventDefault(); });
+
+  // ── Aviso rápido ──
+  let toastTimer = null;
+  function toast(msg) {
+    let t = document.getElementById('nvToast');
+    if (!t) {
+      t = document.createElement('div'); t.id = 'nvToast';
+      t.style.cssText = 'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--bg2);border:1px solid var(--amber);color:var(--amber);padding:9px 16px;font-size:11px;z-index:70;font-family:var(--mono)';
+      document.body.appendChild(t);
+    }
+    t.textContent = msg; t.style.display = 'block';
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.style.display = 'none'; }, 2500);
+  }
+
   // ── Visualizador ──────────────────────────────────────────────────────────
   const vw = {list: [], idx: -1, file: null, histOpen: false};
 
@@ -510,6 +1069,7 @@
     document.getElementById('vSub').textContent =
       `${fmtSize(size)} · modificado ${fmtTime(mtime)}` + (ver ? ` · versão ${fmtVer(ver.created_at)}` : '');
     document.getElementById('vDl').href = contentUrl(id, true);
+    document.getElementById('vHistBtn').classList.toggle('hidden', st.editable);
 
     const url = contentUrl(id);
     const stage = document.getElementById('vStage');

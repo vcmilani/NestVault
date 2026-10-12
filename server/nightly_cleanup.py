@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
-from database import SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob, SsdCachePendingMove, engine, TRASHED_STATUS
+from database import SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob, SsdCachePendingMove, engine, TRASHED_STATUS, SERVER_KIND
 from sqlalchemy import func, delete, exists
 from cache_state import invalidate_activity
 
@@ -54,6 +54,8 @@ def purge_trash(db, cutoff: datetime | None) -> tuple[int, int]:
     labels_removed = 0
     for b in lq.all():
         if db.query(BackupVersion.id).filter(BackupVersion.backup_label == b.label).first() is None:
+            from cloud_ui import drive
+            drive.forget(db, b.label)
             db.delete(b)
             labels_removed += 1
     db.commit()
@@ -610,7 +612,10 @@ def run_nightly_cleanup() -> None:
                 + (f" … (+{len(stale_names) - 10})" if len(stale_names) > 10 else "")
             )
 
-        labels = [row[0] for row in db.query(BackupID.label).all()]
+        # Pastas do servidor (/cloud) ficam fora da retenção: a versão live delas é
+        # o conteúdo atual, e a lixeira própria vence em purge_expired, abaixo.
+        labels = [row[0] for row in db.query(BackupID.label)
+                  .filter(BackupID.kind != SERVER_KIND).all()]
         total_labels = len(labels)
 
         total_stale     = 0
@@ -728,6 +733,15 @@ def run_nightly_cleanup() -> None:
             db.rollback()
             log.exception("[nightly-cleanup] erro ao esvaziar a lixeira — seguindo")
             total_trash, trash_labels = 0, 0
+        try:
+            from cloud_ui import drive
+            drive_purged = drive.purge_expired(db, trash_cutoff)
+            if drive_purged:
+                log.info(f"[nightly-cleanup] {drive_purged} item(ns) apagado(s) da lixeira "
+                         f"das pastas do servidor")
+        except Exception:
+            db.rollback()
+            log.exception("[nightly-cleanup] erro ao esvaziar a lixeira das pastas do servidor — seguindo")
 
         total_removed = total_stale + total_day + total_week + total_month + total_unchanged + total_trash
 
