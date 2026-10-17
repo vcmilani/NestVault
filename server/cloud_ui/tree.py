@@ -14,8 +14,8 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from auth import require_owner_or_admin
-from database import (BackupID, BackupVersion, VersionFile, FileContent, User,
-                      TRASHED_STATUS)
+from database import (BackupID, BackupVersion, VersionFile, FileContent, ServerFolder, User,
+                      SERVER_KIND, TRASHED_STATUS)
 
 _base_cache: dict[tuple, str] = {}
 _base_lock = threading.Lock()
@@ -70,6 +70,12 @@ def label_base(db: Session, label: str, versions: list[BackupVersion]) -> str:
         if key in _base_cache:
             return _base_cache[key]
 
+    # Pasta do servidor: os caminhos já são gravados relativos à raiz.
+    if db.query(BackupID.kind).filter(BackupID.label == label).scalar() == SERVER_KIND:
+        with _base_lock:
+            _base_cache[key] = ""
+        return ""
+
     lows, highs = [], []
     for v in versions:
         # Uma agregação por query: o SQLite só usa o atalho de índice para MIN/MAX
@@ -117,7 +123,9 @@ def list_labels(db: Session, user: User) -> list[dict]:
         .all()
     )
     return [
-        {"label": b.label, "client_name": b.client_name,
+        {"label": b.label, "client_name": b.client_name, "kind": b.kind or "backup",
+         # Pasta do servidor: o label é gerado; o nome escolhido fica em client_name.
+         "name": b.client_name if b.kind == SERVER_KIND and b.client_name else b.label,
          "last_backup_at": str(latest[b.label]) if latest.get(b.label) else None}
         for b in labels
     ]
@@ -130,9 +138,29 @@ _SORTS = {
 }
 
 
+def files_under(version_id: int, root: str):
+    """Filtro dos VersionFile da versão que são `root` (arquivo) ou estão dentro de `root/`."""
+    return (VersionFile.version_id == version_id,
+            or_(VersionFile.original_path == root,
+                VersionFile.original_path.startswith(root + "/", autoescape=True)))
+
+
+def empty_dirs(db: Session, label: str, rel: str) -> list[str]:
+    """Nomes das subpastas diretas de `rel` que existem em server_folders (pastas
+    criadas pelo "Nova pasta" de uma pasta do servidor, ainda sem arquivos)."""
+    prefix = rel + "/" if rel else ""
+    rows = (db.query(ServerFolder.path)
+            .filter(ServerFolder.label == label,
+                    ServerFolder.path.startswith(prefix, autoescape=True))
+            .all())
+    return sorted({p[len(prefix):].split("/", 1)[0] for (p,) in rows if len(p) > len(prefix)})
+
+
 def list_children(db: Session, version: BackupVersion, base: str, rel: str,
-                  offset: int, limit: int, sort: str) -> dict:
-    """Subpastas (agregadas no SQL) + uma página de arquivos diretos de `rel`."""
+                  offset: int, limit: int, sort: str,
+                  extra_dirs: list[str] = ()) -> dict:
+    """Subpastas (agregadas no SQL) + uma página de arquivos diretos de `rel`.
+    `extra_dirs`: pastas sem arquivos (ver empty_dirs) a incluir com contagem 0."""
     prefix = base + (rel + "/" if rel else "")
     rest   = func.substr(VersionFile.original_path, len(prefix) + 1)
     slash  = _instr(db, rest, "/")
@@ -163,9 +191,15 @@ def list_children(db: Session, version: BackupVersion, base: str, rel: str,
         .offset(offset).limit(limit)
         .all()
     )
+    folder_list = [{"name": f.name, "count": f.count, "size": int(f.size), "mtime": f.mtime}
+                   for f in folders if f.name]
+    have = {f["name"] for f in folder_list}
+    missing = [n for n in extra_dirs if n not in have]
+    if missing:
+        folder_list = sorted(folder_list + [{"name": n, "count": 0, "size": 0, "mtime": None}
+                                            for n in missing], key=lambda f: f["name"])
     return {
-        "folders": [{"name": f.name, "count": f.count, "size": int(f.size), "mtime": f.mtime}
-                    for f in folders if f.name],
+        "folders": folder_list,
         "files": [file_entry(r, prefix) for r in rows],
         "total_files": total,
     }

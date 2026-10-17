@@ -107,7 +107,7 @@
   </div>
   <div class="header-right">
     <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
-    <a class="hbtn active" href="/" title="Fotos">▣<span class="hbtn-label"> Fotos</span></a>
+    <a class="hbtn active" href="/photos" title="Fotos">▣<span class="hbtn-label"> Fotos</span></a>
     <a class="hbtn" href="/cloud" title="Cloud">☁<span class="hbtn-label"> Cloud</span></a>
     <a class="hbtn" href="/admin" title="Área do administrador (pede chave de admin)">⚙<span class="hbtn-label"> Admin</span></a>
     <button class="hbtn always-visible" id="logoutBtn" title="Sair">⎋<span class="hbtn-label"> Sair</span></button>
@@ -116,7 +116,7 @@
 </header>
 
 <nav class="mobile-nav">
-  <a class="active" href="/">▣ Fotos</a>
+  <a class="active" href="/photos">▣ Fotos</a>
   <a href="/cloud">☁ Cloud</a>
   <a href="/admin">⚙ Admin</a>
 </nav>
@@ -299,7 +299,7 @@
       (st.labels.length ? st.labels.map(l => `
         <label class="lab ${l.enabled ? '' : 'off'}">
           <input type="checkbox" data-label="${esc(l.label)}" ${l.enabled ? 'checked' : ''}>
-          <span class="lab-name">${esc(l.label)}</span>
+          <span class="lab-name">${esc(l.name || l.label)}</span>
           <span class="lab-count">${l.media_count.toLocaleString('pt-BR')} foto(s)/vídeo(s)</span>
         </label>`).join('') : '<div class="labels-h">Você ainda não tem backups.</div>');
   }
@@ -633,7 +633,7 @@
       ${it.w ? `<dt>Dimensões</dt><dd>${it.w} × ${it.h}</dd>` : ''}
       ${it.duration ? `<dt>Duração</dt><dd>${esc(fmtDur(it.duration))}</dd>` : ''}
       ${it.live ? `<dt>Live Photo</dt><dd>vídeo ${esc(it.live.name)}${it.live.duration ? ' · ' + esc(fmtDur(it.live.duration)) : ''}<br><a href="${contentUrl(it.live, true)}">baixar o vídeo →</a></dd>` : ''}
-      <dt>Backup</dt><dd>${esc(it.label)}</dd>
+      <dt>Backup</dt><dd>${esc((st.labels.find(l => l.label === it.label) || {}).name || it.label)}</dd>
       <dt>Caminho</dt><dd>${esc(it.path)}</dd>
       <dt>No drive</dt><dd><a href="${drive}">abrir a pasta no Cloud →</a></dd></dl>`;
   }

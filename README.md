@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v10.0.0`
+# 🗄️ NestVault  `v10.1.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **backup por usuário** — cada conta só cria, lista e restaura seus próprios backups.
 
@@ -931,7 +931,8 @@ Força a re-replicação de todos os arquivos que possuem menos cópias físicas
 
 - Adicionar um disco novo ao cluster (arquivos existentes não são replicados automaticamente)
 - Recuperar um disco que ficou `degraded` por um longo período
-- Aumentar o valor de `storage.replication_factor`
+- Aumentar o valor de `storage.replication_factor`. Antes, veja em **Stats → Replicação — quanto espaço precisa** *(v10.1)* se cabe
+
 
 ```bash
 nestvault rereplicate \
@@ -1113,6 +1114,9 @@ pytest tests/ --cov=server --cov-report=term-missing
 | `test_replication.py` | `/maintenance/rereplicate` e `/maintenance/reconcile-replication` — sub-replicação e sobre-replicação |
 | `test_disks.py` | `GET /storage/disks` — status de volumes, contagem de cópias físicas por volume |
 | `test_cloud_drive.py` *(v10.0)* | `/cloud`: raiz por usuário, prefixo comum, pastas/paginação, versões e histórico, busca, lixeira, cookie de sessão (adulterado, chave rotacionada), Range em arquivo plano e cifrado, HTML servido como texto |
+| `test_cloud_server_drive.py` *(v10.1)* | Pastas do servidor: criar, upload (e substituição), pastas vazias, mover/renomear com colisão, lixeira (restaurar, excluir de vez, vencimento na limpeza noturna), copiar de backup sem conteúdo novo, backup somente leitura, cliente e limpezas recusando a pasta, escrita só com header e só pelo dono |
+| `test_cloud_zip.py` *(v10.1)* | Download em .zip: estrutura de pastas, seleção aninhada, raiz inteira, nomes repetidos, conteúdo cifrado, arquivo sem cópia legível, nome do zip, `dry_run`, cookie de sessão e isolamento entre usuários |
+| `test_replication_estimate.py` *(v10.1)* | Estimativa de replicação: cópias na ordem dos volumes, grupos com vários conteúdos, falta de espaço (piso de livre), disco fora do ar, overhead da cifragem, quarentena fora, conteúdo sem cópia saudável, só admin |
 | `test_cloud_photos.py` *(v10.0)* | Indexação: backfill, EXIF e rotação, dedup entre backups, miniatura cifrada, limite de tentativas, órfãos; timeline paginada, meses e isolamento entre usuários; escolha de quais backups entram (só o dono, não por cookie) e migração da coluna |
 | `test_rclone_walk.py` | Walk incremental do rclone — conclusão + limpeza de checkpoint, resume de diretório falho, falha de listagem isolada, skip por mtime, dispatch por backend, override de `strategy`, `_MAX_RESUMES`, batching cross-directory, pastas protegidas |
 
@@ -1374,13 +1378,16 @@ Deixar o campo vazio desabilita o agendamento (execução manual apenas).
 Acessível pelo browser, servido diretamente pelo FastAPI:
 
 ```
-http://<ip-da-pi>:8000/        # Fotos (página inicial)
+http://<ip-da-pi>:8000/        # Cloud (página inicial)
+http://<ip-da-pi>:8000/photos  # Fotos
 http://<ip-da-pi>:8000/admin   # área do administrador
 ```
 
 Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Para trocar, clique em **⌀ API Key** no header.
 
 > **v7.9 — dashboard é admin-only.** O painel web (stats, discos, manutenção, atividade, rclone, usuários) exige uma chave com `role=admin`; uma chave de usuário comum recebe a tela de login novamente com "Esta chave não tem permissão de administrador." O caminho de backup/restore do usuário comum é o CLI (`nestvault.py`), cuja API (`/backups`, `/files`, etc.) já é escopada por dono.
+
+> **v10.1 — página inicial é o Cloud.** `/` (e o app instalado) passou a abrir o **[Cloud](#-cloud-e--fotos)**; as Fotos ficam em `/photos`.
 
 > **v10.0 — página inicial é Fotos; painel em `/admin`.** Para qualquer perfil, `/` (e o app instalado no celular) abre **[Fotos](#-cloud-e--fotos)**, com **Cloud** ao lado. O dashboard passou para **`/admin`**, a entrada da **área do administrador** (botão **⚙ Admin**), que dá acesso a todos os painéis desta seção. A área exige uma **chave de administrador**: se a chave com que você entrou já é de admin, entra direto; se não, ela pede uma, guardada à parte (`localStorage.nvAdminKey`), sem trocar a chave que você usa nas fotos. **⎋ Sair do admin** apaga só a chave de admin e volta para as fotos. Chave de admin revogada ou rotacionada faz a área pedir a credencial de novo. As URLs das outras páginas (`/disks`, `/activity`, `/explorer`...) não mudaram.
 
@@ -1391,6 +1398,7 @@ Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Par
 **O que o dashboard exibe:**
 
 - **Stats globais** — total de backups, versões, arquivos, storage total
+- **Replicação — quanto espaço precisa** *(v10.1)* — em `/stats`, uma linha para cada fator de replicação possível (1 cópia até uma por disco). Cada linha mostra quanto espaço a mais seria gravado, quantos arquivos seriam copiados, o uso de cada disco depois das cópias e se **cabe**. Cabe quando todo disco continua acima de `storage.fallback_threshold_gb` livres. A conta simula a política real da replicação: as cópias que faltam vão para os discos saudáveis que ainda não têm o arquivo, na ordem de `storage.dirs`, sem olhar o espaço livre. Por isso o resultado por disco é exato para o acervo atual. Fatores menores que o atual mostram quanto seria liberado. Não entra o crescimento com backups novos. Endpoint: `GET /api/stats/replication-estimate` (admin, cache de 10 min, `?refresh=true` recalcula)
 - **Disco livre** — espaço disponível no disco montado com barra visual de uso e percentual *(v2.7)*
 - **Espaço liberável** — quanto seria recuperado apagando versões antigas (mantendo 1 por label) *(v2.7)*
 - **Tabela de backups** — clique em um label para expandir as versões; coluna **Usuário** mostra o dono de cada backup *(v7.9)*
@@ -1410,7 +1418,7 @@ Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Par
 - **Configurações** *(v8.0)* — página `/settings`, ver abaixo
 - **Discos** — página `/disks` com painel de volumes: espaço total/livre/usado, arquivos físicos por volume e status (ok/degraded)
 - **Explorer de arquivos** — navegação e download de arquivos de uma versão específica via `/explorer`
-- **Cloud e Fotos** *(v10.0)* — `/cloud` e `/photos`, ver abaixo. Ao contrário do resto do painel, funcionam com chave de **usuário comum**
+- **Cloud e Fotos** *(v10.0)* — `/` (ou `/cloud`) e `/photos`, ver abaixo. Ao contrário do resto do painel, funcionam com chave de **usuário comum**
 - **Backups em tempo real** — indicador no cabeçalho com contagem de backups em andamento; polling automático a cada 3 s com botão ⏸ para pausar
 
 ### ☁ Cloud e ▣ Fotos
@@ -1424,6 +1432,17 @@ Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Par
 - Mostra a **última versão concluída**; o seletor no topo troca para qualquer versão anterior
 - **⟲ Versões** no visualizador lista as versões em que o arquivo existe e marca onde o conteúdo mudou — clique para abrir aquela versão
 - Visualiza imagem, vídeo (com seek), áudio, PDF e texto; os demais tipos são baixados. Arquivos `.html` e scripts aparecem como texto, nunca executam
+- **Baixar vários** *(v10.1)*: **☐ Selecionar** (num backup) ou **✎ Editar** (numa pasta do servidor) → marque arquivos e pastas → **↓ Baixar (.zip)**. Sem nada marcado, **↓ Baixar esta pasta (.zip)** baixa a pasta aberta (na raiz, o backup inteiro). O zip é gerado em streaming, sem arquivo temporário nem limite de tamanho, até 50.000 arquivos. Fotos, vídeos e arquivos já comprimidos vão sem recompressão, para poupar a CPU do Pi. Num backup, vale a versão aberta. Arquivo sem cópia legível no servidor fica de fora e aparece listado em `_ERROS_NESTVAULT.txt`, dentro do zip
+
+**Pastas do servidor — o Cloud como file server** *(v10.1)*
+
+Backups são **somente leitura** (🔒): quem escreve neles é o cliente, a cada rodada, e uma edição feita no servidor seria desfeita no próximo backup. Para organizar arquivos pelo navegador existem as **pastas do servidor**, na seção de cima da raiz do Cloud (**＋ Nova pasta do servidor**):
+
+- Abrem em leitura, como o resto. **✎ Editar** liga a edição na hora (a escolha fica salva por pasta, no navegador): seleção, **↑ Enviar arquivos** / **↑ Enviar pasta** (ou arrastar do computador), **＋ Pasta**, **⇢ Mover para…** (ou arrastar para uma pasta ou para o caminho no topo), **✎ Renomear**, **⧉ Copiar para…** e **🗑 Excluir**
+- Excluir manda para a **♻ Lixeira** da pasta, que restaura o item no lugar original; o que passa de `storage.trash_retention_days` é apagado pela limpeza noturna. Enviar um arquivo com o mesmo nome substitui o atual, e o anterior vai para a lixeira
+- Num backup, **☐ Selecionar** → **⧉ Copiar para pasta do servidor…** leva arquivos e pastas (da versão aberta) para uma pasta do servidor. A cópia **não ocupa espaço**: aponta para o mesmo conteúdo, deduplicado
+- O upload passa pelo mesmo caminho de gravação do cliente (cache SSD, dedup, réplicas e criptografia). Mover e renomear só mudam o caminho no banco — nenhum byte é copiado
+- Uma pasta do servidor não recebe backup de cliente (`409`) e fica fora da retenção e das limpezas de versões. As fotos dela entram em `/photos` como as de qualquer backup
 
 **`/photos` — galeria (estilo Google Fotos)**
 
@@ -1860,7 +1879,8 @@ As respostas continuam com `"status": "deleted"`, para não quebrar clientes ant
 
 | Método | Endpoint | Descrição |
 |--------|----------|-----------|
-| `GET` | `/` | Dashboard web *(admin)* |
+| `GET` | `/` | Cloud (página inicial) *(v10.1)* |
+| `GET` | `/admin` | Dashboard web *(admin)* |
 | `GET` | `/health` | Status do servidor e versão |
 | `GET` | `/maintenance` | Página de manutenção (HTML, admin) |
 | `GET` | `/explorer` | Explorer de arquivos (HTML, admin) |
@@ -2360,7 +2380,8 @@ Endpoints que usam headers customizados:
 ## 📊 Documentação automática
 
 Com o servidor rodando:
-- **Fotos (página inicial)**: `http://<ip-da-pi>:8000/`
+- **Cloud (página inicial)**: `http://<ip-da-pi>:8000/`
+- **Fotos**: `http://<ip-da-pi>:8000/photos`
 - **Área do administrador (dashboard)**: `http://<ip-da-pi>:8000/admin`
 - **Swagger UI**: `http://<ip-da-pi>:8000/docs`
 - **ReDoc**: `http://<ip-da-pi>:8000/redoc`

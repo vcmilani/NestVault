@@ -1,5 +1,5 @@
 """
-NestVault  v10.0.0
+NestVault  v10.1.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -165,6 +165,7 @@ from database import (
     init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy,
     VersionFile, MaintenanceJob, SsdCachePendingMove, RcloneBackupJob, DiskSnapshot,
     DiskUsageDaily, User, ApiKey, hash_api_key, hash_pin, bootstrap_admin_user, TRASHED_STATUS,
+    SERVER_KIND, SERVER_TRASH_STATUS,
 )
 import config
 import crypto
@@ -180,6 +181,7 @@ from auth import (get_current_user, is_admin, require_admin, require_owner_or_ad
 from cloud.rclone_router import router as rclone_router
 from cloud_ui import router as cloud_ui_router
 from cloud_ui import media as cloud_media
+from cloud_ui import drive as cloud_drive
 import scheduler as sched
 from cache_state import (_activity_wake, activity_generation, invalidate_activity,
                           mark_backup_activity, seconds_since_backup_activity)
@@ -599,7 +601,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="10.0.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="10.1.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 app.include_router(cloud_ui_router, prefix="/cloud", tags=["cloud"])
 
@@ -806,6 +808,7 @@ class BackupInfo(BaseModel):
     has_running: bool = False
     owner_user_id: Optional[int] = None
     owner_username: Optional[str] = None
+    kind: str = "backup"  # "server" = pasta do servidor do /cloud (sem cliente)
 
 class BackupCreatedResponse(BaseModel):
     created: bool
@@ -851,7 +854,8 @@ class VersionInfo(BaseModel):
     id: int
     version_key: str
     backup_label: str
-    status: Literal["running", "incomplete", "done", "failed"]
+    # "server-trash": lixeira de uma pasta do servidor do /cloud (SERVER_TRASH_STATUS)
+    status: Literal["running", "incomplete", "done", "failed", "server-trash"]
     created_at: str
     finished_at: Optional[str] = None
     duration_seconds: Optional[float] = Field(None, description="Duracao do backup em segundos")
@@ -1242,6 +1246,19 @@ def _get_version_or_404(label: str, version_key: str, db: Session, user: Optiona
     return v
 
 
+def _require_client_label(label: str, db: Session) -> None:
+    """Pasta do servidor (/cloud) não recebe backup de cliente nem é podada por
+    versão: as versões live/trash dela são o próprio conteúdo. Edição só por /cloud/drive/*."""
+    kind = db.query(BackupID.kind).filter(BackupID.label == label).scalar()
+    if kind == SERVER_KIND:
+        raise HTTPException(409, f"'{label}' e uma pasta do servidor — edite pelo /cloud, "
+                                 f"nao recebe backup de cliente")
+
+
+def _server_labels_sq():
+    return select(BackupID.label).where(BackupID.kind == SERVER_KIND)
+
+
 # -- Lixeira ------------------------------------------------------------------
 # Exclusões pedidas por usuário comum (label, versão, cleanup) não apagam nada:
 # marcam status = TRASHED_STATUS e somem para o cliente. O admin lista/restaura
@@ -1357,6 +1374,7 @@ def _backup_info(b: BackupID, db: Session) -> BackupInfo:
         has_running=has_running,
         owner_user_id=b.owner_user_id,
         owner_username=b.owner.username if b.owner else None,
+        kind=b.kind or "backup",
     )
 
 
@@ -2055,6 +2073,7 @@ def explorer_page():
     return HTMLResponse(page.read_text(encoding="utf-8"))
 
 
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
 @app.get("/cloud", response_class=HTMLResponse, include_in_schema=False)
 def cloud_page():
     page = STATIC_DIR / "cloud.html"
@@ -2063,7 +2082,6 @@ def cloud_page():
     return HTMLResponse(page.read_text(encoding="utf-8"))
 
 
-@app.get("/", response_class=HTMLResponse, include_in_schema=False)
 @app.get("/photos", response_class=HTMLResponse, include_in_schema=False)
 def photos_page():
     page = STATIC_DIR / "photos.html"
@@ -2576,6 +2594,15 @@ def _refresh_stats_async() -> None:
         finally:
             _stats_refresh_lock.release()
     threading.Thread(target=_work, name="stats-refresh", daemon=True).start()
+
+
+@app.get("/api/stats/replication-estimate", dependencies=[Depends(require_admin)])
+def get_replication_estimate(refresh: bool = False, db: Session = Depends(get_db)):
+    """Quanto espaço cada fator de replicação exigiria e se cabe nos discos atuais
+    (ver replication_estimate.py). Separado do /api/stats: varre file_content_copies
+    e fica em cache por 10 min."""
+    import replication_estimate
+    return replication_estimate.get(db, refresh=refresh)
 
 
 @app.get("/api/stats", response_model=StatsResponse, dependencies=[Depends(require_admin)])
@@ -3102,6 +3129,7 @@ def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db
             has_running=b.label in running_labels,
             owner_user_id=b.owner_user_id,
             owner_username=username_by_id.get(b.owner_user_id) if b.owner_user_id else None,
+            kind=b.kind or "backup",
         ))
     return result
 
@@ -3364,12 +3392,15 @@ def rename_backup(label: str, req: BackupRename, db: Session = Depends(get_db),
         created_at=b.created_at,
         status=b.status,
         owner_user_id=b.owner_user_id,
+        photos_enabled=b.photos_enabled,
+        kind=b.kind,
     )
     db.add(new_b)
     db.flush()
     db.query(BackupVersion).filter(BackupVersion.backup_label == label).update(
         {"backup_label": new}, synchronize_session=False
     )
+    cloud_drive.relabel(db, label, new)
     db.delete(b)
     db.commit()
     db.refresh(new_b)
@@ -3441,6 +3472,7 @@ def delete_backup(label: str, background_tasks: BackgroundTasks, db: Session = D
     db.query(BackupVersion).filter(BackupVersion.backup_label == label).delete(
         synchronize_session=False
     )
+    cloud_drive.forget(db, label)
     db.delete(b)
     db.commit()
     invalidate_activity()
@@ -3500,6 +3532,7 @@ def restart_server():
 def create_version(label: str, req: VersionCreate, db: Session = Depends(get_db),
                     user: User = Depends(get_current_user)):
     _get_backup_or_404(label, db, user)
+    _require_client_label(label, db)
     existing = (db.query(BackupVersion)
                 .filter(BackupVersion.backup_label == label,
                         BackupVersion.version_key  == req.version_key)
@@ -3529,7 +3562,10 @@ def list_versions(label: str, db: Session = Depends(get_db), user: User = Depend
     versions = (db.query(BackupVersion)
                 .filter(BackupVersion.backup_label == label,
                         BackupVersion.status != TRASHED_STATUS)
-                .order_by(BackupVersion.created_at.desc())
+                # Pasta do servidor: live e trash nascem juntas (mesmo created_at);
+                # a lixeira vai sempre por último, a live é a "versão final".
+                .order_by(case((BackupVersion.status == SERVER_TRASH_STATUS, 1), else_=0),
+                          BackupVersion.created_at.desc(), BackupVersion.id.desc())
                 .all())
     if not versions:
         return []
@@ -3573,6 +3609,7 @@ def get_version(label: str, version_key: str, db: Session = Depends(get_db),
 def finish_version(label: str, version_key: str, req: VersionFinish, background_tasks: BackgroundTasks,
                     db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     v = _get_version_or_404(label, version_key, db, user)
+    _require_client_label(label, db)
     if v.status in ("done", "failed"):
         # Versão já finalizada é imutável: retry do mesmo status é idempotente,
         # troca não. Antes dava para marcar uma done antiga como failed — e a
@@ -3642,6 +3679,7 @@ def absorb_version(label: str, version_key: str, req: AbsorbRequest, db: Session
 def delete_version(label: str, version_key: str, background_tasks: BackgroundTasks,
                     db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     v = _get_version_or_404(label, version_key, db, user)
+    _require_client_label(label, db)
     if not is_admin(user):
         now = datetime.now()
         _trash_versions(db, [v.id], user, now)
@@ -4079,6 +4117,8 @@ async def upload_file(
     serializaria o event loop inteiro.
     """
     v = await asyncio.to_thread(_get_version_or_404, backup_label, version_key, db, user)
+    if v.status == SERVER_TRASH_STATUS:
+        raise HTTPException(409, "Lixeira de pasta do servidor — upload nao permitido")
     if v.status in ("done", "failed"):
         # "incomplete" continua gravável de propósito: é o estado automático de uma
         # versão superada por uma nova no mesmo label (create_version), não um estado
@@ -4150,6 +4190,58 @@ async def upload_file(
         sha256=sha256,
         uploaded=not bool(content_sha256),
     )
+
+
+@app.put("/cloud/drive/upload", tags=["cloud"])
+async def cloud_drive_upload(
+    request: Request,
+    label: str           = Header(..., alias="X-Label"),
+    path:  str           = Header(..., alias="X-Path"),
+    mtime: Optional[float] = Header(None, alias="X-Mtime"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Upload pelo navegador para uma pasta do servidor do /cloud. Mesmo formato do
+    /upload (body = arquivo, caminho em base64 no header) e mesmo pipeline de
+    gravação (staging no SSD, dedup, réplicas, cifragem). Arquivo existente no
+    caminho é substituído; o anterior vai para a lixeira da pasta."""
+    try:
+        path = base64.b64decode(path.encode("ascii")).decode("utf-8")
+    except Exception:
+        raise HTTPException(400, "X-Path deve ser o caminho em base64 (UTF-8)")
+
+    def _prepare():
+        d = cloud_drive.get(db, label, user)
+        return d.live.version_key, cloud_drive.prepare_upload(db, d, path)
+    live_key, rel = await asyncio.to_thread(_prepare)
+
+    try:
+        volume = _pick_volume()
+    except storage.StorageThresholdExceeded:
+        raise HTTPException(507, "Pouco espaco livre nos volumes")
+    ssd_dir   = await asyncio.to_thread(_ssd_cache_write_dir, db)
+    write_dir = ssd_dir if ssd_dir else volume
+    sha256, size, tmp_path = await _stream_request_to_disk(request, write_dir)
+    try:
+        replica_source = await asyncio.to_thread(
+            _dedup_or_store_content_sync, sha256, size, tmp_path, volume, ssd_dir,
+            label, live_key, rel, db,
+        )
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+    def _register():
+        d = cloud_drive.get(db, label, user)
+        return cloud_drive.put_file(db, d, rel, sha256, mtime or time.time(), user)
+    vf_id = await asyncio.to_thread(_register)
+    if replica_source is not None:
+        await asyncio.to_thread(_finish_replicas_sync, sha256, replica_source, db)
+
+    cloud_media.bump_generation()
+    cloud_media.indexer.wake()
+    log.info(f"[drive] {user.username} enviou {label}:{rel!r} ({size} bytes, sha256={sha256[:8]}…)")
+    return {"file_id": vf_id, "path": rel, "sha256": sha256, "size": size}
 
 
 # -- Sync ---------------------------------------------------------------------
@@ -4811,7 +4903,8 @@ def _versions_over_keep(db: Session, keep: int, label: Optional[str] = None
     label, que é o modo "todos os labels".
     """
     q = (db.query(BackupVersion.id, BackupVersion.backup_label, BackupVersion.version_key)
-         .filter(BackupVersion.status != TRASHED_STATUS))
+         .filter(BackupVersion.status != TRASHED_STATUS,
+                 BackupVersion.backup_label.notin_(_server_labels_sq())))
     if label is not None:
         q = q.filter(BackupVersion.backup_label == label)
     rows = q.order_by(BackupVersion.backup_label, BackupVersion.version_key.desc()).all()
@@ -4830,6 +4923,7 @@ def cleanup_versions(label: str, req: CleanupRequest, background_tasks: Backgrou
                       db: Session = Depends(get_db),
                       user: User = Depends(get_current_user)):
     _get_backup_or_404(label, db, user)
+    _require_client_label(label, db)
     to_delete = _versions_over_keep(db, req.keep, label=label)
     if not to_delete:
         return CleanupResponse(kept=req.keep, versions_removed=[], storage_files_removed=0)
@@ -4934,6 +5028,7 @@ def cleanup_by_date_preview(before: str, label: Optional[str] = None, db: Sessio
         .filter(BackupVersion.created_at < cutoff)
         .filter(BackupVersion.status.notin_(["running", TRASHED_STATUS]))
         .filter(~BackupVersion.id.in_(latest_done))
+        .filter(BackupVersion.backup_label.notin_(_server_labels_sq()))
     )
     if label:
         q = q.filter(BackupVersion.backup_label == label)
@@ -4962,6 +5057,7 @@ def cleanup_by_date(
         .filter(BackupVersion.created_at < cutoff)
         .filter(BackupVersion.status.notin_(["running", TRASHED_STATUS]))
         .filter(~BackupVersion.id.in_(latest_done))
+        .filter(BackupVersion.backup_label.notin_(_server_labels_sq()))
     )
     if label:
         q = q.filter(BackupVersion.backup_label == label)

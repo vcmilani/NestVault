@@ -38,7 +38,7 @@ import sysmetrics
 from auth import is_admin
 from cache_state import invalidate_activity
 from database import (BackupID, BackupVersion, FileContent, MaintenanceJob, MediaInfo, User,
-                      VersionFile, TRASHED_STATUS)
+                      VersionFile, SERVER_KIND, TRASHED_STATUS)
 from . import tree
 
 log = logging.getLogger("backup-server")
@@ -809,5 +809,7 @@ def photo_labels(db: Session, user: User) -> list[dict]:
                      .filter(VersionFile.version_id == versions[0].id, media_path_filter())
                      .scalar()) or 0
         out.append({"label": b.label, "client_name": b.client_name,
+                    # Pasta do servidor: label gerado, o nome é o client_name.
+                    "name": b.client_name if b.kind == SERVER_KIND and b.client_name else b.label,
                     "enabled": bool(b.photos_enabled), "media_count": count})
     return out
