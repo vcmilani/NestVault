@@ -1,5 +1,5 @@
 """
-NestVault  v10.1.0
+NestVault  v10.2.0
 Cada execucao de backup cria uma nova versao dentro do label.
 Conteudo identico e armazenado uma unica vez no servidor (deduplicacao por sha256).
 
@@ -12,6 +12,8 @@ Uso:
     nestvault backups --server http://192.168.1.100:8000
 
 Changelog (cliente — histórico completo do sistema no README):
+  v10.2 HTTP 507 (cota do usuário ou servidor sem espaço) aborta o backup com a
+        mensagem do servidor em vez de retentar cinco vezes cada arquivo.
   v9.3  Restore entende caminhos gravados por clientes Windows (C:\\..., \\\\nas\\...)
         em qualquer SO — antes, no Windows, todo arquivo era recusado como
         "caminho inseguro"; a letra do drive vira pasta no destino e o
@@ -55,7 +57,7 @@ Changelog (cliente — histórico completo do sistema no README):
         reconciliação de replicação (reconcile-replication).
 """
 
-VERSION = "v10.1.0"
+VERSION = "v10.2.0"
 
 import os, re, sys, hashlib, argparse, base64, json, socket, threading, time
 from pathlib import Path
@@ -238,6 +240,13 @@ class _AuthSession(requests.Session):
             except Exception:
                 detail = "Sem permissao sobre este backup"
             raise requests.HTTPError(f"Acesso negado: {detail}", response=r)
+        if r.status_code == 507:
+            # Cota do usuário (ou disco do servidor) cheia — retentar não ajuda.
+            try:
+                detail = r.json().get("detail", "Sem espaco no servidor")
+            except Exception:
+                detail = "Sem espaco no servidor"
+            raise requests.HTTPError(f"Sem espaco: {detail}", response=r)
         return r
 
 
@@ -262,7 +271,7 @@ def _with_retries(fn: Callable, what: str):
             return fn()
         except requests.RequestException as e:
             status = getattr(getattr(e, "response", None), "status_code", None)
-            transient = status is None or status == 429 or status >= 500
+            transient = status is None or status == 429 or (status >= 500 and status != 507)
             if not transient or attempt == _RETRY_ATTEMPTS:
                 raise
             delay = 2 ** (attempt - 1)
@@ -289,6 +298,11 @@ def _upload_with_backoff(
         fn()
         return
     except requests.RequestException as first_err:
+        if getattr(getattr(first_err, "response", None), "status_code", None) == 507:
+            # Cota/espaço esgotado: os outros arquivos também seriam recusados.
+            _err(f"{what}: {first_err} — abortando backup")
+            abort_event.set()
+            raise
         retry_gate.clear()
         _warn(f"{what}: erro no envio — bloqueando outros uploads e retentando...")
         last_err = first_err

@@ -1,5 +1,5 @@
 """
-NestVault  v10.1.0
+NestVault  v10.2.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -169,6 +169,9 @@ from database import (
 )
 import config
 import crypto
+import quota
+import smart
+import stale_alerts
 import storage
 import sysmetrics
 import version_diff
@@ -578,6 +581,8 @@ async def lifespan(_: FastAPI):
     sched.schedule_db_backup()
     sched.schedule_disk_rebalance_check()
     sched.schedule_disk_history_snapshot()
+    sched.schedule_stale_check()
+    sched.schedule_smart_check()
     # Aquece o cache de stats fora do request, para que o primeiro acesso à página
     # depois do boot já encontre os dados prontos.
     _refresh_stats_async()
@@ -601,7 +606,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="10.1.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="10.2.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 app.include_router(cloud_ui_router, prefix="/cloud", tags=["cloud"])
 
@@ -670,6 +675,8 @@ class UserCreate(BaseModel):
 class UserUpdate(BaseModel):
     is_active: Optional[bool] = None
     role: Optional[Literal["admin", "user"]] = None
+    # Cota em bytes. Enviar null remove a cota (ilimitado); omitir não mexe.
+    quota_bytes: Optional[int] = Field(None, ge=0)
 
 class HiddenPinSet(BaseModel):
     pin: str = Field(..., pattern=r"^\d{4,8}$", description="4 a 8 digitos")
@@ -809,6 +816,14 @@ class BackupInfo(BaseModel):
     owner_user_id: Optional[int] = None
     owner_username: Optional[str] = None
     kind: str = "backup"  # "server" = pasta do servidor do /cloud (sem cliente)
+    # Alerta de backup atrasado (v10.2.0, ver stale_alerts.py).
+    expected_interval_hours: Optional[int] = None
+    last_done_at: Optional[str] = None
+    is_stale: bool = False
+
+class BackupAlertUpdate(BaseModel):
+    # Horas esperadas entre backups; null desliga o alerta deste label.
+    expected_interval_hours: Optional[int] = Field(None, ge=1, le=24 * 365)
 
 class BackupCreatedResponse(BaseModel):
     created: bool
@@ -829,6 +844,8 @@ class UserInfo(BaseModel):
     is_active: bool
     created_at: str
     has_hidden_pin: bool = False
+    quota_bytes: Optional[int] = None   # None = ilimitado
+    usage_bytes: Optional[int] = None   # sha256 distintos dos labels dele (ver quota.py)
 
 class UserCreatedResponse(BaseModel):
     user: UserInfo
@@ -1332,7 +1349,7 @@ def _backup_info(b: BackupID, db: Session) -> BackupInfo:
         .scalar() or 0
     )
     latest = (
-        db.query(BackupVersion.id, BackupVersion.version_key)
+        db.query(BackupVersion.id, BackupVersion.version_key, BackupVersion.created_at)
         .filter(BackupVersion.backup_label == b.label, BackupVersion.status == "done")
         .order_by(BackupVersion.created_at.desc())
         .first()
@@ -1375,6 +1392,9 @@ def _backup_info(b: BackupID, db: Session) -> BackupInfo:
         owner_user_id=b.owner_user_id,
         owner_username=b.owner.username if b.owner else None,
         kind=b.kind or "backup",
+        expected_interval_hours=b.expected_interval_hours,
+        last_done_at=str(latest.created_at) if latest else None,
+        is_stale=stale_alerts.is_stale(b, latest.created_at if latest else None),
     )
 
 
@@ -2945,6 +2965,22 @@ def storage_info(db: Session = Depends(get_db)):
     )
 
 
+@app.get("/storage/smart", dependencies=[Depends(require_admin)])
+def storage_smart(days: int = Query(30, ge=1, le=90), db: Session = Depends(get_db)):
+    """Saúde SMART por volume: última leitura, estado (ok/warn/fail/unknown),
+    erro da última tentativa e série de temperatura (ver smart.py)."""
+    return {"enabled": bool(config.get("smart.enabled")),
+            "max_temp_c": config.get("smart.max_temp_c"),
+            "volumes": smart.summary(db, days)}
+
+
+@app.post("/storage/smart/refresh", dependencies=[Depends(require_admin)])
+def storage_smart_refresh(db: Session = Depends(get_db)):
+    """Lê o SMART agora (bloqueia ~1 s por disco) e devolve o resumo atualizado."""
+    smart.run_smart_check()
+    return storage_smart(30, db)
+
+
 @app.get("/storage/disks", response_model=list[DiskVolumeInfo], dependencies=[Depends(require_admin)])
 def storage_disks(db: Session = Depends(get_db)):
     rows = (
@@ -3076,7 +3112,7 @@ def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db
     )
     latest_rows = (
         db.query(BackupVersion.backup_label, BackupVersion.id, BackupVersion.version_key,
-                 latest_sq.c.version_count)
+                 latest_sq.c.version_count, latest_sq.c.latest_ts)
         .join(latest_sq, (BackupVersion.backup_label == latest_sq.c.backup_label) &
                          (BackupVersion.created_at   == latest_sq.c.latest_ts))
         .all()
@@ -3084,6 +3120,8 @@ def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db
     latest_by_label: dict[str, tuple[int, str, int]] = {
         row.backup_label: (row.id, row.version_key, row.version_count) for row in latest_rows
     }
+    latest_ts_by_label = {row.backup_label: row.latest_ts for row in latest_rows}
+    now = datetime.now()
 
     # File count + total size para as versões mais recentes — 1 query
     version_ids = [v[0] for v in latest_by_label.values()]
@@ -3130,6 +3168,9 @@ def list_backups(client_name: Optional[str] = None, db: Session = Depends(get_db
             owner_user_id=b.owner_user_id,
             owner_username=username_by_id.get(b.owner_user_id) if b.owner_user_id else None,
             kind=b.kind or "backup",
+            expected_interval_hours=b.expected_interval_hours,
+            last_done_at=str(latest_ts_by_label[b.label]) if b.label in latest_ts_by_label else None,
+            is_stale=stale_alerts.is_stale(b, latest_ts_by_label.get(b.label), now),
         ))
     return result
 
@@ -3204,10 +3245,12 @@ def all_backup_disk_summary(db: Session = Depends(get_db)):
 
 
 # -- Users (admin) --------------------------------------------------------------
-def _user_info(u: User) -> UserInfo:
+def _user_info(u: User, usage: Optional[dict[int, int]] = None) -> UserInfo:
     return UserInfo(id=u.id, username=u.username, role=u.role,
                      is_active=u.is_active, created_at=str(u.created_at),
-                     has_hidden_pin=bool(u.hidden_pin_hash))
+                     has_hidden_pin=bool(u.hidden_pin_hash),
+                     quota_bytes=u.quota_bytes,
+                     usage_bytes=usage.get(u.id, 0) if usage is not None else None)
 
 
 @app.post("/users", response_model=UserCreatedResponse, dependencies=[Depends(require_admin)])
@@ -3224,7 +3267,8 @@ def create_user(req: UserCreate, db: Session = Depends(get_db)):
 
 @app.get("/users", response_model=list[UserInfo], dependencies=[Depends(require_admin)])
 def list_users(db: Session = Depends(get_db)):
-    return [_user_info(u) for u in db.query(User).order_by(User.created_at.asc()).all()]
+    usage = quota.usage_all(db)
+    return [_user_info(u, usage) for u in db.query(User).order_by(User.created_at.asc()).all()]
 
 
 @app.post("/users/{user_id}/rotate-key", response_model=UserKeyRotatedResponse, dependencies=[Depends(require_admin)])
@@ -3323,8 +3367,13 @@ def update_user(user_id: int, req: UserUpdate, db: Session = Depends(get_db),
     if req.role is not None and req.role != u.role:
         log.info(f"[users] Usuario '{u.username}' passou de {u.role} para {req.role}")
         u.role = req.role
+    if "quota_bytes" in req.model_fields_set and req.quota_bytes != u.quota_bytes:
+        u.quota_bytes = req.quota_bytes
+        quota.reset_alert_if_below(db, u)
+        log.info(f"[users] Cota de '{u.username}': "
+                 + (storage.fmt_bytes(u.quota_bytes) if u.quota_bytes is not None else "ilimitada"))
     db.commit(); db.refresh(u)
-    return _user_info(u)
+    return _user_info(u, quota.usage_all(db))
 
 
 @app.delete("/users/{user_id}")
@@ -3394,6 +3443,8 @@ def rename_backup(label: str, req: BackupRename, db: Session = Depends(get_db),
         owner_user_id=b.owner_user_id,
         photos_enabled=b.photos_enabled,
         kind=b.kind,
+        expected_interval_hours=b.expected_interval_hours,
+        stale_alerted_at=b.stale_alerted_at,
     )
     db.add(new_b)
     db.flush()
@@ -3406,6 +3457,24 @@ def rename_backup(label: str, req: BackupRename, db: Session = Depends(get_db),
     db.refresh(new_b)
     log.info(f"[rename] Label [{label}] → [{new}]")
     return _backup_info(new_b, db)
+
+
+@app.put("/backups/{label}/alert", response_model=BackupInfo)
+def set_backup_alert(label: str, req: BackupAlertUpdate, db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    """Define (ou desliga, com null) o intervalo esperado entre backups do label —
+    passou disso + alerts.stale_grace_pct sem versão nova, o admin é avisado."""
+    b = _get_backup_or_404(label, db, user)
+    if (b.kind or "backup") == SERVER_KIND:
+        raise HTTPException(409, "Pasta do servidor nao tem backup periodico para alertar")
+    b.expected_interval_hours = req.expected_interval_hours
+    # Mudou a régua: o episódio já avisado não vale mais; a próxima rodada reavalia.
+    b.stale_alerted_at = None
+    db.commit(); db.refresh(b)
+    log.info(f"[stale] {label}: alerta "
+             + (f"a cada {b.expected_interval_hours}h" if b.expected_interval_hours else "desligado")
+             + f" por {user.username}")
+    return _backup_info(b, db)
 
 
 @app.get("/backups/{label}/disks", response_model=list[BackupDiskEntry])
@@ -3533,6 +3602,7 @@ def create_version(label: str, req: VersionCreate, db: Session = Depends(get_db)
                     user: User = Depends(get_current_user)):
     _get_backup_or_404(label, db, user)
     _require_client_label(label, db)
+    quota.require_room(db, user)
     existing = (db.query(BackupVersion)
                 .filter(BackupVersion.backup_label == label,
                         BackupVersion.version_key  == req.version_key)
@@ -4135,13 +4205,22 @@ async def upload_file(
         log.warning(f"[upload] path não é base64 válido ({original_path!r}): {_e} — usando como plain text")
 
     replica_source: Optional[Path] = None
+    new_for_quota = 0  # bytes que este upload acrescenta ao uso do usuário (cota)
 
     # Modo "so registrar" — conteudo ja existe no storage
     if content_sha256:
         sha256 = content_sha256
         await asyncio.to_thread(_register_existing_content_sync, sha256, user, db)
+        if user.quota_bytes is not None:
+            def _quota_register():
+                fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+                return fc.size if fc and quota.check_new_content(db, user, sha256, fc.size) else 0
+            new_for_quota = await asyncio.to_thread(_quota_register)
         log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — registrada sha256={sha256[:8]}…")
     else:
+        # Já na cota: recusa antes de receber o corpo (o 507 só depois de gravar
+        # um arquivo grande no disco seria trabalho jogado fora).
+        await asyncio.to_thread(quota.require_room, db, user)
         # Escolhe volume HDD de destino final; decide se usa SSD como staging.
         # Se todos os volumes estiverem abaixo do limiar, aciona cleanup antes de desistir.
         try:
@@ -4166,6 +4245,8 @@ async def upload_file(
         sha256, size, tmp_path = await _stream_request_to_disk(request, write_dir)
 
         try:
+            if await asyncio.to_thread(quota.check_new_content, db, user, sha256, size):
+                new_for_quota = size
             replica_source = await asyncio.to_thread(
                 _dedup_or_store_content_sync, sha256, size, tmp_path, volume, ssd_dir,
                 backup_label, version_key, original_path, db,
@@ -4182,6 +4263,8 @@ async def upload_file(
     # concurrent uploads are not blocked during potentially slow file I/O.
     if replica_source is not None:
         await asyncio.to_thread(_finish_replicas_sync, sha256, replica_source, db)
+    if new_for_quota:
+        await asyncio.to_thread(quota.commit_new_content, db, user, new_for_quota)
 
     mark_backup_activity()
     return UploadResponse(
@@ -4214,6 +4297,7 @@ async def cloud_drive_upload(
         d = cloud_drive.get(db, label, user)
         return d.live.version_key, cloud_drive.prepare_upload(db, d, path)
     live_key, rel = await asyncio.to_thread(_prepare)
+    await asyncio.to_thread(quota.require_room, db, user)
 
     try:
         volume = _pick_volume()
@@ -4223,6 +4307,7 @@ async def cloud_drive_upload(
     write_dir = ssd_dir if ssd_dir else volume
     sha256, size, tmp_path = await _stream_request_to_disk(request, write_dir)
     try:
+        new_for_quota = await asyncio.to_thread(quota.check_new_content, db, user, sha256, size)
         replica_source = await asyncio.to_thread(
             _dedup_or_store_content_sync, sha256, size, tmp_path, volume, ssd_dir,
             label, live_key, rel, db,
@@ -4237,6 +4322,8 @@ async def cloud_drive_upload(
     vf_id = await asyncio.to_thread(_register)
     if replica_source is not None:
         await asyncio.to_thread(_finish_replicas_sync, sha256, replica_source, db)
+    if new_for_quota:
+        await asyncio.to_thread(quota.commit_new_content, db, user, size)
 
     cloud_media.bump_generation()
     cloud_media.indexer.wake()

@@ -61,6 +61,17 @@
   .disk-ci-label{font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim)}
   .disk-ci-value{font-size:13px;color:var(--text)}
 
+  /* Saúde SMART */
+  .disk-health{border-top:1px solid var(--border);padding-top:14px;margin-top:14px}
+  .disk-health-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}
+  .disk-health-title{font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim)}
+  .disk-health-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+  .disk-health-model{font-size:10px;color:var(--text-mute);margin-top:10px;word-break:break-all}
+  .disk-health-note{font-size:11px;color:var(--text-mute);line-height:1.5}
+  .disk-ci-value.bad{color:var(--red)}
+  .disk-ci-value.meh{color:var(--amber)}
+  .smart-bar{display:flex;justify-content:flex-end;margin:-8px 0 16px}
+
   .empty{padding:40px}
 
   @media(max-width:768px){
@@ -119,6 +130,10 @@
     </div>
   </div>
 
+  <div class="smart-bar" id="smartBar" style="display:none">
+    <button class="hbtn" id="smartRefreshBtn" onclick="refreshSmart()" title="Lê o SMART de todos os discos agora">🩺<span class="hbtn-label"> Ler SMART agora</span></button>
+  </div>
+
   <div id="disksContainer"><div class="loading">Carregando</div></div>
 </main>
 
@@ -138,7 +153,7 @@
 
 <script src="/static/app.js"></script>
 <script>
-  function _renderSparkline(hist) {
+  function _renderSparkline(hist, showTrend = true) {
     if (!hist || hist.length < 2) return '<span class="disk-sparkline-label">sem histórico</span>';
     const pts = hist.map(h => h.pct);
     const max = Math.max(...pts), min = Math.min(...pts);
@@ -154,7 +169,7 @@
     const trendTxt = trend > 0.5 ? '▲ ' + trend.toFixed(1) + '%' : trend < -0.5 ? '▼ ' + Math.abs(trend).toFixed(1) + '%' : '—';
     return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="overflow:visible" title="Tendência de uso (${pts.length} amostras)">
       <polyline points="${points}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round"/>
-    </svg><span class="disk-sparkline-label ${trendCls}" style="margin-left:8px">${trendTxt}</span>`;
+    </svg>` + (showTrend ? `<span class="disk-sparkline-label ${trendCls}" style="margin-left:8px">${trendTxt}</span>` : '');
   }
 
   async function load() {
@@ -167,6 +182,7 @@
       if (r.status === 403) { nvNotAdmin(); container.innerHTML = ''; return; }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const disks = await r.json();
+      await loadSmart();
       renderDisks(disks);
       nvMarkUpdated();
       if (typeof _updateOverflowHints === 'function') _updateOverflowHints();
@@ -174,6 +190,84 @@
       showError('Não foi possível conectar: '+e.message);
       container.innerHTML = '<div class="empty">Nenhum dado disponível</div>';
     }
+  }
+
+  // -- SMART -----------------------------------------------------------------
+  let _smart = {enabled: false, max_temp_c: 0, volumes: {}};
+
+  function _setSmart(data) {
+    _smart = {enabled: data.enabled, max_temp_c: data.max_temp_c, volumes: {}};
+    for (const v of data.volumes || []) _smart.volumes[v.volume_path] = v;
+    document.getElementById('smartBar').style.display = data.enabled ? '' : 'none';
+  }
+
+  async function loadSmart() {
+    try {
+      const r = await fetch('/storage/smart', {headers: H()});
+      if (r.ok) _setSmart(await r.json());
+    } catch (e) { /* SMART é complemento: a página funciona sem ele */ }
+  }
+
+  async function refreshSmart() {
+    const btn = document.getElementById('smartRefreshBtn');
+    btn.disabled = true;
+    try {
+      const r = await fetch('/storage/smart/refresh', {method: 'POST', headers: H()});
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      _setSmart(await r.json());
+      load();
+    } catch (e) {
+      showError('Falha ao ler o SMART: ' + e.message);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function _fmtHours(h) {
+    if (h == null) return '—';
+    if (h < 24 * 60) return h.toLocaleString('pt-BR') + ' h';
+    return (h / 24 / 365).toLocaleString('pt-BR', {maximumFractionDigits: 1}) + ' anos';
+  }
+
+  function _counter(label, v, badFrom) {
+    const cls = v == null ? '' : v >= badFrom ? 'bad' : '';
+    return `<div class="disk-ci-item"><span class="disk-ci-label">${label}</span>
+      <span class="disk-ci-value ${cls}">${v == null ? '—' : v.toLocaleString('pt-BR')}</span></div>`;
+  }
+
+  function _renderHealth(path, isCache) {
+    if (!_smart.enabled || isCache) return '';
+    const v = _smart.volumes[path];
+    if (!v) return '';
+    const badge = {ok: ['ok', 'Saudável'], warn: ['warn', 'Atenção'], fail: ['crit', 'Falhando'],
+                   unknown: ['', 'Sem leitura']}[v.health] || ['', v.health];
+    const head = `<div class="disk-health-head"><span class="disk-health-title">Saúde (SMART)</span>
+      ${badge[0] ? `<span class="disk-badge ${badge[0]}">${badge[1]}</span>` : `<span class="disk-sparkline-label">${badge[1]}</span>`}</div>`;
+    const l = v.latest;
+    if (!l) {
+      return `<div class="disk-health">${head}<div class="disk-health-note">${
+        esc(v.error || 'Ainda não lido — a primeira leitura sai cerca de 1 minuto após o servidor iniciar.')}</div></div>`;
+    }
+    const temps = (v.temps || []).map(t => ({pct: t.c}));
+    const maxT = _smart.max_temp_c;
+    const tCls = l.temp_c == null ? '' : (maxT && l.temp_c >= maxT ? 'bad' : (maxT && l.temp_c >= maxT - 5 ? 'meh' : ''));
+    return `<div class="disk-health">${head}
+      <div class="disk-health-grid">
+        <div class="disk-ci-item"><span class="disk-ci-label">Temperatura</span>
+          <span class="disk-ci-value ${tCls}">${l.temp_c == null ? '—' : l.temp_c + ' °C'}</span></div>
+        <div class="disk-ci-item"><span class="disk-ci-label">Ligado há</span>
+          <span class="disk-ci-value">${_fmtHours(l.power_on_hours)}</span></div>
+        <div class="disk-ci-item"><span class="disk-ci-label">Autoteste</span>
+          <span class="disk-ci-value ${l.passed === false ? 'bad' : ''}">${l.passed == null ? '—' : (l.passed ? 'OK' : 'Reprovado')}</span></div>
+        ${_counter('Realocados', l.reallocated, 1)}
+        ${_counter('Pendentes', l.pending, 1)}
+        ${_counter('Incorrigíveis', l.uncorrectable, 1)}
+      </div>
+      ${temps.length >= 2 ? `<div class="disk-sparkline-row" style="margin:12px 0 0">
+        <span class="disk-health-title">Temperatura (30 dias)</span>${_renderSparkline(temps, false)}</div>` : ''}
+      <div class="disk-health-model">${esc(l.device)}${l.model ? ' · ' + esc(l.model) : ''} · lido ${esc(fmtDate(l.sampled_at))}${
+        v.error ? ' · última tentativa falhou: ' + esc(v.error) : ''}</div>
+    </div>`;
   }
 
   function renderDisks(disks) {
@@ -234,6 +328,7 @@
               <span class="disk-ci-value">${fmtSize(d.content_bytes)}</span>
             </div>
           </div>
+          ${_renderHealth(d.path, d.is_cache)}
         </div>`;
     }).join('');
 

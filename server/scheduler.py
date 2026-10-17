@@ -135,6 +135,44 @@ def schedule_disk_rebalance_check() -> None:
     log.info(f"[scheduler] Checagem de rebalanceamento de discos agendada a cada {minutes} min")
 
 
+def schedule_stale_check() -> None:
+    """Agenda a checagem de backups atrasados (stale_alerts.py). Intervalo em
+    alerts.stale_check_interval_minutes, reagendado a quente por config.apply_runtime()."""
+    from stale_alerts import check_stale_backups
+    import config
+    minutes = config.get("alerts.stale_check_interval_minutes")
+    scheduler.add_job(
+        check_stale_backups,
+        IntervalTrigger(minutes=minutes),
+        id="stale_check",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    log.info(f"[scheduler] Checagem de backups atrasados agendada a cada {minutes} min")
+
+
+def schedule_smart_check() -> None:
+    """Agenda (ou remove) a leitura SMART dos discos (smart.py). Controlada por
+    smart.enabled / smart.check_interval_hours; a primeira leitura sai ~1 min após o boot."""
+    from smart import run_smart_check
+    from datetime import datetime as _dt, timedelta as _td
+    import config
+    if not config.get("smart.enabled"):
+        if scheduler.get_job("smart_check"):
+            scheduler.remove_job("smart_check")
+        log.info("[scheduler] Leitura SMART desabilitada (smart.enabled=false)")
+        return
+    hours = config.get("smart.check_interval_hours")
+    scheduler.add_job(
+        run_smart_check,
+        IntervalTrigger(hours=hours, start_date=_dt.now().astimezone() + _td(minutes=1) - _td(hours=hours)),
+        id="smart_check",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    log.info(f"[scheduler] Leitura SMART agendada a cada {hours}h")
+
+
 def reload_rclone_jobs_from_db() -> None:
     """Restaura todos os rclone jobs habilitados ao iniciar o servidor."""
     from database import SessionLocal, RcloneBackupJob
