@@ -31,6 +31,8 @@ import auth as auth_mod
 import config as config_mod
 import database as db_mod
 import main as m
+import quota as quota_mod
+import smart as smart_mod
 import storage as storage_mod
 import sysmetrics
 from cloud_ui import media as cloud_media
@@ -124,6 +126,8 @@ def _reset_module_caches():
     cloud_media._timeline_cache.clear()
     cloud_media.indexer._scanned.clear()
     auth_mod._pin_fails.clear()
+    quota_mod.reset()
+    smart_mod._last_errors.clear()
 
 
 @pytest.fixture

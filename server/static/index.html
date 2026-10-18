@@ -61,6 +61,11 @@
   .versions-row td{padding:0}
   .versions-container{border-top:1px solid var(--border);background:var(--bg2)}
   .versions-head{padding:10px 18px;border-bottom:1px solid var(--border);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--amber);display:flex;align-items:center;justify-content:space-between}
+  .versions-head{flex-wrap:wrap;gap:8px}
+  .alert-ctl{display:inline-flex;align-items:center;gap:6px;color:var(--text-dim);text-transform:none;letter-spacing:.02em;font-size:11px}
+  .alert-input{width:64px;background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:11px;padding:3px 6px;outline:none}
+  .alert-input:focus{border-color:var(--amber)}
+  .alert-btn{font-size:10px;padding:2px 8px}
   .versions-inner{overflow-x:auto;overflow-y:visible;-webkit-overflow-scrolling:touch}
   .row-version{cursor:pointer;transition:background .1s;user-select:none}
   .row-version:hover,.row-version:active{background:var(--bg3)}
@@ -347,7 +352,7 @@
         <tr class="${isExp?'expanded':''}${runCls}" data-label="${esc(b.label)}" onclick="toggleVersions(this.dataset.label,this)">
           <td><span class="chevron">▶</span>${esc(b.label)}</td>
           <td class="dim-cell">${esc(b.client_name||'—')}<div class="owner-sub">☺ ${esc(b.owner_username||'—')}</div></td>
-          <td>${badge(b.status)}</td>
+          <td>${badge(b.status)}${b.is_stale ? ` <span class="badge badge-failed" title="Sem versão nova há mais de ${b.expected_interval_hours}h (+ tolerância)">⏰ atrasado</span>` : ''}</td>
           <td class="num-cell">${b.version_count}</td>
           <td class="num-cell">${b.file_count.toLocaleString('pt-BR')}</td>
           <td class="size-cell">${fmtSize(b.total_size_bytes)}</td>
@@ -359,6 +364,12 @@
             <div class="versions-container">
               <div class="versions-head">
                 <span>Versões — ${esc(b.label)}</span>
+                ${b.kind === 'server' ? '' : `<span class="alert-ctl" title="Avisa no Telegram se o label ficar este tempo sem versão nova (mais a tolerância de Config → Alertas). Vazio desliga.">
+                  ⏰ Alertar após
+                  <input type="number" min="1" step="1" class="alert-input" id="alert-${esc(b.label)}" value="${b.expected_interval_hours ?? ''}" placeholder="—">
+                  h sem backup
+                  <button class="hbtn alert-btn" data-label="${esc(b.label)}" onclick="saveAlert(this.dataset.label, this)">Salvar</button>
+                </span>`}
               </div>
               <div class="versions-inner" id="vinner-${esc(b.label)}">
                 <div class="loading">Carregando</div>
@@ -431,6 +442,32 @@
     } catch(e) {
       document.getElementById(`vinner-${label}`).innerHTML =
         `<div class="empty">Erro: ${esc(e.message)}</div>`;
+    }
+  }
+
+  async function saveAlert(label, btn) {
+    const raw = document.getElementById(`alert-${label}`).value.trim();
+    const hours = raw === '' ? null : parseInt(raw, 10);
+    if (hours !== null && !(hours >= 1)) { showError('Informe as horas (1 ou mais) ou deixe vazio para desligar.'); return; }
+    btn.disabled = true;
+    try {
+      const r = await fetch(`/backups/${encodeURIComponent(label)}/alert`, {
+        method: 'PUT', headers: {...H(), 'Content-Type': 'application/json'},
+        body: JSON.stringify({expected_interval_hours: hours}),
+      });
+      if (r.status === 401) { showLogin('API Key inválida.'); return; }
+      if (!r.ok) { const d = await r.json().catch(() => ({})); showError(typeof d.detail === 'string' ? d.detail : `Erro ${r.status}`); return; }
+      const info = await r.json();
+      const b = _allBackups.find(x => x.label === label);
+      if (b) Object.assign(b, info);
+      btn.textContent = hours ? '✓ Salvo' : '✓ Desligado';
+      setTimeout(() => { btn.textContent = 'Salvar'; }, 1800);
+      const row = document.querySelector(`tr[data-label="${CSS.escape(label)}"] td:nth-child(3)`);
+      if (row && b) row.innerHTML = badge(b.status) + (b.is_stale ? ` <span class="badge badge-failed">⏰ atrasado</span>` : '');
+    } catch (e) {
+      showError('Erro de conexão: ' + e.message);
+    } finally {
+      btn.disabled = false;
     }
   }
 

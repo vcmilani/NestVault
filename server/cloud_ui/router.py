@@ -18,12 +18,13 @@ from auth import (HIDDEN_COOKIE, HIDDEN_TTL, SESSION_COOKIE, SESSION_TTL, effect
                   make_hidden_token, make_session_token, pin_locked_for,
                   register_pin_attempt, require_owner_or_admin)
 import crypto
+import quota
 import storage
 from database import (BackupID, BackupVersion, FileContent, MediaInfo, User, VersionFile, get_db,
                       SERVER_KIND, TRASHED_STATUS, check_pin)
 from urllib.parse import quote
 
-from . import archive, content, drive, media, tree
+from . import archive, content, drive, duplicates, media, tree
 
 router = APIRouter()
 log = logging.getLogger("backup-server")
@@ -48,10 +49,14 @@ def create_session(request: Request, response: Response, db: Session = Depends(g
 
 
 @router.get("/me")
-def get_me(user: User = Depends(get_user_header_or_cookie)):
+def get_me(db: Session = Depends(get_db), user: User = Depends(get_user_header_or_cookie)):
     """Quem é o dono da chave/sessão — as páginas usam o role para decidir o que
-    mostrar. É o papel EFETIVO: a chave de cliente de um admin responde "user"."""
-    return {"username": user.username, "role": effective_role(user), "scope": user.key_scope}
+    mostrar. É o papel EFETIVO: a chave de cliente de um admin responde "user".
+    Com cota definida, traz também o uso (barra "X de Y" do Cloud)."""
+    me = {"username": user.username, "role": effective_role(user), "scope": user.key_scope}
+    if user.quota_bytes is not None:
+        me.update(quota_bytes=user.quota_bytes, usage_bytes=quota.usage(db, user.id))
+    return me
 
 
 @router.delete("/session")
@@ -95,6 +100,16 @@ def get_tree(label: Optional[str] = None,
         "offset": offset, "limit": limit,
         **children,
     }
+
+
+@router.get("/duplicates")
+def get_duplicates(min_size: int = Query(duplicates.DEFAULT_MIN_SIZE, ge=1),
+                   limit: int = Query(100, ge=1, le=duplicates.MAX_GROUPS),
+                   db: Session = Depends(get_db),
+                   user: User = Depends(get_user_header_or_cookie)):
+    """Grupos de arquivos idênticos (mesmo sha256) entre os labels do usuário, na
+    versão mais recente de cada um. Apagar usa POST /drive/delete (só pastas do servidor)."""
+    return duplicates.find(db, user, min_size, limit)
 
 
 @router.get("/versions")

@@ -132,6 +132,11 @@ class User(Base):
     # PIN numérico (hash, ver hash_pin) que destrava as fotos ocultas em /photos.
     # Definido pelo admin em Usuários; NULL = sem PIN, ocultas sem trava.
     hidden_pin_hash = Column(String, nullable=True)
+    # Cota de armazenamento (v10.2.0): soma dos sha256 distintos dos labels do
+    # usuário (ver quota.py). NULL = ilimitado. quota_alerted marca o aviso de 90%
+    # já enviado, para não repetir a cada upload.
+    quota_bytes   = Column(BigInteger, nullable=True)
+    quota_alerted = Column(Boolean, nullable=False, default=False, server_default="0")
 
 
 class ApiKey(Base):
@@ -173,6 +178,11 @@ class BackupID(Base):
     # "backup" (escrito por um cliente, somente leitura no /cloud) ou SERVER_KIND.
     # Numa pasta do servidor, client_name guarda o nome exibido (o label é gerado).
     kind = Column(String, nullable=False, default="backup", server_default="backup")
+    # Alerta de backup atrasado (v10.2.0, ver stale_alerts.py): sem versão done há
+    # mais que este intervalo (+ tolerância) → aviso no Telegram. NULL = sem alerta.
+    # stale_alerted_at marca o episódio já avisado (um alerta só até voltar).
+    expected_interval_hours = Column(Integer, nullable=True)
+    stale_alerted_at        = Column(DateTime, nullable=True)
 
     versions = relationship("BackupVersion", back_populates="backup",
                             order_by="BackupVersion.version_key.desc()", lazy="dynamic")
@@ -400,6 +410,28 @@ class DiskUsageDaily(Base):
     recorded_at = Column(DateTime, nullable=False, default=_now)
 
 
+class SmartSnapshot(Base):
+    """Leitura SMART de um disco de storage (v10.2.0, ver smart.py). Uma linha por
+    volume a cada smart.check_interval_hours; retenção de 90 dias. Contadores
+    NULL = o disco não reporta aquele atributo (ex.: NVMe não tem realocados)."""
+    __tablename__ = "smart_snapshots"
+    __table_args__ = (
+        Index("ix_smart_snapshots_volume_sampled", "volume_path", "sampled_at"),
+    )
+
+    id             = Column(Integer, primary_key=True, autoincrement=True)
+    volume_path    = Column(String, nullable=False)
+    device         = Column(String, nullable=False)
+    sampled_at     = Column(DateTime, nullable=False, default=_now)
+    passed         = Column(Boolean, nullable=True)
+    temp_c         = Column(Integer, nullable=True)
+    power_on_hours = Column(Integer, nullable=True)
+    reallocated    = Column(Integer, nullable=True)
+    pending        = Column(Integer, nullable=True)
+    uncorrectable  = Column(Integer, nullable=True)
+    model          = Column(String, nullable=True)
+
+
 # Tipos de job cujo resumo pode citar bytes liberados. Restringir por tipo é
 # essencial: o resumo de "ssd-cache-move" também traz "(N MB)", mas mover SSD →
 # HDD não libera espaço algum.
@@ -534,6 +566,11 @@ def init_db():
         ("users",           "hidden_pin_hash",     "TEXT"),
         ("media_info",      "thumb_rev",           "INTEGER NOT NULL DEFAULT 0"),
         ("backup_ids",      "kind",                "TEXT NOT NULL DEFAULT 'backup'"),
+        # v10.2.0: alerta de backup atrasado e cota por usuário.
+        ("backup_ids",      "expected_interval_hours", "INTEGER"),
+        ("backup_ids",      "stale_alerted_at",        "TIMESTAMP"),
+        ("users",           "quota_bytes",             "BIGINT"),
+        ("users",           "quota_alerted",           "BOOLEAN NOT NULL DEFAULT FALSE"),
     ):
         with engine.connect() as conn:
             try:
