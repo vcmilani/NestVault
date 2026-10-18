@@ -1,5 +1,5 @@
 """
-NestVault  v10.2.0
+NestVault  v10.2.1
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -606,7 +606,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="10.2.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="10.2.1", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 app.include_router(cloud_ui_router, prefix="/cloud", tags=["cloud"])
 

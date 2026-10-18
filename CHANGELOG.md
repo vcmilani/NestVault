@@ -4,6 +4,12 @@ Histórico de versões do NestVault. Veja o [README](README.md) para instalaçã
 
 ---
 
+**v10.2.1** — backups do **iCloud Photos** que ficavam **incompletos** na Atividade enquanto a tela do rclone dizia **sucesso** (e fechavam só ao rodar de novo).
+
+**Causa.** O iCloud Photos pode listar dois itens com o **mesmo nome** no mesmo diretório. Só um deles chega ao disco, e o progresso do outro era contado na raiz em vez do diretório dele. O diretório nunca fechava, a versão terminava `incomplete`, e como não havia erro registrado o job saía `success`. No re-run o nome já estava na versão, os dois eram pulados e o diretório fechava.
+
+**Correção.** O walk descarta os nomes repetidos de cada diretório (fica o primeiro) e os reporta em `last_run_message` como "nome duplicado no remote". O diretório de cada arquivo passa a vir do próprio caminho. E um run que deixa a versão `incomplete` agora sai sempre como `partial`, com os diretórios pendentes listados na mensagem e, no log, quantos arquivos de cada um faltaram.
+
 **v10.2.0** — o servidor passa a **avisar quando um backup para de chegar** e **quando um disco começa a falhar**, ganha **cota de armazenamento por usuário** e o Cloud ganha um **localizador de arquivos duplicados**.
 
 **Backup atrasado.** Cada label pode declarar de quanto em quanto tempo espera um backup. No Dashboard, ao abrir um label, o campo **⏰ Alertar após N h sem backup** grava o intervalo (`PUT /backups/{label}/alert` com `{"expected_interval_hours": N}`; `null` desliga). Um job (`alerts.stale_check_interval_minutes`, padrão 30 min) compara com a última versão `done`, ou com a criação do label se ainda não houver nenhuma. Passou do intervalo mais a tolerância (`alerts.stale_grace_pct`, padrão 25%: 24 h viram 30 h), sai **um** aviso no Telegram do digest. Quando chega versão nova, sai um "✅ voltou" e o episódio fecha. Labels na lixeira e pastas do servidor ficam de fora. Jobs rclone entram sozinhos, porque gravam versões no label de destino. `GET /backups` e `GET /backups/{label}` passam a devolver `expected_interval_hours`, `last_done_at` e `is_stale`, e a lista do Dashboard marca o label com **⏰ atrasado**. Novas colunas `backup_ids.expected_interval_hours` e `backup_ids.stale_alerted_at`, criadas no boot. O rename do label leva o intervalo junto.
