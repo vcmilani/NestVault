@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v10.1.0`
+# 🗄️ NestVault  `v10.2.1`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **backup por usuário** — cada conta só cria, lista e restaura seus próprios backups.
 
@@ -23,6 +23,10 @@ NestVault/
 │   ├── auth.py                  ← Autenticação por usuário (v7.9)
 │   ├── scheduler.py             ← APScheduler para jobs rclone (v4.0)
 │   ├── daily_digest.py          ← Resumo diário via Telegram (v4.5)
+│   ├── notify.py                ← Envio de alertas pelo bot do Telegram (v10.2)
+│   ├── stale_alerts.py          ← Alerta de backup atrasado por label (v10.2)
+│   ├── smart.py                 ← Leitura SMART dos discos e alertas (v10.2)
+│   ├── quota.py                 ← Cota de armazenamento por usuário (v10.2)
 │   ├── nightly_cleanup.py       ← Limpeza noturna automática (v5.2)
 │   ├── cache_state.py           ← Cache de estado para polling de atividade
 │   ├── cloud/                   ← Módulo de cloud backup via rclone (v7.0)
@@ -425,6 +429,34 @@ Sem `telegram_bot_token` e `telegram_chat_id` o digest é gerado internamente ma
 | `config_path` | str | `""` | | Caminho do `rclone.conf`, repassado ao binário via `RCLONE_CONFIG`. Vazio usa `~/.config/rclone/rclone.conf` do usuário que executa o processo |
 
 Útil quando o servidor roda como serviço systemd com usuário diferente do que configurou o rclone. O rclone precisa estar instalado e acessível no `PATH`.
+
+**`alerts`** — avisos no Telegram *(v10.2)*, pelo mesmo bot do `digest`
+
+| Chave | Tipo | Padrão | ↻ | Descrição |
+|---|---|---|:-:|---|
+| `stale_check_interval_minutes` | int | `30` | | De quanto em quanto tempo o servidor confere se algum label passou do intervalo esperado sem versão nova. O intervalo de cada label é definido no Dashboard (⏰ Alertar após N h) |
+| `stale_grace_pct` | int | `25` | | Tolerância além do intervalo antes do alerta (24 h + 25% = alerta com 30 h sem backup) |
+| `quota_warn_pct` | int | `90` | | Aviso quando um usuário com cota chega a esta porcentagem. `0` desliga |
+
+**`smart`** — saúde dos discos *(v10.2, só Linux)*
+
+| Chave | Tipo | Padrão | ↻ | Descrição |
+|---|---|---|:-:|---|
+| `enabled` | bool | `true` | | Lê o SMART dos discos de storage e avisa quando piorarem |
+| `check_interval_hours` | int | `6` | | Intervalo entre leituras |
+| `max_temp_c` | int | `55` | | Temperatura que dispara alerta (só na subida). `0` desliga |
+| `use_sudo` | bool | `true` | | Roda `sudo -n smartctl` |
+| `device_overrides` | list[str] | `[]` | | Dispositivo por volume, para quando a detecção automática erra: `/mnt/hd1=/dev/sda` ou `/mnt/hd1=/dev/sda:sat` (tipo do `-d`) |
+
+O `smartctl` vem do pacote `smartmontools` e precisa de root. Com `use_sudo` ligado, libere só esse binário, sem senha, para o usuário do serviço:
+
+```bash
+sudo apt install smartmontools
+echo 'nestvault ALL=(root) NOPASSWD: /usr/sbin/smartctl' | sudo tee /etc/sudoers.d/nestvault-smartctl
+sudo chmod 440 /etc/sudoers.d/nestvault-smartctl
+```
+
+Troque `nestvault` pelo `User=` do serviço systemd. Sem isso o card **Saúde (SMART)** da página Discos mostra o motivo ("sudo pede senha", "smartctl não instalado"...) e o resto do servidor segue normal. Cartão SD e alguns adaptadores USB não expõem SMART.
 
 #### 🔒 Segredos
 
@@ -1116,6 +1148,10 @@ pytest tests/ --cov=server --cov-report=term-missing
 | `test_cloud_drive.py` *(v10.0)* | `/cloud`: raiz por usuário, prefixo comum, pastas/paginação, versões e histórico, busca, lixeira, cookie de sessão (adulterado, chave rotacionada), Range em arquivo plano e cifrado, HTML servido como texto |
 | `test_cloud_server_drive.py` *(v10.1)* | Pastas do servidor: criar, upload (e substituição), pastas vazias, mover/renomear com colisão, lixeira (restaurar, excluir de vez, vencimento na limpeza noturna), copiar de backup sem conteúdo novo, backup somente leitura, cliente e limpezas recusando a pasta, escrita só com header e só pelo dono |
 | `test_cloud_zip.py` *(v10.1)* | Download em .zip: estrutura de pastas, seleção aninhada, raiz inteira, nomes repetidos, conteúdo cifrado, arquivo sem cópia legível, nome do zip, `dry_run`, cookie de sessão e isolamento entre usuários |
+| `test_stale_alerts.py` *(v10.2)* | Backup atrasado: um alerta por episódio, aviso de "voltou", tolerância, label sem versão conta da criação, lixeira/pasta do servidor/sem intervalo ignorados, rename leva o intervalo, posse |
+| `test_smart.py` *(v10.2)* | SMART: parse ATA/NVMe, partição → disco, overrides, detecção de piora (temperatura só na subida), gravação e alerta, retentativa com `-d sat`, volume indisponível, endpoints só admin |
+| `test_quota.py` *(v10.2)* | Cota: uso por sha256 distinto, 507 em conteúdo novo, registro do que já é seu passa, versão bloqueada na cota, aviso único, cota nula, conteúdo de outra conta conta, upload do drive, `/users` e `/cloud/me` |
+| `test_cloud_duplicates.py` *(v10.2)* | Duplicados: grupos entre backup e pasta do servidor, caminhos iguais aos da árvore, só a versão mais recente, `min_size`, isolamento entre usuários, apagar a cópia vai para a lixeira e backup recusa |
 | `test_replication_estimate.py` *(v10.1)* | Estimativa de replicação: cópias na ordem dos volumes, grupos com vários conteúdos, falta de espaço (piso de livre), disco fora do ar, overhead da cifragem, quarentena fora, conteúdo sem cópia saudável, só admin |
 | `test_cloud_photos.py` *(v10.0)* | Indexação: backfill, EXIF e rotação, dedup entre backups, miniatura cifrada, limite de tentativas, órfãos; timeline paginada, meses e isolamento entre usuários; escolha de quais backups entram (só o dono, não por cookie) e migração da coluna |
 | `test_rclone_walk.py` | Walk incremental do rclone — conclusão + limpeza de checkpoint, resume de diretório falho, falha de listagem isolada, skip por mtime, dispatch por backend, override de `strategy`, `_MAX_RESUMES`, batching cross-directory, pastas protegidas |
@@ -1402,6 +1438,9 @@ Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Par
 - **Disco livre** — espaço disponível no disco montado com barra visual de uso e percentual *(v2.7)*
 - **Espaço liberável** — quanto seria recuperado apagando versões antigas (mantendo 1 por label) *(v2.7)*
 - **Tabela de backups** — clique em um label para expandir as versões; coluna **Usuário** mostra o dono de cada backup *(v7.9)*
+- **Alerta de backup atrasado** *(v10.2)* — ao expandir um label, **⏰ Alertar após N h sem backup** define a cadência esperada (`PUT /backups/{label}/alert`; vazio desliga). Passou do prazo mais `alerts.stale_grace_pct`, chega um aviso no Telegram e o label ganha o selo **⏰ atrasado**; quando o backup volta, um segundo aviso fecha o episódio
+- **Saúde dos discos** *(v10.2)* — em `/disks`, cada disco mostra o SMART: estado, temperatura com curva de 30 dias, horas ligado e setores realocados, pendentes e incorrigíveis. **🩺 Ler SMART agora** força uma leitura. Ver [`smart`](#referência-dos-parâmetros)
+- **Cota por usuário** *(v10.2)* — em `/manage-users`, o card **Cota de armazenamento** e a coluna **Uso / cota**. O uso soma os arquivos distintos do usuário (dedup incluída). Na cota, versões e arquivos novos recebem `507` e o backup do CLI para com "Cota excedida"
 - **Versões** — clique em uma versão para ver os arquivos
 - **Comparação de versões** — selecione duas versões com as checkboxes e clique em ⇄ Comparar: veja arquivos adicionados, removidos, modificados e o delta de tamanho de cada um
 - **Cloud Backup (rclone)** — gerencie jobs de backup rclone agendados e execute manualmente via `/rclone-jobs`
@@ -1426,6 +1465,8 @@ Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Par
 *(v10.0)* Duas páginas para usar os backups como um serviço de nuvem, pelo navegador ou pelo celular. Cada usuário vê **só os próprios backups** — inclusive o admin, para quem o `/explorer` continua sendo a visão de todos.
 
 **`/cloud` — drive (estilo OneDrive)**
+
+> **v10.2 — ⧉ Duplicados e cota.** Na raiz, **⧉ Duplicados** lista os arquivos idênticos em mais de um lugar entre seus backups e pastas do servidor (versão mais recente de cada um, a partir de 1 MB). Cópias em pastas do servidor podem ir para a lixeira dali mesmo; em backups ficam só leitura. O storage já guarda cada arquivo uma vez, então isso organiza mas não libera disco. Com cota definida, a raiz mostra a barra "X de Y usados".
 
 - A raiz lista seus backups como pastas. Dentro de cada um, a navegação começa no prefixo comum dos arquivos: um backup de `/Users/voce/Pictures` abre direto nas pastas de dentro
 - Grade ou lista, busca por nome dentro do backup, ordenação por nome, data ou tamanho

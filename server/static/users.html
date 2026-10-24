@@ -51,6 +51,12 @@
   .td-actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}
 
   .new-user-hint{font-size:11px;color:var(--text-dim);line-height:1.6;margin-top:10px}
+  .quota-cell{min-width:140px}
+  .quota-txt{font-size:11px;color:var(--text-dim);white-space:nowrap}
+  .quota-bar{height:4px;background:var(--bg3);border:1px solid var(--border);margin-top:5px}
+  .quota-bar div{height:100%;background:var(--green)}
+  .quota-bar div.warn{background:var(--amber)}
+  .quota-bar div.crit{background:var(--red)}
   tbody tr.keys-row{border-bottom:1px solid var(--border)}
   tbody tr.keys-row:hover{background:none}
   tr.has-keys{border-bottom:none}
@@ -154,6 +160,20 @@
     <div class="new-user-hint">Com PIN, as fotos de pastas ocultas (álbum Hidden do iCloud etc.) só aparecem em Fotos depois de digitar o PIN, e o desbloqueio vale por 15 minutos. Definir de novo troca o PIN e encerra os desbloqueios abertos. O drive Cloud não muda.</div>
   </div>
 
+  <div class="new-user-card">
+    <div class="new-user-title">Cota de armazenamento</div>
+    <div class="form-row">
+      <span class="form-label">Usuário</span>
+      <select class="op-select" id="quotaUser"></select>
+      <span class="form-label">Limite (GB)</span>
+      <input class="op-input" id="quotaValue" type="number" min="0" step="0.5" placeholder="ex: 500" style="width:110px">
+      <button class="run-btn" id="setQuotaBtn" onclick="setQuota(false)">▤ Definir cota</button>
+      <button class="run-btn" onclick="setQuota(true)">∞ Sem limite</button>
+    </div>
+    <div class="form-error" id="setQuotaError"></div>
+    <div class="new-user-hint">Conta o espaço dos arquivos <b>distintos</b> dos backups e pastas do servidor do usuário: o mesmo arquivo em várias pastas ou versões conta uma vez. Na cota, o servidor recusa arquivos novos (o backup para com "Cota excedida") e versões novas; registrar o que ele já tem continua funcionando. O aviso no Telegram sai ao chegar no limite de Config → Alertas. Depois de uma limpeza o uso pode levar até 10 minutos para cair.</div>
+  </div>
+
   <div class="table-wrap">
     <div id="usersContainer"><div class="loading">Carregando</div></div>
   </div>
@@ -221,7 +241,7 @@
     const rows = _users.map(u => {
       const keys = _keys[u.id] || [];
       const keysRow = keys.length ? `
-      <tr class="keys-row"><td class="keys-cell" colspan="5"><div class="keys-list">
+      <tr class="keys-row"><td class="keys-cell" colspan="6"><div class="keys-list">
         <span class="keys-label">Chaves de cliente</span>
         ${keys.map(k => `<span class="key-chip">${esc(k.name)}
           <span class="key-chip-used">${k.last_used_at ? 'usada ' + fmtDate(k.last_used_at) : 'nunca usada'}</span>
@@ -232,6 +252,7 @@
         <td>${esc(u.username)}</td>
         <td><span class="badge ${u.role === 'admin' ? 'badge-running' : 'badge-active'}">${esc(u.role)}</span></td>
         <td><span class="badge ${u.is_active ? 'badge-active' : 'badge-off'}">${u.is_active ? 'ativo' : 'inativo'}</span></td>
+        <td class="quota-cell">${_quotaCell(u)}</td>
         <td class="td-dim td-nb">${fmtDate(u.created_at)}</td>
         <td class="td-actions">
           <button class="small-btn" onclick="rotateKey(${u.id}, '${esc(u.username)}')">⟳ Girar chave principal</button>
@@ -245,7 +266,7 @@
       </tr>${keysRow}`;
     }).join('');
     container.innerHTML = `<table>
-      <thead><tr><th>Username</th><th>Papel</th><th>Status</th><th>Criado em</th><th class="td-r">Ações</th></tr></thead>
+      <thead><tr><th>Username</th><th>Papel</th><th>Status</th><th>Uso / cota</th><th>Criado em</th><th class="td-r">Ações</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
   }
@@ -279,13 +300,43 @@
   }
 
   function renderKeyUserSelect() {
-    for (const id of ['keyUser', 'pinUser']) {
+    for (const id of ['keyUser', 'pinUser', 'quotaUser']) {
       const sel = document.getElementById(id);
       const prev = sel.value;
       sel.innerHTML = _users.filter(u => u.is_active)
-        .map(u => `<option value="${u.id}">${esc(u.username)}${u.role === 'admin' ? ' (admin)' : ''}${id === 'pinUser' && u.has_hidden_pin ? ' · tem PIN' : ''}</option>`).join('');
+        .map(u => `<option value="${u.id}">${esc(u.username)}${u.role === 'admin' ? ' (admin)' : ''}${id === 'pinUser' && u.has_hidden_pin ? ' · tem PIN' : ''}${id === 'quotaUser' && u.quota_bytes != null ? ' · ' + fmtSize(u.quota_bytes) : ''}</option>`).join('');
       if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
     }
+  }
+
+  function _quotaCell(u) {
+    const used = u.usage_bytes || 0;
+    if (u.quota_bytes == null) return `<span class="quota-txt">${fmtSize(used)} · sem limite</span>`;
+    const pct = u.quota_bytes > 0 ? Math.min(100, used / u.quota_bytes * 100) : 100;
+    const cls = pct >= 100 ? 'crit' : pct >= 90 ? 'warn' : '';
+    return `<span class="quota-txt">${fmtSize(used)} de ${fmtSize(u.quota_bytes)} (${pct.toFixed(0)}%)</span>
+      <div class="quota-bar"><div class="${cls}" style="width:${pct.toFixed(1)}%"></div></div>`;
+  }
+
+  async function setQuota(unlimited) {
+    const userId = document.getElementById('quotaUser').value;
+    const errEl = document.getElementById('setQuotaError');
+    errEl.textContent = '';
+    if (!userId) { errEl.textContent = 'Escolha um usuário.'; return; }
+    let quota_bytes = null;
+    if (!unlimited) {
+      const gb = parseFloat(document.getElementById('quotaValue').value);
+      if (!(gb >= 0)) { errEl.textContent = 'Informe o limite em GB.'; return; }
+      quota_bytes = Math.round(gb * 1024 ** 3);
+      const u = _users.find(x => String(x.id) === String(userId));
+      if (u && (u.usage_bytes || 0) > quota_bytes) {
+        const ok = await nvConfirm('Cota abaixo do uso',
+          `"${u.username}" já usa ${fmtSize(u.usage_bytes)}. Com cota de ${fmtSize(quota_bytes)} os próximos backups dele serão recusados até liberar espaço.`);
+        if (!ok) return;
+      }
+    }
+    document.getElementById('quotaValue').value = '';
+    await patchUser(userId, {quota_bytes});
   }
 
   async function setHiddenPin() {

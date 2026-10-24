@@ -949,6 +949,11 @@ def _record_run_without_version(db, status: str, summary: str) -> None:
     invalidate_activity()
 
 
+def _parent_dir(path: str) -> str:
+    """Diretório dono de um path do walk — mesma regra de list_dir_one_level."""
+    return path.rsplit("/", 1)[0] if "/" in path else ""
+
+
 def _supersede_running_versions(db, label: str) -> int:
     """Marca como incomplete as versões 'running' do label (run anterior
     interrompido). Não faz commit.
@@ -1200,7 +1205,6 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
         process_queue: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_SIZE)
         dir_total: dict[str, int] = {}        # arquivos esperados por diretório
         dir_done_count: dict[str, int] = {}   # arquivos já registrados com sucesso
-        file_to_dir: dict[str, str] = {}      # entry.path -> rel_dir (rastreio pro consumer)
 
         def _pop_next_listable() -> str | None:
             """Só mexe em estruturas em memória — nunca toca no banco."""
@@ -1242,9 +1246,29 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                         discovered.add(sub)
                         pending.append(sub)
 
+                # iCloud Photos pode devolver dois itens com o mesmo nome no
+                # mesmo diretório. Só um chega ao staging (mesmo path), e o
+                # outro deixava o diretório sem fechar — versão "incomplete"
+                # que só fechava no re-run. Fica o primeiro; o resto é reportado.
+                seen: set[str] = set()
+                dups: list[str] = []
+                unique_files: list[RcloneFileEntry] = []
+                for entry in files:
+                    if entry.path in seen:
+                        dups.append(entry.path)
+                        continue
+                    seen.add(entry.path)
+                    unique_files.append(entry)
+                if dups:
+                    log.warning(
+                        f"[rclone-runner] {len(dups)} nome(s) duplicado(s) em "
+                        f"{rel_dir or '/'} — só um de cada pode ser salvo"
+                    )
+                    unavailable.extend(f"{p}: nome duplicado no remote" for p in dups)
+
                 changed: list[RcloneFileEntry] = []
                 skip_entries: list[RcloneFileEntry] = []
-                for entry in files:
+                for entry in unique_files:
                     if entry.path in this_version_paths:
                         # já registrado nesta versão (resume anterior) — nem
                         # conta pro dir_total, não precisa esperar por ele.
@@ -1310,7 +1334,6 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                 if kind == "skip":
                     await process_queue.put(("skip", rel_dir, entry))
                     continue
-                file_to_dir[entry.path] = rel_dir
                 batch.append(entry)
                 batch_bytes += entry.size
                 if len(batch) >= _BATCH_MAX_FILES or batch_bytes >= _BATCH_MAX_BYTES:
@@ -1343,7 +1366,7 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                     # dir_total, cai em failed_dirs na reconciliação e prende a
                     # versão em "incomplete" para sempre.
                     _, entry = item
-                    _mark_dir_progress(file_to_dir.pop(entry.path, ""))
+                    _mark_dir_progress(_parent_dir(entry.path))
                     continue
 
                 if item[0] == "skip":
@@ -1363,7 +1386,7 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                 else:
                     _, entry, tmp_path, sha256, size, volume = item
                     tmp_path = Path(tmp_path)
-                    rel_dir = file_to_dir.pop(entry.path, "")
+                    rel_dir = _parent_dir(entry.path)
                     try:
                         await asyncio.to_thread(
                             _process_file_sync,
@@ -1417,6 +1440,10 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
         # de ser re-tentado no resume.
         for rel_dir in dir_total:
             if rel_dir not in done_dirs and rel_dir not in failed_dirs:
+                log.warning(
+                    f"[rclone-runner] {rel_dir or '/'} não fechou: "
+                    f"{dir_done_count.get(rel_dir, 0)}/{dir_total[rel_dir]} arquivo(s)"
+                )
                 failed_dirs.append(rel_dir)
 
         elapsed = time.monotonic() - t_start
@@ -1465,8 +1492,14 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
         )
         summary += _fmt_issue_summary("erro(s)", errors)
         summary += _fmt_issue_summary("ignorado(s) sem permissão/atalho", unavailable)
+        summary += _fmt_issue_summary(
+            "diretório(s) pendente(s)", [d or "/" for d in failed_dirs]
+        )
 
-        job.last_run_status  = "success" if not errors else "partial"
+        # Versão "incomplete" nunca é "success": antes um diretório que não
+        # fechava sem erro registrado deixava a Atividade e a tela do rclone
+        # discordando.
+        job.last_run_status  = "success" if not errors and not failed_dirs else "partial"
         job.last_run_message = summary
         db.commit()
         invalidate_activity()

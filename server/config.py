@@ -83,6 +83,8 @@ GROUP_LABELS = {
     "digest":    "Digest diário",
     "rclone":    "rclone",
     "photos":    "Fotos",
+    "alerts":    "Alertas",
+    "smart":     "Saúde dos discos (SMART)",
 }
 
 SCHEMA: list[Field] = [
@@ -233,6 +235,43 @@ SCHEMA: list[Field] = [
           "Fim da janela de indexação",
           "Hora local em que a indexação para. Ex.: início 1 e fim 7 = só de madrugada.",
           min=0, max=23),
+
+    # -- alerts (enviados pelo mesmo bot do Telegram do digest) --
+    Field("alerts.stale_check_interval_minutes", None, "int", 30,
+          "Checar backups atrasados a cada (min)",
+          "Frequência com que o servidor confere se algum label passou do intervalo "
+          "esperado sem versão nova. O intervalo de cada label é definido no próprio label.",
+          min=5, max=1440),
+    Field("alerts.stale_grace_pct", None, "int", 25,
+          "Tolerância de atraso (%)",
+          "Quanto além do intervalo esperado o backup pode atrasar antes do alerta. "
+          "Ex.: intervalo 24h e 25% = alerta depois de 30h sem backup.",
+          min=0, max=500),
+    Field("alerts.quota_warn_pct", None, "int", 90,
+          "Avisar ao chegar em (% da cota)",
+          "Manda um aviso quando um usuário com cota passa deste uso. 0 = sem aviso.",
+          min=0, max=100),
+
+    # -- smart (smartctl; só Linux) --
+    Field("smart.enabled", None, "bool", True,
+          "Ler SMART dos discos",
+          "Lê periodicamente a saúde dos discos de storage com o smartctl "
+          "(pacote smartmontools) e avisa quando piorar. Só Linux."),
+    Field("smart.check_interval_hours", None, "int", 6,
+          "Ler a cada (horas)",
+          "Intervalo entre leituras SMART.", min=1, max=168),
+    Field("smart.max_temp_c", None, "int", 55,
+          "Alertar acima de (°C)",
+          "Temperatura do disco que dispara alerta. 0 = sem alerta de temperatura.",
+          min=0, max=100),
+    Field("smart.use_sudo", None, "bool", True,
+          "Rodar smartctl com sudo",
+          "O smartctl precisa de root. Com isto ligado o servidor roda `sudo -n smartctl`; "
+          "libere no sudoers: `<usuario> ALL=(root) NOPASSWD: /usr/sbin/smartctl`."),
+    Field("smart.device_overrides", None, "list[str]", [],
+          "Dispositivo por volume",
+          "Para quando a detecção automática erra. Um por linha: "
+          "`/mnt/hd1=/dev/sda` ou `/mnt/hd1=/dev/sda:sat` (tipo do -d do smartctl)."),
 ]
 
 BY_KEY: dict[str, Field] = {f.key: f for f in SCHEMA}
@@ -545,6 +584,8 @@ def apply_runtime() -> None:
             sched.schedule_daily_digest()
             sched.schedule_db_backup()
             sched.schedule_disk_rebalance_check()
+            sched.schedule_stale_check()
+            sched.schedule_smart_check()
     except Exception as e:  # pragma: no cover - reagendamento é best-effort
         log.warning(f"[config] falha ao reagendar jobs: {e}")
 

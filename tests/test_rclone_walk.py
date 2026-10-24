@@ -517,3 +517,65 @@ async def test_walk_batches_across_directories(session_factory, monkeypatch):
     paths = {vf.original_path for vf in db.query(VersionFile).filter_by(version_id=ver.id)}
     assert len(paths) == 6
     db.close()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_names_in_dir_close_version(session_factory, monkeypatch):
+    """iCloud Photos pode listar dois itens com o mesmo nome no mesmo
+    diretório. Só um chega ao staging; o outro deixava o diretório sem fechar
+    e a versão em "incomplete" com o job em "success" — fechava só no re-run."""
+    Session = session_factory
+    jid = _make_job(Session)
+    tree = {
+        "": ([], ["A"]),
+        "A": ([_fe("A/IMG_1.jpg", mtime=1.0), _fe("A/IMG_1.jpg", mtime=2.0),
+               _fe("A/ok.jpg")], []),
+    }
+    downloaded = []
+    _install_tree(monkeypatch, tree, downloaded)
+    await rr.run_rclone_backup_job(jid)
+
+    db = Session()
+    ver = db.query(BackupVersion).filter_by(backup_label="fotos").one()
+    assert ver.status == "done"
+    assert ver.progress_json is None
+    paths = {vf.original_path for vf in db.query(VersionFile).filter_by(version_id=ver.id)}
+    assert paths == {"A/IMG_1.jpg", "A/ok.jpg"}
+    job = db.get(RcloneBackupJob, jid)
+    assert job.last_run_status == "success"
+    assert "nome duplicado" in job.last_run_message
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_unclosed_dir_reports_partial(session_factory, monkeypatch):
+    """Diretório que não fecha sem erro registrado deixa a versão
+    "incomplete" — o job tem de dizer "partial", nunca "success"."""
+    Session = session_factory
+    jid = _make_job(Session)
+    tree = {
+        "": ([], ["A", "B"]),
+        "A": ([_fe("A/ok.jpg")], []),
+        "B": ([_fe("B/ok.jpg"), _fe("B/perdido.jpg")], []),
+    }
+    downloaded = []
+    _install_tree(monkeypatch, tree, downloaded)
+
+    # Some com um arquivo sem erro nem "miss" — simula qualquer furo futuro
+    # na contabilidade por diretório.
+    orig = rr._download_batch
+
+    async def leaky_download_batch(queue, batch, *a, **kw):
+        batch = [e for e in batch if e.path != "B/perdido.jpg"]
+        await orig(queue, batch, *a, **kw)
+    monkeypatch.setattr(rr, "_download_batch", leaky_download_batch)
+
+    await rr.run_rclone_backup_job(jid)
+
+    db = Session()
+    ver = db.query(BackupVersion).filter_by(backup_label="fotos").one()
+    assert ver.status == "incomplete"
+    job = db.get(RcloneBackupJob, jid)
+    assert job.last_run_status == "partial"
+    assert "diretório(s) pendente(s): B" in job.last_run_message
+    db.close()

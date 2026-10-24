@@ -17,6 +17,7 @@ import httpx
 from sqlalchemy import func
 
 import config
+import notify
 import version_diff
 
 from database import (
@@ -216,18 +217,7 @@ async def _generate_summary(stats: dict) -> str:
 
 
 async def _send_telegram(text: str) -> None:
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        log.warning("[digest] TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID não configurados — digest não enviado")
-        return
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"},
-        )
-    if r.status_code == 200:
-        log.info("[digest] Resumo enviado via Telegram")
-    else:
-        log.error(f"[digest] Telegram retornou {r.status_code}: {r.text}")
+    await notify.send(text, tag="digest", parse_mode="Markdown")
 
 
 async def send_daily_digest() -> None:

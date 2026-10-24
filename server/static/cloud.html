@@ -133,6 +133,21 @@
   .tr-row:last-child{border-bottom:none}
   .tr-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
   .tr-meta{font-size:10px;color:var(--text-mute)}
+  /* Cota e duplicados */
+  .root-bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 18px}
+  .quota{flex:1;min-width:200px;max-width:420px;font-size:11px;color:var(--text-dim)}
+  .quota-track{height:5px;background:var(--bg3);border:1px solid var(--border);margin-top:5px}
+  .quota-track div{height:100%;background:var(--green)}
+  .quota-track div.warn{background:var(--amber)}
+  .quota-track div.crit{background:var(--red)}
+  .dlg-box.wide{width:min(720px,100%)}
+  .dup-note{font-size:11px;color:var(--text-mute);margin-bottom:12px}
+  .dup-g{border:1px solid var(--border);margin-bottom:12px}
+  .dup-gh{display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--bg3);color:var(--text)}
+  .dup-gh img{width:40px;height:40px;object-fit:cover;flex:none}
+  .dup-gh .tr-name{white-space:normal}
+  .dup-f{display:flex;align-items:center;gap:8px;padding:6px 10px;border-top:1px solid var(--border)}
+  .dup-f .tr-name{font-size:11px}
 
   .upl{position:fixed;right:16px;bottom:16px;width:min(340px,calc(100vw - 32px));background:var(--bg2);border:1px solid var(--border2);border-top:2px solid var(--amber);z-index:40;font-size:11px}
   .upl-h{display:flex;align-items:center;gap:8px;padding:9px 12px;color:var(--text)}
@@ -262,6 +277,7 @@
     // Pasta do servidor (editável) × backup (somente leitura). `edit` liga o modo
     // de seleção: editar numa pasta do servidor, só copiar num backup.
     kind: '', editable: false, name: '', edit: false, sel: new Set(),
+    me: null,  // /cloud/me na raiz: cota e uso, quando há cota
   };
   const editKey = l => 'nv-cloud-edit:' + l;
   let sessionReady = false;
@@ -358,7 +374,8 @@
     pane.innerHTML = '<div class="loading">Carregando</div>';
     try {
       if (!st.label) {
-        st.labels = (await api('/cloud/tree')).labels;
+        const [t, me] = await Promise.all([api('/cloud/tree'), api('/cloud/me').catch(() => null)]);
+        st.labels = t.labels; st.me = me;
       } else {
         const params = {label: st.label, path: st.path, sort: st.sort, limit: PAGE, offset: 0};
         if (st.version) params.version = st.version;
@@ -509,7 +526,8 @@
     if (!st.label) {
       const drives = st.labels.filter(l => l.kind === 'server');
       const backups = st.labels.filter(l => l.kind !== 'server');
-      let html = `<div class="section-h">Pastas do servidor</div>`;
+      let html = `<div class="root-bar">${quotaHtml()}<button class="cbtn" id="dupBtn" title="Arquivos idênticos em mais de um lugar">⧉ Duplicados</button></div>`;
+      html += `<div class="section-h">Pastas do servidor</div>`;
       html += drives.length
         ? folderHtml(drives.map(l => ({key: l.label, name: l.name || l.label, icon: ICON_FOLDER,
                                        sub: 'editável'})), grid)
@@ -563,6 +581,7 @@
     const pk = e.target.closest('[data-pick]');
     if (pk) { e.preventDefault(); toggleSel(pk.dataset.pick); return; }
     if (e.target.id === 'newDriveBtn') { newDrive(); return; }
+    if (e.target.closest('#dupBtn')) { dupDlg(); return; }
     const fo = e.target.closest('[data-open-folder]');
     if (fo) {
       const key = fo.dataset.openFolder;
@@ -887,6 +906,75 @@
   }
 
   // ── Lixeira da pasta do servidor ──
+  // ── Cota e duplicados ──
+  function quotaHtml() {
+    const me = st.me;
+    if (!me || me.quota_bytes == null) return '<span style="flex:1"></span>';
+    const used = me.usage_bytes || 0;
+    const pct = me.quota_bytes > 0 ? Math.min(100, used / me.quota_bytes * 100) : 100;
+    const cls = pct >= 100 ? 'crit' : pct >= 90 ? 'warn' : '';
+    return `<div class="quota" title="Arquivos distintos dos seus backups e pastas do servidor">
+      ${esc(fmtSize(used))} de ${esc(fmtSize(me.quota_bytes))} usados${pct >= 100 ? ' — cota cheia, novos envios são recusados' : ''}
+      <div class="quota-track"><div class="${cls}" style="width:${pct.toFixed(1)}%"></div></div></div>`;
+  }
+
+  async function dupDlg() {
+    let data = null;
+    const MIN = {'1 MB': 1 << 20, '10 MB': 10 << 20, '100 MB': 100 << 20, '1 KB': 1024};
+    let minSize = MIN['1 MB'];
+    async function draw(body) {
+      body.innerHTML = '<div class="loading">Procurando</div>';
+      try { data = await api('/cloud/duplicates', {min_size: minSize, limit: 100}); }
+      catch (e) { body.innerHTML = '<div class="dlg-err">' + esc(e.message) + '</div>'; return; }
+      const opts = Object.entries(MIN).map(([k, v]) => `<option value="${v}"${v === minSize ? ' selected' : ''}>${k}</option>`).join('');
+      let html = `<div class="dup-note">Arquivos idênticos em mais de um lugar, na versão mais recente de cada backup e pasta.
+        O servidor já guarda cada arquivo uma vez só, então apagar uma cópia <b>não libera disco nem cota</b> — serve para organizar.
+        Só dá para excluir em pastas do servidor (vai para a lixeira); em backups a cópia volta no próximo backup.</div>
+        <div class="dup-note">A partir de <select class="sel" id="dupMin">${opts}</select>
+        · ${data.group_count} grupo(s) · ${esc(fmtSize(data.repeated_bytes))} repetidos${data.group_count > data.groups.length ? ` · mostrando os ${data.groups.length} maiores` : ''}</div>`;
+      html += data.groups.length ? data.groups.map((g, gi) => {
+        const name = g.files[0].path.split('/').pop();
+        const thumb = g.media ? `<img src="/cloud/thumb/${esc(g.sha256)}?size=sm" alt="" loading="lazy" onerror="this.remove()">` : (iconFor(name));
+        return `<div class="dup-g"><div class="dup-gh">${thumb}
+          <div class="tr-name">${esc(name)}<div class="tr-meta">${esc(fmtSize(g.size))} · ${g.count} cópias · ${esc(fmtSize(g.repeated_bytes))} repetidos</div></div></div>
+          ${g.files.map((f, fi) => `<div class="dup-f">${f.kind === 'server' ? ICON_FOLDER : ICON_DRIVE}
+            <div class="tr-name" title="${esc(f.drive + ' / ' + f.path)}">${esc(f.drive)} / ${esc(f.path)}
+              <div class="tr-meta">${f.editable ? 'pasta do servidor' : '🔒 backup'} · modificado ${esc(fmtTime(f.mtime))}</div></div>
+            <button class="cbtn" data-dup-open="${gi}:${fi}" title="Abrir a pasta">Abrir</button>
+            ${f.editable ? `<button class="cbtn danger" data-dup-del="${gi}:${fi}" title="Enviar esta cópia para a lixeira da pasta">✕</button>` : ''}
+          </div>`).join('')}</div>`;
+      }).join('') : '<div class="empty" style="padding:24px">Nenhum arquivo duplicado. 🎉</div>';
+      body.innerHTML = html;
+      body.querySelector('#dupMin').onchange = e => { minSize = +e.target.value; draw(body); };
+    }
+    const box = document.querySelector('#dlg .dlg-box');
+    box.classList.add('wide');
+    await dlg('Duplicados', '', [{label: 'Fechar', value: null}], body => {
+      body.onclick = async e => {
+        const op = e.target.closest('[data-dup-open]'), dl = e.target.closest('[data-dup-del]');
+        if (!op && !dl) return;
+        const [gi, fi] = (op || dl).dataset[op ? 'dupOpen' : 'dupDel'].split(':').map(Number);
+        const f = data.groups[gi].files[fi];
+        if (op) {
+          closeDlg(null);
+          const dir = f.path.includes('/') ? f.path.slice(0, f.path.lastIndexOf('/')) : '';
+          go(f.label, dir, '');
+          return;
+        }
+        if (!confirm(`Enviar "${f.drive} / ${f.path}" para a lixeira da pasta?`)) return;
+        try {
+          await send('/cloud/drive/delete', {label: f.label, items: [f.path]});
+          toast('Enviado para a lixeira');
+          draw(body);
+        } catch (err) {
+          if (err.message !== '401') body.insertAdjacentHTML('afterbegin', '<div class="dlg-err">' + esc(err.message) + '</div>');
+        }
+      };
+      draw(body);
+    });
+    box.classList.remove('wide');
+  }
+
   async function trashDlg() {
     let entries = [];
     async function draw(body) {
