@@ -148,7 +148,7 @@ def test_auto_cleanup_sucesso_fecha_job(client, monkeypatch):
 # -- Manutenções síncronas e status de erro --------------------------------------
 
 def test_rereplicate_endpoint_erro_fica_registrado(client, monkeypatch):
-    def boom(db):
+    def boom(db, **kw):
         raise RuntimeError("falha na réplica")
     monkeypatch.setattr(m, "_rereplicate_all", boom)
     with pytest.raises(RuntimeError):

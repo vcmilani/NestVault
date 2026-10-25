@@ -348,7 +348,8 @@ def insert_copy_row(db, sha256: str, stored_at: str, volume_path: str) -> None:
     )
 
 
-def ensure_replicas(sha256: str, source_path: Path, db) -> None:
+def ensure_replicas(sha256: str, source_path: Path, db) -> int:
+    """Cria as cópias que faltam para atingir o fator alvo. Retorna quantas criou."""
     from database import FileContent, FileContentCopy
     target = target_replicas()
     copies = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).all()
@@ -393,6 +394,7 @@ def ensure_replicas(sha256: str, source_path: Path, db) -> None:
 
     if added:
         log.info(f"[replication] {sha256[:8]}… → {len(added)} nova(s) cópia(s): {added}")
+    return len(added)
 
 
 class ContentRepairUnavailable(Exception):
@@ -513,21 +515,81 @@ def dedup_or_repair(db, fc, tmp_path: Path, volume: Path, what: str) -> "Path | 
     return dest
 
 
-def rereplicate_all(db) -> tuple[int, int]:
+class ReplicationProgress:
+    """Progresso de uma replicação em massa: X / Y arquivos (Z%) e bytes copiados.
+
+    tick() é chamado a cada arquivo processado. A cada SUMMARY_EVERY segundos faz
+    commit parcial (as cópias já gravadas no disco ganham sua linha no banco — se o
+    processo cair no meio, o que foi feito não vira órfão nem é refeito do zero) e
+    repassa a mensagem a on_progress (que atualiza o MaintenanceJob na Atividade).
+    O log sai com menos frequência (LOG_EVERY) para não inundar o arquivo num job
+    de horas."""
+
+    SUMMARY_EVERY = 3.0
+    LOG_EVERY = 30.0
+
+    def __init__(self, tag: str, total: int, total_bytes: int, db, on_progress=None, prefix: str = ""):
+        import time
+        self._time = time.monotonic
+        self.tag, self.total, self.total_bytes = tag, total, total_bytes
+        self.db, self.on_progress, self.prefix = db, on_progress, prefix
+        self.done = self.copies = self.skipped = self.bytes_done = 0
+        self._started = self._last_summary = self._last_log = self._time()
+        self.emit(force_log=True)
+
+    def message(self) -> str:
+        pct = round(self.done / self.total * 100) if self.total else 100
+        msg = (f"{self.prefix}Re-replicando: {self.done} / {self.total} arquivo(s) ({pct}%)"
+               f" · {fmt_bytes(self.bytes_done)} / {fmt_bytes(self.total_bytes)}")
+        if self.skipped:
+            msg += f" · {self.skipped} pulado(s)"
+        return msg
+
+    def tick(self, *, copies: int = 0, nbytes: int = 0, skipped: bool = False) -> None:
+        self.done += 1
+        self.copies += copies
+        self.bytes_done += nbytes
+        if skipped:
+            self.skipped += 1
+        now = self._time()
+        if now - self._last_summary >= self.SUMMARY_EVERY:
+            self.emit(force_log=now - self._last_log >= self.LOG_EVERY)
+
+    def emit(self, force_log: bool = False) -> None:
+        now = self._time()
+        self.db.commit()
+        msg = self.message()
+        if self.on_progress:
+            self.on_progress(msg)
+        if force_log:
+            elapsed = now - self._started
+            rate = f" · {fmt_bytes(self.bytes_done / elapsed)}/s" if elapsed >= 1 and self.bytes_done else ""
+            log.info(f"[{self.tag}] {msg} · {self.copies} cópia(s) criada(s){rate}")
+            self._last_log = now
+        self._last_summary = now
+
+
+def rereplicate_all(db, on_progress=None, prefix: str = "") -> tuple[int, int]:
+    """Re-replica tudo que está abaixo do fator alvo. on_progress(msg) recebe o
+    progresso "Re-replicando: X / Y arquivo(s) (Z%) · bytes" periodicamente."""
     from database import FileContent, FileContentCopy
     from sqlalchemy import func
     target = target_replicas()
     degraded_strs = [str(d) for d in _degraded_volumes]
     underfilled = (
-        db.query(FileContent.sha256, func.count(FileContentCopy.id).label("cnt"))
+        db.query(FileContent.sha256, FileContent.size, func.count(FileContentCopy.id).label("cnt"))
         .outerjoin(FileContentCopy, FileContentCopy.sha256 == FileContent.sha256)
-        .group_by(FileContent.sha256)
+        .group_by(FileContent.sha256, FileContent.size)
         .having(func.count(FileContentCopy.id) < target)
         .all()
     )
     replicated = skipped = 0
-    log.info(f"[rereplicate-all] {len(underfilled)} arquivo(s) sub-replicado(s) — alvo: {target}")
-    sha256_list = [sha256 for sha256, _ in underfilled]
+    # Bytes a copiar: (alvo - cópias atuais) × tamanho — a estimativa do que falta.
+    total_bytes = sum((size or 0) * (target - cnt) for _, size, cnt in underfilled)
+    log.info(f"[rereplicate-all] {len(underfilled)} arquivo(s) sub-replicado(s) — alvo: {target}"
+             f" — ~{fmt_bytes(total_bytes)} a copiar")
+    progress = ReplicationProgress("rereplicate-all", len(underfilled), total_bytes, db, on_progress, prefix)
+    sha256_list = [sha256 for sha256, _, _ in underfilled]
     copy_query = db.query(FileContentCopy).filter(FileContentCopy.sha256.in_(sha256_list))
     if degraded_strs:
         copy_query = copy_query.filter(~FileContentCopy.volume_path.in_(degraded_strs))
@@ -535,16 +597,19 @@ def rereplicate_all(db) -> tuple[int, int]:
     for copy in copy_query.all():
         if copy.sha256 not in source_map:
             source_map[copy.sha256] = copy
-    for sha256, _ in underfilled:
+    for sha256, size, _ in underfilled:
         source = source_map.get(sha256)
         if not source:
             log.warning(f"[rereplicate-all] {sha256[:8]}… sem fonte acessível — pulando")
             skipped += 1
+            progress.tick(skipped=True)
             continue
-        ensure_replicas(sha256, Path(source.stored_at), db)
+        added = ensure_replicas(sha256, Path(source.stored_at), db)
         replicated += 1
-    db.commit()
-    log.info(f"[rereplicate-all] concluído — {replicated} replicado(s), {skipped} pulado(s)")
+        progress.tick(copies=added, nbytes=(size or 0) * added)
+    progress.emit(force_log=True)
+    log.info(f"[rereplicate-all] concluído — {replicated} replicado(s), {skipped} pulado(s), "
+             f"{progress.copies} cópia(s) criada(s), {fmt_bytes(progress.bytes_done)} copiados")
     return replicated, skipped
 
 
@@ -878,19 +943,31 @@ def rereplicate_to_volume(v: Path) -> None:
         shas_on_v = {r.sha256 for r in db.query(FileContentCopy.sha256)
                      .filter(FileContentCopy.volume_path == str(v)).all()}
         t = target_replicas()
-        underfilled = (
-            db.query(FileContent.sha256, func.count(FileContentCopy.id).label("cnt"))
-            .outerjoin(FileContentCopy, FileContentCopy.sha256 == FileContent.sha256)
-            .group_by(FileContent.sha256)
-            .having(func.count(FileContentCopy.id) < t)
-            .all()
-        )
+        underfilled = [
+            (sha256, size) for sha256, size, _ in (
+                db.query(FileContent.sha256, FileContent.size, func.count(FileContentCopy.id).label("cnt"))
+                .outerjoin(FileContentCopy, FileContentCopy.sha256 == FileContent.sha256)
+                .group_by(FileContent.sha256, FileContent.size)
+                .having(func.count(FileContentCopy.id) < t)
+                .all()
+            )
+            if sha256 not in shas_on_v
+        ]
         count = 0
         skipped = 0
         aborted = None
-        for (sha256, _) in underfilled:
-            if sha256 in shas_on_v:
-                continue
+
+        def _progress(msg: str) -> None:
+            job = db.get(MaintenanceJob, mj_id)
+            if job:
+                job.summary = msg
+                db.commit()
+                invalidate_activity()
+
+        progress = ReplicationProgress("rereplicate", len(underfilled),
+                                       sum(size or 0 for _, size in underfilled),
+                                       db, _progress, prefix=f"{v}: ")
+        for (sha256, size) in underfilled:
             source = (db.query(FileContentCopy)
                       .filter(FileContentCopy.sha256 == sha256,
                               ~FileContentCopy.volume_path.in_([str(d) for d in _degraded_volumes]))
@@ -898,6 +975,7 @@ def rereplicate_to_volume(v: Path) -> None:
             fc = db.get(FileContent, sha256)
             if not source or fc is None:
                 skipped += 1
+                progress.tick(skipped=True)
                 continue
             try:
                 dest = content_path(sha256, v)
@@ -905,17 +983,21 @@ def rereplicate_to_volume(v: Path) -> None:
                               expected_stored_size(fc.size, bool(fc.encrypted)))
                 insert_copy_row(db, sha256, str(dest), str(v))
                 count += 1
+                progress.tick(copies=1, nbytes=size or 0)
             except ReplicaSourceCorrupt as e:
                 log.error(f"[rereplicate] {sha256[:8]}… origem não confere — pulando: {e}")
                 skipped += 1
+                progress.tick(skipped=True)
                 continue
             except OSError as e:
-                log.warning(f"[rereplicate] Erro em {v}: {e} — abortando")
+                log.warning(f"[rereplicate] Erro em {v}: {e} — abortando "
+                            f"({progress.done}/{progress.total} processado(s))")
                 aborted = str(e)
                 break
+        progress.emit(force_log=True)
         if count:
-            db.commit()
             log.info(f"[rereplicate] {count} arquivo(s) re-replicados para {v}"
+                     f" ({fmt_bytes(progress.bytes_done)})"
                      + (f", {skipped} pulado(s)" if skipped else ""))
         else:
             log.info(f"[rereplicate] Nenhum arquivo sub-replicado encontrado para {v}"
@@ -924,8 +1006,9 @@ def rereplicate_to_volume(v: Path) -> None:
         if mj:
             mj.status = "error" if aborted else "done"
             mj.finished_at = datetime.now()
-            mj.summary = (f"{v}: {count} re-replicado(s), {skipped} pulado(s) — fator alvo: {t}"
-                          + (f" — abortado: {aborted}" if aborted else ""))
+            mj.summary = (f"{v}: {count} re-replicado(s) ({fmt_bytes(progress.bytes_done)}), "
+                          f"{skipped} pulado(s) — fator alvo: {t}"
+                          + (f" — abortado em {progress.done}/{progress.total}: {aborted}" if aborted else ""))
             db.commit()
     except Exception as e:
         log.exception(f"[rereplicate] erro inesperado ao re-replicar para {v}")

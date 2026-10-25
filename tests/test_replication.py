@@ -299,6 +299,30 @@ def test_rereplicate_fills_single_copy_to_target(tmp_path, monkeypatch):
         assert len(_copies_in(v2, sha)) == 1
 
 
+def test_rereplicate_all_reporta_progresso(tmp_path, monkeypatch):
+    """on_progress recebe "X / Y arquivo(s) (Z%)" e termina em 100% com os bytes copiados."""
+    v1 = tmp_path / "v1"; v1.mkdir()
+    v2 = tmp_path / "v2"; v2.mkdir()
+
+    for c in _mk_client(monkeypatch, [v1, v2], replication_factor=1):
+        c.post("/backups", json={"label": "b1"})
+        c.post("/backups/b1/versions", json={"version_key": "v1"})
+        _upload(c, "b1", "v1", "/a.txt", b"aaaa")
+        _upload(c, "b1", "v1", "/b.txt", b"bbbbbb")
+
+        monkeypatch.setattr(storage_mod, "REPLICATION_FACTOR", 2)
+        msgs = []
+        db = m.SessionLocal()
+        try:
+            replicated, skipped = storage_mod.rereplicate_all(db, on_progress=msgs.append)
+        finally:
+            db.close()
+        assert (replicated, skipped) == (2, 0)
+        assert msgs[0].startswith("Re-replicando: 0 / 2 arquivo(s) (0%)")
+        assert "2 / 2 arquivo(s) (100%)" in msgs[-1]
+        assert "10.0 B / 10.0 B" in msgs[-1]
+
+
 def test_rereplicate_skips_already_replicated(tmp_path, monkeypatch):
     """Arquivos já com cópias suficientes não são contados como replicados."""
     v1 = tmp_path / "v1"; v1.mkdir()

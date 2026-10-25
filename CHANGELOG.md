@@ -4,6 +4,12 @@ Histórico de versões do NestVault. Veja o [README](README.md) para instalaçã
 
 ---
 
+**v10.2.2** — a **replicação em massa** passa a mostrar **progresso em %** na Atividade e no log.
+
+**Antes.** `POST /maintenance/rereplicate`, `POST /maintenance/reconcile-replication` e a re-replicação automática de um volume que volta de degraded apareciam na Atividade, mas o resumo ficava parado em "Re-replicando..." até o fim. O log só trazia a contagem inicial, uma linha por arquivo e o fechamento. E as linhas das cópias só iam para o banco no final: se o processo caísse no meio, os arquivos já copiados ficavam sem registro e eram copiados de novo.
+
+**Agora.** O resumo do job é atualizado a cada ~3 s com `Re-replicando: X / Y arquivo(s) (Z%) · bytes copiados / total · N pulado(s)`, e cada atualização grava no banco as cópias já feitas. O log recebe a mesma linha a cada ~30 s (e no início e no fim), com as cópias criadas e a velocidade em MB/s. Na reconciliação, a mensagem mostra também quantas cópias excedentes foram removidas. O resumo final inclui os bytes copiados e, se o job abortar, em que ponto parou (`abortado em X/Y: …`). `storage.ensure_replicas` passa a devolver quantas cópias criou.
+
 **v10.2.1** — backups do **iCloud Photos** que ficavam **incompletos** na Atividade enquanto a tela do rclone dizia **sucesso** (e fechavam só ao rodar de novo).
 
 **Causa.** O iCloud Photos pode listar dois itens com o **mesmo nome** no mesmo diretório. Só um deles chega ao disco, e o progresso do outro era contado na raiz em vez do diretório dele. O diretório nunca fechava, a versão terminava `incomplete`, e como não havia erro registrado o job saía `success`. No re-run o nome já estava na versão, os dois eram pulados e o diretório fechava.
