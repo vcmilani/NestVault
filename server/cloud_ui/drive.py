@@ -72,6 +72,9 @@ def _under(path: str, root: str) -> bool:
 class Drive:
     def __init__(self, b: BackupID, live: BackupVersion, trash: BackupVersion):
         self.b, self.live, self.trash = b, live, trash
+        # sha256 que entraram ou saíram do Cloud nesta operação: quem chama passa
+        # para cloud_replicas.apply() (réplicas dedicadas do Cloud).
+        self.touched: set[str] = set()
 
     @property
     def label(self) -> str:
@@ -266,6 +269,8 @@ TOKEN_LEN = 23  # "%Y%m%d%H%M%S-" + 8 hex
 
 def _trash_one(db: Session, d: Drive, path: str, is_dir: bool, user: User, now: datetime) -> None:
     token = f"{now:%Y%m%d%H%M%S}-{secrets.token_hex(4)}"
+    d.touched.update(r[0] for r in db.query(VersionFile.sha256)
+                     .filter(*tree.files_under(d.live.id, path)).distinct())
     db.query(VersionFile).filter(*tree.files_under(d.live.id, path)) \
         .update({VersionFile.version_id: d.trash.id,
                  VersionFile.original_path: token + "/" + VersionFile.original_path},
@@ -336,6 +341,7 @@ def restore(db: Session, d: Drive, ids: list[int], user: User) -> int:
         seen.add(e.path)
     for e in entries:
         n = len(e.token) + 1
+        d.touched.update(_entry_shas(db, d.trash.id, e))
         moved = (db.query(VersionFile)
                  .filter(VersionFile.version_id == d.trash.id,
                          VersionFile.original_path.startswith(e.token + "/", autoescape=True))
@@ -349,6 +355,13 @@ def restore(db: Session, d: Drive, ids: list[int], user: User) -> int:
     log.info(f"[drive] {user.username} restaurou {len(entries)} item(ns) da lixeira de {d.label}: "
              + ", ".join(e.path for e in entries[:5]))
     return len(entries)
+
+
+def _entry_shas(db: Session, trash_version_id: int, e: ServerTrashEntry) -> set[str]:
+    return {r[0] for r in db.query(VersionFile.sha256)
+            .filter(VersionFile.version_id == trash_version_id,
+                    VersionFile.original_path.startswith(e.token + "/", autoescape=True))
+            .distinct()}
 
 
 def purge_entries(db: Session, entries: list[ServerTrashEntry], trash_version_id: int) -> int:
@@ -367,6 +380,8 @@ def purge_entries(db: Session, entries: list[ServerTrashEntry], trash_version_id
 def purge(db: Session, d: Drive, ids: list[int], user: User) -> int:
     entries = _entries(db, d, ids)
     names = [e.path for e in entries]
+    for e in entries:
+        d.touched.update(_entry_shas(db, d.trash.id, e))
     purge_entries(db, entries, d.trash.id)
     db.commit()
     log.info(f"[drive] {user.username} excluiu de vez {len(names)} item(ns) da lixeira de "
@@ -426,6 +441,8 @@ def copy(db: Session, src_label: str, src_version: str | None, items: list[str],
 
     total = 0
     for full, dst in plan:
+        d.touched.update(r[0] for r in db.query(VersionFile.sha256)
+                         .filter(*tree.files_under(v.id, full)).distinct())
         stmt = insert(VersionFile).from_select(
             ["version_id", "original_path", "sha256", "mtime"],
             select(literal(d.live.id), literal(dst) + func.substr(VersionFile.original_path, len(full) + 1),
@@ -456,6 +473,7 @@ def prepare_upload(db: Session, d: Drive, path: str) -> str:
 
 def put_file(db: Session, d: Drive, path: str, sha256: str, mtime: float, user: User) -> int:
     """Grava/substitui o arquivo em `path`. O anterior, se o conteúdo mudou, vai para a lixeira."""
+    d.touched.add(sha256)
     vf = (db.query(VersionFile)
           .filter(VersionFile.version_id == d.live.id, VersionFile.original_path == path).first())
     if vf and vf.sha256 == sha256:

@@ -4,6 +4,18 @@ Histórico de versões do NestVault. Veja o [README](README.md) para instalaçã
 
 ---
 
+**v10.3.0** — o Cloud ganha **replicação dedicada** para as pastas do servidor, e a raiz do `/cloud` passa a mostrar sempre o **espaço usado e disponível**.
+
+**Antes.** Um único `storage.replication_factor` valia para tudo. Os arquivos das pastas do servidor, que só existem no NestVault (não têm a cópia da máquina cliente que um backup tem), ficavam com as mesmas cópias que qualquer backup. A barra "X de Y usados" só aparecia para quem tinha cota, e não dizia quanto ainda cabia.
+
+**Agora.**
+
+- **Fator do Cloud.** Novo setting `cloud.replication_factor` (grupo **Cloud** em Configurações; 0 = igual ao do storage; nunca fica abaixo dele). Ele vale para o conteúdo que está na versão live de uma pasta do servidor, e também para o que só existe em pastas do servidor (na lixeira dela, ou com a pasta inteira na lixeira do admin), porque ainda pode ser restaurado.
+- **Arquivo que sai do Cloud.** Quando ele vai para a lixeira, é substituído ou é purgado e existe em algum backup, volta ao fator do storage, e as cópias extras são apagadas. As travas do `cleanup_excess_copies` continuam valendo: só conta cópia legível, a primária é preservada e nada é apagado com volume degraded.
+- **Quando o ajuste acontece.** Nas operações do Cloud (upload, cópia de backup para pasta do servidor, lixeira, restauração, purge, pasta inteira para a lixeira ou de volta), em background depois da resposta. Um upload que cai em dedup também sobe o conteúdo para o fator do Cloud. Ao mudar o setting, roda um job **Replicação do Cloud** na Atividade, com progresso em %. A limpeza noturna faz a mesma conferência como rede de segurança.
+- **Manutenção.** `reconcile-replication` e `rereplicate` respeitam o fator de cada arquivo, e não apagam mais as cópias extras do Cloud. A re-replicação de um volume que volta de degraded também.
+- **Espaço no Cloud.** `GET /cloud/me` devolve sempre `usage_bytes`, `storage_free_bytes` e `available_bytes`. `storage_free_bytes` é o livre acima do limiar de cada disco saudável, dividido pelas cópias do Cloud, em cache de 60 s. `available_bytes` é o que sobra da cota limitado a esse valor, ou só o disco para quem não tem cota. A barra da raiz mostra "X usados · Y disponíveis" para todos.
+
 **v10.2.2** — a **replicação em massa** passa a mostrar **progresso em %** na Atividade e no log.
 
 **Antes.** `POST /maintenance/rereplicate`, `POST /maintenance/reconcile-replication` e a re-replicação automática de um volume que volta de degraded apareciam na Atividade, mas o resumo ficava parado em "Re-replicando..." até o fim. O log só trazia a contagem inicial, uma linha por arquivo e o fechamento. E as linhas das cópias só iam para o banco no final: se o processo caísse no meio, os arquivos já copiados ficavam sem registro e eram copiados de novo.

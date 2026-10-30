@@ -756,6 +756,19 @@ def run_nightly_cleanup() -> None:
         log.info(f"[nightly-cleanup] {orphans_removed} conteúdo(s) órfão(s) removido(s) "
                  f"({round(bytes_freed/1024/1024, 1)} MB)")
 
+        # Réplicas do Cloud: rede de segurança dos ajustes feitos a cada edição
+        # (cloud_replicas) — cobre o que saiu do Cloud por outro caminho, como um
+        # backup apagado que deixa um arquivo só na lixeira de uma pasta do servidor.
+        try:
+            import cloud_replicas
+            cr_added, cr_removed = cloud_replicas.reconcile_all(db)
+            if cr_added or cr_removed:
+                log.info(f"[nightly-cleanup] réplicas do Cloud: {cr_added} cópia(s) criada(s), "
+                         f"{cr_removed} removida(s)")
+        except Exception:
+            db.rollback()
+            log.exception("[nightly-cleanup] erro ao ajustar as réplicas do Cloud — seguindo")
+
         # Limpeza de arquivos temporários órfãos (mais de 24h)
         mj = db.get(MaintenanceJob, mj_id)
         if mj:

@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -17,6 +17,7 @@ from auth import (HIDDEN_COOKIE, HIDDEN_TTL, SESSION_COOKIE, SESSION_TTL, effect
                   get_current_user, get_user_header_or_cookie, hidden_unlocked,
                   make_hidden_token, make_session_token, pin_locked_for,
                   register_pin_attempt, require_owner_or_admin)
+import cloud_replicas
 import crypto
 import quota
 import storage
@@ -52,10 +53,14 @@ def create_session(request: Request, response: Response, db: Session = Depends(g
 def get_me(db: Session = Depends(get_db), user: User = Depends(get_user_header_or_cookie)):
     """Quem é o dono da chave/sessão — as páginas usam o role para decidir o que
     mostrar. É o papel EFETIVO: a chave de cliente de um admin responde "user".
-    Com cota definida, traz também o uso (barra "X de Y" do Cloud)."""
+    Traz também o espaço (barra "usados · disponíveis" do Cloud): o disponível é o
+    que sobra da cota, limitado ao que ainda cabe nos discos com as réplicas do Cloud."""
     me = {"username": user.username, "role": effective_role(user), "scope": user.key_scope}
-    if user.quota_bytes is not None:
-        me.update(quota_bytes=user.quota_bytes, usage_bytes=quota.usage(db, user.id))
+    used = quota.usage(db, user.id)
+    free = cloud_replicas.storage_free_bytes()
+    available = free if user.quota_bytes is None else min(max(0, user.quota_bytes - used), free)
+    me.update(quota_bytes=user.quota_bytes, usage_bytes=used,
+              storage_free_bytes=free, available_bytes=available)
     return me
 
 
@@ -196,10 +201,14 @@ def download_zip(label: str = Form(...), items: list[str] = Form(...),
 # -- Pastas do servidor (edição) ----------------------------------------------
 # Todas exigem o header X-API-Key (get_current_user): o cookie de sessão só lê.
 
-def _changed() -> None:
+def _changed(d: drive.Drive | None = None, background_tasks: BackgroundTasks | None = None) -> None:
     # A timeline de fotos é cacheada pelo id das versões, que não muda numa
     # edição da versão live: força o recálculo.
     media.bump_generation()
+    # Conteúdo que entrou ou saiu do Cloud: réplicas dedicadas (cloud_replicas)
+    # ajustadas depois da resposta — criar cópias de uma pasta grande demora.
+    if d is not None and d.touched and background_tasks is not None:
+        background_tasks.add_task(cloud_replicas.apply_bg, set(d.touched))
 
 
 class DriveCreate(BaseModel):
@@ -269,11 +278,11 @@ class ItemsReq(BaseModel):
 
 
 @router.post("/drive/delete")
-def drive_delete(req: ItemsReq, db: Session = Depends(get_db),
+def drive_delete(req: ItemsReq, background_tasks: BackgroundTasks, db: Session = Depends(get_db),
                  user: User = Depends(get_current_user)):
     d = drive.get(db, req.label, user)
     n = drive.delete(db, d, req.items, user)
-    _changed()
+    _changed(d, background_tasks)
     return {"trashed": n}
 
 
@@ -289,19 +298,21 @@ class TrashIdsReq(BaseModel):
 
 
 @router.post("/drive/restore")
-def drive_restore(req: TrashIdsReq, db: Session = Depends(get_db),
+def drive_restore(req: TrashIdsReq, background_tasks: BackgroundTasks, db: Session = Depends(get_db),
                   user: User = Depends(get_current_user)):
     d = drive.get(db, req.label, user)
     n = drive.restore(db, d, req.ids, user)
-    _changed()
+    _changed(d, background_tasks)
     return {"restored": n}
 
 
 @router.post("/drive/purge")
-def drive_purge(req: TrashIdsReq, db: Session = Depends(get_db),
+def drive_purge(req: TrashIdsReq, background_tasks: BackgroundTasks, db: Session = Depends(get_db),
                 user: User = Depends(get_current_user)):
     d = drive.get(db, req.label, user)
-    return {"purged": drive.purge(db, d, req.ids, user)}
+    n = drive.purge(db, d, req.ids, user)
+    _changed(d, background_tasks)
+    return {"purged": n}
 
 
 class CopyReq(BaseModel):
@@ -313,11 +324,11 @@ class CopyReq(BaseModel):
 
 
 @router.post("/drive/copy")
-def drive_copy(req: CopyReq, db: Session = Depends(get_db),
+def drive_copy(req: CopyReq, background_tasks: BackgroundTasks, db: Session = Depends(get_db),
                user: User = Depends(get_current_user)):
     d = drive.get(db, req.dest_label, user)
     n = drive.copy(db, req.src_label, req.src_version, req.items, d, req.dest_dir, user)
-    _changed()
+    _changed(d, background_tasks)
     if n:
         media.indexer.wake()
     return {"copied": n}

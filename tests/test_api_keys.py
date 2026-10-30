@@ -11,6 +11,11 @@ from test_auth import ADMIN_ONLY_ENDPOINTS, ADMIN_ONLY_NOT_SMOKEABLE
 V1 = "2026-01-01T00:00:00"
 
 
+def _ident(me: dict) -> dict:
+    """Só a identidade do /cloud/me (ele traz também uso e espaço disponível)."""
+    return {k: me[k] for k in ("username", "role", "scope")}
+
+
 def _user_id(admin, username):
     return next(u["id"] for u in admin.get("/users").json() if u["username"] == username)
 
@@ -64,8 +69,8 @@ def test_client_key_sees_only_own_backups(admin_client_key):
 
 def test_me_reports_effective_role(admin_client_key):
     admin, client_key, _alice, _bob = admin_client_key
-    assert admin.get("/cloud/me").json() == {"username": "admin", "role": "admin", "scope": "full"}
-    assert client_key.get("/cloud/me").json() == {"username": "admin", "role": "user", "scope": "client"}
+    assert _ident(admin.get("/cloud/me").json()) == {"username": "admin", "role": "admin", "scope": "full"}
+    assert _ident(client_key.get("/cloud/me").json()) == {"username": "admin", "role": "user", "scope": "client"}
 
 
 def test_session_cookie_keeps_client_scope_and_dies_on_revoke(two_users):

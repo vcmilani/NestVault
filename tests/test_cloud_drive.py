@@ -14,6 +14,11 @@ V1 = "2026-01-01T00:00:00"
 V2 = "2026-01-02T00:00:00"
 
 
+def _ident(me: dict) -> dict:
+    """Só a identidade do /cloud/me (ele traz também uso e espaço disponível)."""
+    return {k: me[k] for k in ("username", "role", "scope")}
+
+
 def _seed(c, label="fotos", base="/Users/alice/Pictures"):
     make_backup(c, label=label)
     make_version(c, label=label, version_key=V1)
@@ -271,8 +276,8 @@ def test_cloud_page_served(client):
 
 def test_me_reports_role_via_header_and_cookie(two_users):
     admin, alice, _bob = two_users
-    assert admin.get("/cloud/me").json() == {"username": "admin", "role": "admin", "scope": "full"}
-    assert alice.get("/cloud/me").json() == {"username": "alice", "role": "user", "scope": "full"}
+    assert _ident(admin.get("/cloud/me").json()) == {"username": "admin", "role": "admin", "scope": "full"}
+    assert _ident(alice.get("/cloud/me").json()) == {"username": "alice", "role": "user", "scope": "full"}
     browser = TestClient(m.app)
     assert browser.get("/cloud/me").status_code == 401
     browser.post("/cloud/session", headers={"X-API-Key": "alice-key"})

@@ -277,7 +277,7 @@
     // Pasta do servidor (editável) × backup (somente leitura). `edit` liga o modo
     // de seleção: editar numa pasta do servidor, só copiar num backup.
     kind: '', editable: false, name: '', edit: false, sel: new Set(),
-    me: null,  // /cloud/me na raiz: cota e uso, quando há cota
+    me: null,  // /cloud/me na raiz: uso, espaço disponível e cota (se houver)
   };
   const editKey = l => 'nv-cloud-edit:' + l;
   let sessionReady = false;
@@ -909,12 +909,20 @@
   // ── Cota e duplicados ──
   function quotaHtml() {
     const me = st.me;
-    if (!me || me.quota_bytes == null) return '<span style="flex:1"></span>';
+    if (!me || me.usage_bytes == null) return '<span style="flex:1"></span>';
     const used = me.usage_bytes || 0;
-    const pct = me.quota_bytes > 0 ? Math.min(100, used / me.quota_bytes * 100) : 100;
-    const cls = pct >= 100 ? 'crit' : pct >= 90 ? 'warn' : '';
-    return `<div class="quota" title="Arquivos distintos dos seus backups e pastas do servidor">
-      ${esc(fmtSize(used))} de ${esc(fmtSize(me.quota_bytes))} usados${pct >= 100 ? ' — cota cheia, novos envios são recusados' : ''}
+    const avail = me.available_bytes || 0;
+    const hasQuota = me.quota_bytes != null;
+    // Com cota a barra é a cota; sem cota, o usado contra usado + o que ainda cabe nos discos.
+    const cap = hasQuota ? me.quota_bytes : used + avail;
+    const pct = cap > 0 ? Math.min(100, used / cap * 100) : 100;
+    const full = hasQuota ? used >= me.quota_bytes : avail <= 0;
+    const cls = full || pct >= 100 ? 'crit' : pct >= 90 ? 'warn' : '';
+    const tip = 'Usado: arquivos distintos dos seus backups e pastas do servidor. '
+      + 'Disponível: ' + (hasQuota ? 'o que sobra da cota, limitado ao ' : 'o ')
+      + 'espaço livre nos discos, já descontadas as cópias de segurança do Cloud.';
+    return `<div class="quota" title="${esc(tip)}">
+      ${esc(fmtSize(used))} usados${hasQuota ? ` de ${esc(fmtSize(me.quota_bytes))}` : ''} · ${esc(fmtSize(avail))} disponíveis${full ? (hasQuota ? ' — cota cheia, novos envios são recusados' : ' — discos cheios') : ''}
       <div class="quota-track"><div class="${cls}" style="width:${pct.toFixed(1)}%"></div></div></div>`;
   }
 
