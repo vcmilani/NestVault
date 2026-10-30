@@ -1,5 +1,5 @@
 """
-NestVault  v10.2.1
+NestVault  v10.2.2
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -606,7 +606,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="10.2.1", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="10.2.2", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 app.include_router(cloud_ui_router, prefix="/cloud", tags=["cloud"])
 
@@ -4505,6 +4505,17 @@ def _start_sync_job(db: Session, job_type: str, summary: str) -> int:
     return mj.id
 
 
+def _sync_job_progress(db: Session, job_id: int):
+    """Callback on_progress que grava o progresso no resumo do job (Atividade)."""
+    def _progress(msg: str) -> None:
+        mj = db.get(MaintenanceJob, job_id)
+        if mj:
+            mj.summary = msg
+            db.commit()
+            invalidate_activity()
+    return _progress
+
+
 def _finish_sync_job(db: Session, job_id: int, summary: str) -> None:
     mj = db.get(MaintenanceJob, job_id)
     if mj:
@@ -4520,7 +4531,7 @@ def force_rereplicate(db: Session = Depends(get_db)):
     """Re-replica conteúdos com menos cópias que storage.replication_factor. Útil após adicionar um disco novo."""
     job_id = _start_sync_job(db, "rereplicate", "Re-replicando conteúdos sub-replicados...")
     try:
-        replicated, skipped = _rereplicate_all(db)
+        replicated, skipped = _rereplicate_all(db, on_progress=_sync_job_progress(db, job_id))
     except Exception as e:
         log.exception(f"[rereplicate] job #{job_id}: erro")
         _mark_job_error(db, job_id, e)
@@ -4541,7 +4552,8 @@ def reconcile_replication(db: Session = Depends(get_db)):
             mj.summary = f"{cleaned} cópia(s) excedente(s) removida(s) — re-replicando sub-replicados..."
             db.commit()
             invalidate_activity()
-        replicated, skipped = _rereplicate_all(db)
+        replicated, skipped = _rereplicate_all(db, on_progress=_sync_job_progress(db, job_id),
+                                              prefix=f"{cleaned} excedente(s) removida(s) — ")
     except Exception as e:
         log.exception(f"[reconcile-replication] job #{job_id}: erro")
         _mark_job_error(db, job_id, e)
