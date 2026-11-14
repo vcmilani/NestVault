@@ -207,9 +207,10 @@ def test_secrets_are_fully_masked(monkeypatch):
 
 def test_log_filter_redacts_telegram_token():
     rec = logging.LogRecord("httpx", logging.INFO, __file__, 1,
-                            'HTTP Request: POST https://api.telegram.org/bot123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw/sendMessage', (), None)
+                            'HTTP Request: POST https://api.telegram.org/bot000000000:FAKETOKENFORTESTONLYxxxxxxxxxxxxxx/sendMessage', (), None)
+    # Token sintético (zeros + FAKETOKEN…): só precisa ter o formato bot<dígitos>:<20+ chars>.
     assert m._RedactSecrets().filter(rec) is True
-    assert "AAHdqTcv" not in rec.getMessage() and "bot<redigido>" in rec.getMessage()
+    assert "FAKETOKEN" not in rec.getMessage() and "bot<redigido>" in rec.getMessage()
 
 
 def test_smart_overrides_reject_option_like_devices(monkeypatch):
