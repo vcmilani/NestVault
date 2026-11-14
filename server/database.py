@@ -93,6 +93,13 @@ SERVER_TRASH_KEY    = "trash"
 SERVER_TRASH_STATUS = "server-trash"
 
 
+def live_label_filter():
+    """BackupID fora da lixeira (status NULL em linhas antigas conta como vivo).
+    Implementação única — era repetida em main, cloud_replicas e cloud_ui.tree."""
+    from sqlalchemy import or_
+    return or_(BackupID.status.is_(None), BackupID.status != TRASHED_STATUS)
+
+
 def hash_api_key(raw: str) -> str:
     """SHA-256 hex — a chave em si nunca é persistida em texto puro."""
     import hashlib
@@ -137,6 +144,19 @@ class User(Base):
     # já enviado, para não repetir a cada upload.
     quota_bytes   = Column(BigInteger, nullable=True)
     quota_alerted = Column(Boolean, nullable=False, default=False, server_default="0")
+    # Bloqueio por PIN errado (ver auth.register_pin_attempt): persistido para
+    # sobreviver a restart e valer entre workers — em memória, reiniciar zerava.
+    pin_fails        = Column(Integer, nullable=False, default=0, server_default="0")
+    pin_locked_until = Column(Float, nullable=True)
+
+
+class RevokedSession(Base):
+    """Cookies de sessão do /cloud encerrados por logout antes de vencer (ver
+    auth.revoke_session). Só o hash do token; a limpeza noturna apaga os vencidos."""
+    __tablename__ = "revoked_sessions"
+
+    token_hash = Column(String(64), primary_key=True)
+    exp        = Column(Integer, nullable=False, index=True)
 
 
 class ApiKey(Base):
@@ -571,6 +591,9 @@ def init_db():
         ("backup_ids",      "stale_alerted_at",        "TIMESTAMP"),
         ("users",           "quota_bytes",             "BIGINT"),
         ("users",           "quota_alerted",           "BOOLEAN NOT NULL DEFAULT FALSE"),
+        # v10.4.0: bloqueio do PIN das ocultas persistido.
+        ("users",           "pin_fails",               "INTEGER NOT NULL DEFAULT 0"),
+        ("users",           "pin_locked_until",        "FLOAT"),
     ):
         with engine.connect() as conn:
             try:
@@ -591,6 +614,14 @@ def init_db():
     if engine.dialect.name != "sqlite":
         _log_init.info(f"[db] Backend: {engine.dialect.name} — migrações SQLite ignoradas")
         return
+
+    # O banco guarda hashes de chave e de PIN e todos os caminhos: só o dono lê
+    # (config.json já nasce 0600; o SQLite nascia com o umask, em geral 0644).
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            os.chmod(f"{DB_PATH}{suffix}", 0o600)
+        except OSError:
+            pass
 
     _log_init.info("[db] Backend: SQLite — aplicando migrações incrementais")
 

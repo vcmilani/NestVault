@@ -76,6 +76,7 @@ class Field:
 
 
 GROUP_LABELS = {
+    "server":    "Servidor",
     "storage":   "Storage",
     "ssd_cache": "SSD Cache",
     "database":  "Banco de dados",
@@ -89,6 +90,15 @@ GROUP_LABELS = {
 }
 
 SCHEMA: list[Field] = [
+    # -- server --
+    Field("server.trusted_proxies", None, "list[str]", ["127.0.0.1", "::1"],
+          "Proxies confiáveis",
+          "IPs de onde o header X-Forwarded-Proto é aceito (reverse proxy com HTTPS na frente). "
+          "Só esses marcam o cookie de sessão como seguro."),
+    Field("server.expose_docs", None, "bool", False,
+          "Expor documentação da API",
+          "Liga /docs, /redoc e /openapi.json (sem login). Desligado por padrão.",
+          requires_restart=True),
     # -- storage --
     Field("storage.dirs", "STORAGE_DIRS", "list[str]", ["./storage"],
           "Volumes de storage",
@@ -335,6 +345,9 @@ def _check(f: Field, value: Any) -> None:
     if f.key == "storage.dirs" and not value:
         raise ConfigError("storage.dirs: informe ao menos um volume de storage")
 
+    if f.key == "digest.ollama_url" and value and not str(value).lower().startswith(("http://", "https://")):
+        raise ConfigError("digest.ollama_url: deve comecar com http:// ou https://")
+
     if f.key == "storage.encryption_key" and value:
         try:
             decoded = base64.b64decode(value, validate=True)
@@ -467,9 +480,9 @@ def pending_restart() -> bool:
 
 
 def _mask(value: str) -> str:
-    if not value:
-        return ""
-    return "••••••" + value[-4:] if len(value) > 8 else "••••••"
+    # Sem sufixo: os 4 últimos caracteres da chave de criptografia ou do token
+    # do Telegram não têm por que sair na tela de configurações.
+    return "••••••" if value else ""
 
 
 def public() -> dict:

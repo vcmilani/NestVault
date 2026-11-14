@@ -22,8 +22,9 @@ _base_lock = threading.Lock()
 
 
 def live_label_filter():
-    """BackupID fora da lixeira (status NULL em linhas antigas conta como vivo)."""
-    return or_(BackupID.status.is_(None), BackupID.status != TRASHED_STATUS)
+    """BackupID fora da lixeira — implementação canônica em database.live_label_filter."""
+    import database
+    return database.live_label_filter()
 
 
 def norm_rel(path: str | None) -> str:

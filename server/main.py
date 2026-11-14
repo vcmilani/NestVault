@@ -165,6 +165,7 @@ from database import (
     init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy,
     VersionFile, MaintenanceJob, SsdCachePendingMove, RcloneBackupJob, DiskSnapshot,
     DiskUsageDaily, User, ApiKey, hash_api_key, hash_pin, bootstrap_admin_user, TRASHED_STATUS,
+    live_label_filter as db_live_label_filter,
     SERVER_KIND, SERVER_TRASH_STATUS,
 )
 import config
@@ -196,6 +197,26 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("backup-server")
+
+# httpx loga em INFO a URL completa de cada request — e a do Telegram carrega o
+# token do bot no caminho (api.telegram.org/bot<token>/sendMessage). Quem lê o
+# journald lia o token. O filtro abaixo é a segunda rede, para qualquer logger.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+class _RedactSecrets(logging.Filter):
+    _TOKEN = re.compile(r"bot\d+:[A-Za-z0-9_-]{20,}")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if "bot" in msg and self._TOKEN.search(msg):
+            record.msg = self._TOKEN.sub("bot<redigido>", msg)
+            record.args = ()
+        return True
+
+
+for _h in logging.getLogger().handlers:
+    _h.addFilter(_RedactSecrets())
 
 # -- Config -------------------------------------------------------------------
 # Os aliases locais de storage.* foram removidos na v8.0.0: eram cópias feitas
@@ -561,7 +582,11 @@ async def lifespan(_: FastAPI):
     config.flush_boot_log()  # config.py é importado antes do basicConfig acima
     log.info(f"Config: {config.path()}")
     init_db()
-    bootstrap_admin_user(os.getenv("BACKUP_API_KEY", ""))
+    _bootstrap_key = os.getenv("BACKUP_API_KEY", "")
+    bootstrap_admin_user(_bootstrap_key)
+    if 0 < len(_bootstrap_key) < 32:
+        log.warning(f"[auth] BACKUP_API_KEY tem só {len(_bootstrap_key)} caracteres — é a chave do admin; "
+                    f"use algo longo e aleatório (ex.: openssl rand -base64 32) e troque-a em Usuários")
     _cleanup_stale_running_states()
     if storage.ENCRYPTION_ENABLED:
         storage.encryption_key = crypto.load_key()  # lança ValueError se inválida — falha rápido
@@ -610,7 +635,10 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="10.4.0", lifespan=lifespan)
+# /docs, /redoc e /openapi.json ficam fechados por padrão (server.expose_docs):
+# descreviam toda a API, com nomes de headers e rotas, sem login.
+_DOCS = {} if config.get("server.expose_docs") else {"docs_url": None, "redoc_url": None, "openapi_url": None}
+app = FastAPI(title="NestVault", version="10.4.0", lifespan=lifespan, **_DOCS)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 app.include_router(cloud_ui_router, prefix="/cloud", tags=["cloud"])
 
@@ -661,13 +689,19 @@ app.add_middleware(_SecurityHeadersMiddleware)
 
 
 # -- Schemas: Requests --------------------------------------------------------
+# Label: até 128 caracteres, sem barra, barra invertida ou caractere de controle,
+# sem espaço nas pontas. Entra em URLs (/backups/{label}/...), em nomes de zip e
+# no log; antes qualquer string era aceita.
+_LABEL_PATTERN = r"^[^/\\\x00-\x1f ](?:[^/\\\x00-\x1f]*[^/\\\x00-\x1f ])?$"
+
+
 class BackupCreate(BaseModel):
-    label: str
+    label: str = Field(..., min_length=1, max_length=128, pattern=_LABEL_PATTERN)
     client_name: Optional[str] = None
     prefix: Optional[str] = None
 
 class BackupRename(BaseModel):
-    new_label: str
+    new_label: str = Field(..., min_length=1, max_length=128, pattern=_LABEL_PATTERN)
 
 class BackupOwnerUpdate(BaseModel):
     owner_user_id: int
@@ -1382,8 +1416,8 @@ def _trash_versions(db: Session, version_ids: list[int], user: User, now: dateti
 
 
 def _live_label_filter():
-    """BackupID fora da lixeira (status NULL em linhas antigas conta como vivo)."""
-    return or_(BackupID.status.is_(None), BackupID.status != TRASHED_STATUS)
+    """BackupID fora da lixeira — implementação canônica em database.live_label_filter."""
+    return db_live_label_filter()
 
 
 def _version_stats(v: BackupVersion, db: Session) -> VersionInfo:
@@ -2373,7 +2407,7 @@ def _build_stats_data(db: Session) -> StatsResponse:
     ).filter(
         BackupVersion.status == "done",
         BackupVersion.created_at.isnot(None),
-        BackupID.kind != "server",
+        BackupID.kind != SERVER_KIND,
     ).group_by(date_expr).order_by(date_expr).all()
     backups_days = [BackupsDay(date=r.day, count=int(r.n)) for r in backups_days_rows if r.day]
 
@@ -3447,7 +3481,7 @@ def set_hidden_pin(user_id: int, req: HiddenPinSet, db: Session = Depends(get_db
     u = _user_or_404(db, user_id)
     u.hidden_pin_hash = hash_pin(req.pin)
     db.commit(); db.refresh(u)
-    reset_pin_attempts(u.id)
+    reset_pin_attempts(u.id, db)
     log.info(f"[users] PIN das fotos ocultas definido para '{u.username}'")
     return _user_info(u)
 
@@ -3457,7 +3491,7 @@ def delete_hidden_pin(user_id: int, db: Session = Depends(get_db)):
     u = _user_or_404(db, user_id)
     u.hidden_pin_hash = None
     db.commit(); db.refresh(u)
-    reset_pin_attempts(u.id)
+    reset_pin_attempts(u.id, db)
     log.info(f"[users] PIN das fotos ocultas removido de '{u.username}'")
     return _user_info(u)
 

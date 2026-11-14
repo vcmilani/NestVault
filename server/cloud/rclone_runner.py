@@ -290,6 +290,19 @@ async def list_remotes() -> list[str]:
     return [r.rstrip(":") for r in stdout.decode().splitlines() if r.strip()]
 
 
+def _unique_version_key(db, label: str) -> str:
+    """Chave da versão nova: o timestamp, com sufixo -2, -3… se já existir. Dois
+    runs no mesmo segundo (job manual + agendado) batiam na unique
+    (label, version_key) e o segundo caía com IntegrityError."""
+    base = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S")
+    key, n = base, 1
+    while db.query(BackupVersion.id).filter(BackupVersion.backup_label == label,
+                                            BackupVersion.version_key == key).first():
+        n += 1
+        key = f"{base}-{n}"
+    return key
+
+
 async def _remote_config(remote_name: str) -> dict:
     """Retorna a config do remote (type, service, ...) via `rclone config dump`.
 
@@ -1100,7 +1113,7 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                     f"[rclone-runner] Versão {resume_version.version_key} abandonada após "
                     f"{resume_count} resumes sem concluir — criando versão nova"
                 )
-                version_key = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S")
+                version_key = _unique_version_key(db, job.target_label)
                 version = BackupVersion(
                     backup_label=job.target_label, version_key=version_key, status="running",
                 )
@@ -1117,7 +1130,7 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
                     f"(resume {resume_count}/{_MAX_RESUMES})"
                 )
         else:
-            version_key = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S")
+            version_key = _unique_version_key(db, job.target_label)
             version = BackupVersion(
                 backup_label=job.target_label, version_key=version_key,
                 status="running",
@@ -1523,7 +1536,7 @@ async def _run_fast_strategy(job: RcloneBackupJob, db) -> None:
     version: BackupVersion | None = None
     try:
         # Cria BackupVersion; marca running anteriores como incomplete
-        version_key = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S")
+        version_key = _unique_version_key(db, job.target_label)
         _supersede_running_versions(db, job.target_label)
         version = BackupVersion(
             backup_label=job.target_label, version_key=version_key, status="running"

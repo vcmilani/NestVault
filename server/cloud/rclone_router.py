@@ -13,7 +13,7 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from auth import require_admin
-from database import RcloneBackupJob, get_db
+from database import BackupID, RcloneBackupJob, SERVER_KIND, get_db
 import scheduler as sched
 
 log = logging.getLogger("backup-server")
@@ -182,8 +182,17 @@ def list_jobs(db: Session = Depends(get_db)):
     return [_job_out(j) for j in jobs]
 
 
+def _require_client_target(db: Session, label: str) -> None:
+    """Uma pasta do servidor (/cloud) é editada no lugar e não tem versões de
+    backup: um job rclone apontado para ela gravaria versões dentro dela."""
+    b = db.query(BackupID).filter(BackupID.label == label).first()
+    if b is not None and b.kind == SERVER_KIND:
+        raise HTTPException(422, f"target_label '{label}' e uma pasta do servidor — use um label de backup")
+
+
 @router.post("/jobs", response_model=RcloneJobOut, status_code=201, dependencies=[Depends(require_admin)])
 def create_job(req: RcloneJobCreate, db: Session = Depends(get_db)):
+    _require_client_target(db, req.target_label)
     job = RcloneBackupJob(
         remote_name=req.remote_name,
         remote_path=req.remote_path.strip("/"),
@@ -227,6 +236,7 @@ def update_job(job_id: int, req: RcloneJobUpdate, db: Session = Depends(get_db))
     if req.remote_path is not None:
         job.remote_path = req.remote_path.strip("/")
     if req.target_label is not None:
+        _require_client_target(db, req.target_label)
         job.target_label = req.target_label
     if req.cron_expr is not None:
         job.cron_expr = req.cron_expr

@@ -12,6 +12,7 @@ from typing import Callable
 from database import SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob, SsdCachePendingMove, engine, TRASHED_STATUS, SERVER_KIND
 from sqlalchemy import func, delete, exists
 from cache_state import invalidate_activity
+import auth
 
 log = logging.getLogger("backup-server")
 
@@ -765,6 +766,7 @@ def run_nightly_cleanup() -> None:
         try:
             from cloud_ui import drive
             drive_purged = drive.purge_expired(db, trash_cutoff)
+            auth.purge_revoked_sessions(db)
             if drive_purged:
                 log.info(f"[nightly-cleanup] {drive_purged} item(ns) apagado(s) da lixeira "
                          f"das pastas do servidor")

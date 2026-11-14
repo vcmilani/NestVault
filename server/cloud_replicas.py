@@ -52,7 +52,8 @@ def _chunks(items: list[str]):
 
 
 def _live_label():
-    return or_(BackupID.status.is_(None), BackupID.status != TRASHED_STATUS)
+    import database
+    return database.live_label_filter()
 
 
 def _shas(db: Session, *filters, shas: list[str] | None = None) -> set[str]:
