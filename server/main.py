@@ -1,5 +1,5 @@
 """
-NestVault  v10.3.0
+NestVault  v10.4.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -610,7 +610,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="10.3.0", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="10.4.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 app.include_router(cloud_ui_router, prefix="/cloud", tags=["cloud"])
 
@@ -1105,6 +1105,10 @@ class TrendDay(BaseModel):
     version_count: int
     total_size_bytes: int
 
+class BackupsDay(BaseModel):
+    date: str
+    count: int
+
 class ChangeDay(BaseModel):
     date: str
     added: int
@@ -1174,6 +1178,7 @@ class StatsResponse(BaseModel):
     space_saved_bytes: int
     trend_days: list[TrendDay]
     changes_days: list[ChangeDay]
+    backups_days: list[BackupsDay] = []
     top_backups: list[TopBackupEntry]
     maintenance_by_type: list[MaintenanceTypeStat]
     last_maintenance_jobs: list[MaintenanceJobInfo]
@@ -2268,6 +2273,21 @@ def _build_stats_data(db: Session) -> StatsResponse:
     trend_days = [TrendDay(date=r.day, version_count=r.n, total_size_bytes=size_by_day.get(r.day, 0))
                   for r in trend_counts]
 
+    # --- Q5a: calendário — versões de backup existentes por dia (todo o histórico) ---
+    # Conta as versões "done" que ainda existem (fora da lixeira e não apagadas),
+    # agrupadas pelo dia de criação. Pastas do servidor (kind="server") ficam de
+    # fora: a versão "live" delas não é um backup.
+    backups_days_rows = db.query(
+        date_expr.label("day"),
+        func.count(BackupVersion.id).label("n"),
+    ).join(BackupID, BackupID.label == BackupVersion.backup_label
+    ).filter(
+        BackupVersion.status == "done",
+        BackupVersion.created_at.isnot(None),
+        BackupID.kind != "server",
+    ).group_by(date_expr).order_by(date_expr).all()
+    backups_days = [BackupsDay(date=r.day, count=int(r.n)) for r in backups_days_rows if r.day]
+
     # --- Q5b: alterações por dia (adicionados/modificados/removidos, últimos 30 dias) ---
     # Agregado inteiramente no banco — nenhuma linha de version_files chega ao Python.
     # Ver version_diff.py para as identidades usadas nas contagens.
@@ -2581,6 +2601,7 @@ def _build_stats_data(db: Session) -> StatsResponse:
         space_saved_bytes=space_saved,
         trend_days=trend_days,
         changes_days=changes_days,
+        backups_days=backups_days,
         top_backups=top_backups,
         maintenance_by_type=maintenance_by_type,
         last_maintenance_jobs=last_maintenance_jobs,

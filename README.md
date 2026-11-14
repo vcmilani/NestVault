@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v10.3.0`
+# 🗄️ NestVault  `v10.4.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **backup por usuário** — cada conta só cria, lista e restaura seus próprios backups.
 
@@ -1444,6 +1444,7 @@ Na primeira visita, o browser pedirá a API Key — salva no `localStorage`. Par
 
 - **Stats globais** — total de backups, versões, arquivos, storage total
 - **Replicação — quanto espaço precisa** *(v10.1)* — em `/stats`, uma linha para cada fator de replicação possível (1 cópia até uma por disco). Cada linha mostra quanto espaço a mais seria gravado, quantos arquivos seriam copiados, o uso de cada disco depois das cópias e se **cabe**. Cabe quando todo disco continua acima de `storage.fallback_threshold_gb` livres. A conta simula a política real da replicação: as cópias que faltam vão para os discos saudáveis que ainda não têm o arquivo, na ordem de `storage.dirs`, sem olhar o espaço livre. Por isso o resultado por disco é exato para o acervo atual. Fatores menores que o atual mostram quanto seria liberado. Não entra o crescimento com backups novos. Endpoint: `GET /api/stats/replication-estimate` (admin, cache de 10 min, `?refresh=true` recalcula)
+- **Backups por dia — calendário** *(v10.4)* — em `/stats`, antes de "Alterações por dia", um calendário mensal com a quantidade de versões de backup concluídas que ainda existem em cada dia de criação, incluindo hoje (destacado). Versões na lixeira, com falha ou incompletas e as pastas do servidor ficam de fora. Navegação ‹ › do mês do backup mais antigo até o atual; a cor do dia é proporcional ao maior dia do mês. Exposto em `backups_days` no `GET /api/stats`
 - **Disco livre** — espaço disponível no disco montado com barra visual de uso e percentual *(v2.7)*
 - **Espaço liberável** — quanto seria recuperado apagando versões antigas (mantendo 1 por label) *(v2.7)*
 - **Tabela de backups** — clique em um label para expandir as versões; coluna **Usuário** mostra o dono de cada backup *(v7.9)*

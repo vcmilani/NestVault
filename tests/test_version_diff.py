@@ -195,3 +195,28 @@ def test_digest_version_diff_matches_historical(client):
         }
     finally:
         db.close()
+
+
+# -- _build_stats_data.backups_days (calendário do /stats) --------------------
+
+def test_stats_backups_days_counts_existing_versions_today(client):
+    _setup_mixed(client)
+    db = m.SessionLocal()
+    try:
+        stats = m._build_stats_data(db)
+    finally:
+        db.close()
+
+    # v1 e v2 foram criadas agora: o dia atual aparece com as 2 versões.
+    today = m.datetime.now().strftime("%Y-%m-%d")
+    assert [(d.date, d.count) for d in stats.backups_days] == [(today, 2)]
+
+
+def test_stats_backups_days_empty_without_versions(client):
+    make_backup(client, "b1")
+    db = m.SessionLocal()
+    try:
+        stats = m._build_stats_data(db)
+    finally:
+        db.close()
+    assert stats.backups_days == []

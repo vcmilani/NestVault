@@ -4,6 +4,10 @@ Histórico de versões do NestVault. Veja o [README](README.md) para instalaçã
 
 ---
 
+**v10.4.0** — a página de **Estatísticas** ganha um **calendário de backups por dia**, antes de "Alterações por dia".
+
+Cada dia do mês mostra quantas versões de backup concluídas criadas naquele dia ainda existem, contando o dia atual, que aparece com contorno âmbar. Versões na lixeira, com falha ou incompletas não entram, nem as pastas do servidor do Cloud (a versão `live` delas não é um backup). A cor do dia é proporcional ao dia com mais backups do mês, e o cabeçalho traz o total do mês. Os botões ‹ › navegam do mês do backup mais antigo até o atual, e **Hoje** volta para o mês corrente; o mês escolhido se mantém nos refreshes automáticos. "Hoje" segue o relógio do servidor, o mesmo fuso das datas das versões. Os dados vêm do novo campo `backups_days` (`[{date, count}]`, todo o histórico) no `GET /api/stats`, numa única query agrupada por dia.
+
 **v10.3.0** — o Cloud ganha **replicação dedicada** para as pastas do servidor, e a raiz do `/cloud` passa a mostrar sempre o **espaço usado e disponível**.
 
 **Antes.** Um único `storage.replication_factor` valia para tudo. Os arquivos das pastas do servidor, que só existem no NestVault (não têm a cópia da máquina cliente que um backup tem), ficavam com as mesmas cópias que qualquer backup. A barra "X de Y usados" só aparecia para quem tinha cota, e não dizia quanto ainda cabia.
