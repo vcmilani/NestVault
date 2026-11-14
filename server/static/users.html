@@ -255,8 +255,8 @@
         <td class="quota-cell">${_quotaCell(u)}</td>
         <td class="td-dim td-nb">${fmtDate(u.created_at)}</td>
         <td class="td-actions">
-          <button class="small-btn" onclick="rotateKey(${u.id}, '${esc(u.username)}')">⟳ Girar chave principal</button>
-          <button class="small-btn ${u.is_active ? 'btn-danger' : ''}" onclick="toggleActive(${u.id}, '${esc(u.username)}', ${!u.is_active})">
+          <button class="small-btn" data-username="${esc(u.username)}" onclick="rotateKey(${u.id}, this.dataset.username)">⟳ Girar chave principal</button>
+          <button class="small-btn ${u.is_active ? 'btn-danger' : ''}" data-username="${esc(u.username)}" onclick="toggleActive(${u.id}, this.dataset.username, ${!u.is_active})">
             ${u.is_active ? '⏻ Desativar' : '⏻ Reativar'}
           </button>
           <button class="small-btn" onclick="changeRole(${u.id})">${u.role === 'admin' ? '⇩ Tornar user' : '⇧ Tornar admin'}</button>

@@ -723,7 +723,10 @@ class ApiKeyCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=64, description="Onde a chave vai ser usada, ex.: MacBook")
 
 class VersionCreate(BaseModel):
-    version_key: str = Field(..., description="ISO datetime: 2026-04-25T10:42:31")
+    # Entra em URLs e no HTML das páginas (era interpolado em innerHTML sem
+    # validação do lado do servidor).
+    version_key: str = Field(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._:+-]+$",
+                             description="ISO datetime: 2026-04-25T10:42:31")
 
 class VersionFinish(BaseModel):
     status: Literal["done", "failed"] = "done"
@@ -2298,7 +2301,10 @@ def service_worker():
     sw = STATIC_DIR / "sw.js"
     if not sw.exists():
         raise HTTPException(404)
-    return FileResponse(sw, media_type="application/javascript")
+    # Versão do cache = versão do servidor (ver comentário em sw.js).
+    body = sw.read_text(encoding="utf-8").replace("__NV_VERSION__", app.version)
+    return Response(body, media_type="application/javascript",
+                    headers={"Cache-Control": "no-cache"})
 
 
 def _build_stats_data(db: Session) -> StatsResponse:

@@ -278,7 +278,7 @@
 
   function jobRow(j) {
     const statusBadge = j.last_run_status
-      ? `<span class="badge badge-${j.last_run_status}">${j.last_run_status}</span>`
+      ? `<span class="badge badge-${esc(j.last_run_status)}">${esc(j.last_run_status)}</span>`
       : `<span class="mute">—</span>`;
     const enabledBadge = j.enabled ? '' : `<span class="badge badge-off" style="margin-left:4px">off</span>`;
     const isRunning = j.last_run_status === 'running';
