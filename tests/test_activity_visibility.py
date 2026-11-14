@@ -120,7 +120,7 @@ def test_auto_cleanup_sem_pressao_nao_cria_job(client):
 def test_auto_cleanup_erro_fica_registrado(client, monkeypatch):
     monkeypatch.setattr(m, "_volumes_with_free_space", lambda: 0)
 
-    def boom(db, exclude_version_id=None):
+    def boom(db, exclude_version_id=None, owner_user_id=None):
         raise RuntimeError("disco sumiu")
     monkeypatch.setattr(m, "_auto_cleanup_if_needed", boom)
     db = _session(client)()
@@ -136,7 +136,7 @@ def test_auto_cleanup_erro_fica_registrado(client, monkeypatch):
 def test_auto_cleanup_sucesso_fecha_job(client, monkeypatch):
     monkeypatch.setattr(m, "_volumes_with_free_space", lambda: 0)
     monkeypatch.setattr(m, "_auto_cleanup_if_needed",
-                        lambda db, exclude_version_id=None: ("2 versão(ões) removida(s)", 10))
+                        lambda db, exclude_version_id=None, owner_user_id=None: ("2 versão(ões) removida(s)", 10))
     db = _session(client)()
     try:
         m._auto_cleanup_with_job(db)

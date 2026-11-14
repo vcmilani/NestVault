@@ -114,6 +114,11 @@ SCHEMA: list[Field] = [
           "Exclusões feitas por usuários comuns ficam na lixeira por este prazo e podem ser "
           "restauradas pelo admin; depois a limpeza noturna apaga de vez.",
           min=1, max=365),
+    Field("storage.max_upload_gb", None, "int", 0,
+          "Tamanho máximo por upload (GB)",
+          "Um arquivo maior que isto é recusado (413) antes de ocupar disco. 0 = sem limite "
+          "global; a cota do usuário e o espaço livre do volume continuam valendo.",
+          min=0, max=100000),
     Field("storage.encryption_enabled", "ENCRYPTION_ENABLED", "bool", False,
           "Criptografia em repouso",
           "Cifra os arquivos com AES-256-GCM. Alterar depois de gravar dados torna o conteúdo existente ilegível.",
