@@ -28,6 +28,7 @@ from sqlalchemy.pool import NullPool
 from sqlalchemy.orm import sessionmaker
 
 import auth as auth_mod
+import cloud_replicas as cloud_replicas_mod
 import config as config_mod
 import database as db_mod
 import main as m
@@ -127,6 +128,7 @@ def _reset_module_caches():
     cloud_media.indexer._scanned.clear()
     auth_mod._pin_fails.clear()
     quota_mod.reset()
+    cloud_replicas_mod.reset()
     smart_mod._last_errors.clear()
 
 

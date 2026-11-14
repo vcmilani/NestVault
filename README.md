@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v10.2.2`
+# 🗄️ NestVault  `v10.3.0`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **backup por usuário** — cada conta só cria, lista e restaura seus próprios backups.
 
@@ -374,6 +374,12 @@ Gere a chave com:
 ```bash
 python3 -c 'import os,base64; print(base64.b64encode(os.urandom(32)).decode())'
 ```
+
+**`cloud`** — pastas do servidor do `/cloud` *(v10.3)*
+
+| Chave | Tipo | Padrão | ↻ | Descrição |
+|---|---|---|:-:|---|
+| `replication_factor` | int | `0` | | Cópias dos arquivos das pastas do servidor. `0` = igual a `storage.replication_factor`; nunca fica abaixo dele. Um arquivo que sai do Cloud (lixeira, substituição, purge) e existe em algum backup volta ao fator do storage. O que só existe no Cloud, mesmo na lixeira, mantém o fator do Cloud. Ao mudar, roda o job **Replicação do Cloud** na Atividade |
 
 **`ssd_cache`** — cache tier em SSD
 
@@ -993,6 +999,8 @@ Reconcilia o acervo inteiro com o `storage.replication_factor` atual do servidor
 - **Sub-replicados** (fator aumentou ou disco foi adicionado): cria cópias faltantes
 - **Sobre-replicados** (fator diminuiu): remove cópias excedentes do disco e do banco
 
+Desde a v10.3 cada arquivo é medido pelo próprio alvo: o conteúdo das pastas do servidor usa `cloud.replication_factor`, e as cópias extras dele não contam como excedentes.
+
 ```bash
 nestvault reconcile-replication \
   --server http://192.168.1.100:8000
@@ -1151,6 +1159,7 @@ pytest tests/ --cov=server --cov-report=term-missing
 | `test_stale_alerts.py` *(v10.2)* | Backup atrasado: um alerta por episódio, aviso de "voltou", tolerância, label sem versão conta da criação, lixeira/pasta do servidor/sem intervalo ignorados, rename leva o intervalo, posse |
 | `test_smart.py` *(v10.2)* | SMART: parse ATA/NVMe, partição → disco, overrides, detecção de piora (temperatura só na subida), gravação e alerta, retentativa com `-d sat`, volume indisponível, endpoints só admin |
 | `test_quota.py` *(v10.2)* | Cota: uso por sha256 distinto, 507 em conteúdo novo, registro do que já é seu passa, versão bloqueada na cota, aviso único, cota nula, conteúdo de outra conta conta, upload do drive, `/users` e `/cloud/me` |
+| `test_cloud_replication.py` *(v10.3)* | Replicação do Cloud: upload, cópia de backup e dedup sobem para o fator do Cloud; `0` e "nunca abaixo do storage"; lixeira/substituição/purge com o conteúdo num backup voltam ao fator do storage; só no Cloud mantém até o purge; volume degraded adia; pasta inteira na lixeira; reconcile/rereplicate respeitam o alvo de cada arquivo; job ao trocar o fator; usado/disponível no `/cloud/me` |
 | `test_cloud_duplicates.py` *(v10.2)* | Duplicados: grupos entre backup e pasta do servidor, caminhos iguais aos da árvore, só a versão mais recente, `min_size`, isolamento entre usuários, apagar a cópia vai para a lixeira e backup recusa |
 | `test_replication_estimate.py` *(v10.1)* | Estimativa de replicação: cópias na ordem dos volumes, grupos com vários conteúdos, falta de espaço (piso de livre), disco fora do ar, overhead da cifragem, quarentena fora, conteúdo sem cópia saudável, só admin |
 | `test_cloud_photos.py` *(v10.0)* | Indexação: backfill, EXIF e rotação, dedup entre backups, miniatura cifrada, limite de tentativas, órfãos; timeline paginada, meses e isolamento entre usuários; escolha de quais backups entram (só o dono, não por cookie) e migração da coluna |

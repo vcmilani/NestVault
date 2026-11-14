@@ -28,6 +28,8 @@ encryption_key: bytes | None = None  # set by main.py lifespan: storage.encrypti
 
 CHUNK_SIZE = 1024 * 1024
 REPLICATION_FACTOR = config.get("storage.replication_factor")
+# Fator dedicado das pastas do servidor do /cloud (ver cloud_replicas.py); 0 = o do storage.
+CLOUD_REPLICATION_FACTOR = config.get("cloud.replication_factor")
 # Limiar absoluto (GB) abaixo do qual um volume é considerado esgotado para escrita e para o auto-cleanup.
 STORAGE_FALLBACK_THRESHOLD_GB = config.get("storage.fallback_threshold_gb")
 
@@ -146,24 +148,31 @@ def volume_looks_sane(vol: Path, db) -> bool:
     return False
 
 
-def target_replicas() -> int:
+def _factor(cloud: bool = False) -> int:
+    """Fator configurado (0 = todos os volumes). cloud=True: o do Cloud, que nunca
+    fica abaixo do fator do storage — ele só existe para proteger mais."""
+    base = REPLICATION_FACTOR if REPLICATION_FACTOR > 0 else len(STORAGE_VOLUMES)
+    if not cloud or not CLOUD_REPLICATION_FACTOR:
+        return base
+    return max(base, CLOUD_REPLICATION_FACTOR)
+
+
+def target_replicas(cloud: bool = False) -> int:
     n = len(healthy_volumes())
-    factor = REPLICATION_FACTOR if REPLICATION_FACTOR > 0 else len(STORAGE_VOLUMES)
+    factor = _factor(cloud)
     if n < factor:
         log.warning(f"[replication] fator={factor} > volumes saudáveis={n}")
     return min(factor, max(1, n))
 
 
-def configured_replicas() -> int:
+def configured_replicas(cloud: bool = False) -> int:
     """Fator de replicação configurado, limitado ao número de volumes declarados.
 
     Diferente de target_replicas(), NÃO encolhe quando um volume fica degraded.
     Quem decide o que APAGAR tem de usar este valor: com target_replicas(), um
     disco fora do ar baixava o alvo (2 → 1) e as cópias do disco saudável
     passavam a ser "excedentes"."""
-    total = len(STORAGE_VOLUMES)
-    factor = REPLICATION_FACTOR if REPLICATION_FACTOR > 0 else total
-    return max(1, min(factor, total))
+    return max(1, min(_factor(cloud), len(STORAGE_VOLUMES)))
 
 
 def expected_stored_size(plain_size: int, encrypted: bool) -> int:
@@ -348,10 +357,11 @@ def insert_copy_row(db, sha256: str, stored_at: str, volume_path: str) -> None:
     )
 
 
-def ensure_replicas(sha256: str, source_path: Path, db) -> int:
-    """Cria as cópias que faltam para atingir o fator alvo. Retorna quantas criou."""
+def ensure_replicas(sha256: str, source_path: Path, db, cloud: bool = False) -> int:
+    """Cria as cópias que faltam para atingir o fator alvo (cloud=True: o do Cloud).
+    Retorna quantas criou."""
     from database import FileContent, FileContentCopy
-    target = target_replicas()
+    target = target_replicas(cloud=True) if cloud else target_replicas()
     copies = db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha256).all()
     vol_set = {c.volume_path for c in copies}
 
@@ -363,11 +373,11 @@ def ensure_replicas(sha256: str, source_path: Path, db) -> int:
             target_vols.append(vol)
 
     if not target_vols:
-        return
+        return 0
 
     fc = db.get(FileContent, sha256)
     if fc is None:
-        return
+        return 0
     encrypted = bool(fc.encrypted)
     expected = expected_stored_size(fc.size, encrypted)
 
@@ -574,18 +584,26 @@ def rereplicate_all(db, on_progress=None, prefix: str = "") -> tuple[int, int]:
     progresso "Re-replicando: X / Y arquivo(s) (Z%) · bytes" periodicamente."""
     from database import FileContent, FileContentCopy
     from sqlalchemy import func
+    import cloud_replicas
     target = target_replicas()
+    cloud_target = target_replicas(cloud=True)
     degraded_strs = [str(d) for d in _degraded_volumes]
-    underfilled = (
+    # Busca pelo maior alvo (o do Cloud) e filtra cada sha256 pelo alvo dele.
+    candidates = (
         db.query(FileContent.sha256, FileContent.size, func.count(FileContentCopy.id).label("cnt"))
         .outerjoin(FileContentCopy, FileContentCopy.sha256 == FileContent.sha256)
         .group_by(FileContent.sha256, FileContent.size)
-        .having(func.count(FileContentCopy.id) < target)
+        .having(func.count(FileContentCopy.id) < cloud_target)
         .all()
     )
+    cloud = (cloud_replicas.cloud_sha_set(db, [sha for sha, _, cnt in candidates if cnt >= target])
+             if cloud_target > target else set())
+    underfilled = [(sha, size, cnt) for sha, size, cnt in candidates
+                   if cnt < target or sha in cloud]
     replicated = skipped = 0
     # Bytes a copiar: (alvo - cópias atuais) × tamanho — a estimativa do que falta.
-    total_bytes = sum((size or 0) * (target - cnt) for _, size, cnt in underfilled)
+    total_bytes = sum((size or 0) * ((cloud_target if sha in cloud else target) - cnt)
+                      for sha, size, cnt in underfilled)
     log.info(f"[rereplicate-all] {len(underfilled)} arquivo(s) sub-replicado(s) — alvo: {target}"
              f" — ~{fmt_bytes(total_bytes)} a copiar")
     progress = ReplicationProgress("rereplicate-all", len(underfilled), total_bytes, db, on_progress, prefix)
@@ -604,13 +622,48 @@ def rereplicate_all(db, on_progress=None, prefix: str = "") -> tuple[int, int]:
             skipped += 1
             progress.tick(skipped=True)
             continue
-        added = ensure_replicas(sha256, Path(source.stored_at), db)
+        added = ensure_replicas(sha256, Path(source.stored_at), db, cloud=sha256 in cloud)
         replicated += 1
         progress.tick(copies=added, nbytes=(size or 0) * added)
     progress.emit(force_log=True)
     log.info(f"[rereplicate-all] concluído — {replicated} replicado(s), {skipped} pulado(s), "
              f"{progress.copies} cópia(s) criada(s), {fmt_bytes(progress.bytes_done)} copiados")
     return replicated, skipped
+
+
+def trim_copies(db, primary, copies: list, target: int) -> int:
+    """Apaga as cópias legíveis de `primary` (FileContent) além de `target`.
+    Não faz commit e não olha volumes degraded — quem chama decide se pode apagar.
+
+    Só entram na conta as cópias legíveis. As ausentes/truncadas não são tocadas
+    aqui (nem arquivo nem linha) — são problema de integridade, não de excesso, e
+    apagá-las esconderia a evidência do validate-integrity."""
+    expected = expected_stored_size(primary.size, primary.encrypted)
+    readable = []
+    for c in copies:
+        try:
+            if os.stat(c.stored_at).st_size == expected:
+                readable.append(c)
+        except OSError:
+            pass
+    if len(readable) <= target:
+        return 0
+
+    primary_path = primary.stored_at
+    readable.sort(key=lambda c: c.stored_at != primary_path)
+    kept = readable[:target]
+    removed = 0
+    for copy in readable[target:]:
+        try:
+            Path(copy.stored_at).unlink(missing_ok=True)
+        except OSError as e:
+            log.warning(f"[cleanup-excess] Falha ao deletar {copy.stored_at}: {e}")
+        db.delete(copy)
+        removed += 1
+    # Garantir que FileContent.stored_at aponta para uma cópia ainda existente
+    if primary.stored_at not in {c.stored_at for c in kept}:
+        primary.stored_at = kept[0].stored_at
+    return removed
 
 
 def cleanup_excess_copies(db) -> int:
@@ -630,7 +683,9 @@ def cleanup_excess_copies(db) -> int:
             f"{', '.join(sorted(str(v) for v in _degraded_volumes))}"
         )
         return 0
+    import cloud_replicas
     target = configured_replicas()
+    cloud_target = configured_replicas(cloud=True)
     overfilled = (
         db.query(FileContent.sha256, func.count(FileContentCopy.id).label("cnt"))
         .outerjoin(FileContentCopy, FileContentCopy.sha256 == FileContent.sha256)
@@ -638,8 +693,14 @@ def cleanup_excess_copies(db) -> int:
         .having(func.count(FileContentCopy.id) > target)
         .all()
     )
+    # Conteúdo do Cloud tem alvo próprio: as cópias dele até cloud_target não são excedentes.
+    cloud = (cloud_replicas.cloud_sha_set(db, [sha for sha, _ in overfilled])
+             if cloud_target > target else set())
+    overfilled = [(sha, cnt) for sha, cnt in overfilled
+                  if cnt > (cloud_target if sha in cloud else target)]
     removed = 0
-    log.info(f"[cleanup-excess] {len(overfilled)} arquivo(s) com cópias excedentes — alvo: {target}")
+    log.info(f"[cleanup-excess] {len(overfilled)} arquivo(s) com cópias excedentes — alvo: {target}"
+             + (f" (Cloud: {cloud_target})" if cloud_target > target else ""))
     sha256_list = [sha256 for sha256, _ in overfilled]
     fc_map = {
         fc.sha256: fc
@@ -652,34 +713,8 @@ def cleanup_excess_copies(db) -> int:
         primary = fc_map.get(sha256)
         if primary is None:
             continue
-        primary_path = primary.stored_at
-        expected = expected_stored_size(primary.size, primary.encrypted)
-
-        # Só entram na conta as cópias legíveis. As ausentes/truncadas não são
-        # tocadas aqui (nem arquivo nem linha) — são problema de integridade, não
-        # de excesso, e apagá-las esconderia a evidência do validate-integrity.
-        readable = []
-        for c in copies_map.get(sha256, []):
-            try:
-                if os.stat(c.stored_at).st_size == expected:
-                    readable.append(c)
-            except OSError:
-                pass
-        if len(readable) <= target:
-            continue
-
-        readable.sort(key=lambda c: c.stored_at != primary_path)
-        kept = readable[:target]
-        for copy in readable[target:]:
-            try:
-                Path(copy.stored_at).unlink(missing_ok=True)
-            except OSError as e:
-                log.warning(f"[cleanup-excess] Falha ao deletar {copy.stored_at}: {e}")
-            db.delete(copy)
-            removed += 1
-        # Garantir que FileContent.stored_at aponta para uma cópia ainda existente
-        if primary.stored_at not in {c.stored_at for c in kept}:
-            primary.stored_at = kept[0].stored_at
+        removed += trim_copies(db, primary, copies_map.get(sha256, []),
+                               cloud_target if sha256 in cloud else target)
     if removed:
         db.commit()
     log.info(f"[cleanup-excess] concluído — {removed} cópia(s) excedente(s) removida(s)")
@@ -942,17 +977,23 @@ def rereplicate_to_volume(v: Path) -> None:
 
         shas_on_v = {r.sha256 for r in db.query(FileContentCopy.sha256)
                      .filter(FileContentCopy.volume_path == str(v)).all()}
+        import cloud_replicas
         t = target_replicas()
-        underfilled = [
-            (sha256, size) for sha256, size, _ in (
+        t_cloud = target_replicas(cloud=True)
+        candidates = [
+            (sha256, size, cnt) for sha256, size, cnt in (
                 db.query(FileContent.sha256, FileContent.size, func.count(FileContentCopy.id).label("cnt"))
                 .outerjoin(FileContentCopy, FileContentCopy.sha256 == FileContent.sha256)
                 .group_by(FileContent.sha256, FileContent.size)
-                .having(func.count(FileContentCopy.id) < t)
+                .having(func.count(FileContentCopy.id) < t_cloud)
                 .all()
             )
             if sha256 not in shas_on_v
         ]
+        cloud = (cloud_replicas.cloud_sha_set(db, [sha for sha, _, cnt in candidates if cnt >= t])
+                 if t_cloud > t else set())
+        underfilled = [(sha256, size) for sha256, size, cnt in candidates
+                       if cnt < t or sha256 in cloud]
         count = 0
         skipped = 0
         aborted = None

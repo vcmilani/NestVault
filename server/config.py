@@ -82,6 +82,7 @@ GROUP_LABELS = {
     "db_backup": "Backup do banco",
     "digest":    "Digest diário",
     "rclone":    "rclone",
+    "cloud":     "Cloud",
     "photos":    "Fotos",
     "alerts":    "Alertas",
     "smart":     "Saúde dos discos (SMART)",
@@ -211,6 +212,14 @@ SCHEMA: list[Field] = [
     Field("rclone.config_path", "RCLONE_CONFIG", "str", "",
           "Caminho do rclone.conf",
           "Repassado ao binário rclone via RCLONE_CONFIG. Vazio usa o padrão do rclone."),
+
+    # -- cloud (pastas do servidor do /cloud) --
+    Field("cloud.replication_factor", None, "int", 0,
+          "Fator de replicação do Cloud",
+          "Nº de cópias dos arquivos das pastas do servidor (/cloud); 0 = igual ao fator do storage. "
+          "Nunca fica abaixo do fator do storage. Um arquivo que sai do Cloud e existe em algum "
+          "backup volta ao fator do storage.",
+          min=0),
 
     # -- photos (lidos a cada ciclo do indexador: valem sem reinício) --
     Field("photos.indexing_enabled", None, "bool", True,
@@ -559,6 +568,7 @@ def apply_runtime() -> None:
     import daily_digest
 
     storage.REPLICATION_FACTOR = get("storage.replication_factor")
+    storage.CLOUD_REPLICATION_FACTOR = get("cloud.replication_factor")
     storage.STORAGE_FALLBACK_THRESHOLD_GB = get("storage.fallback_threshold_gb")
     storage.SSD_CACHE_MAX_GB = get("ssd_cache.max_gb")
     storage.SSD_CACHE_IDLE_DELAY_MINUTES = get("ssd_cache.idle_delay_minutes")

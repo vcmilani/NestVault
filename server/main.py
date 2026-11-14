@@ -1,5 +1,5 @@
 """
-NestVault  v10.2.2
+NestVault  v10.3.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -170,6 +170,7 @@ from database import (
 import config
 import crypto
 import quota
+import cloud_replicas
 import smart
 import stale_alerts
 import storage
@@ -217,6 +218,9 @@ _volume_health_monitor   = storage.volume_health_monitor
 _volumes_with_free_space = storage.volumes_with_free_space
 _ssd_cache_write_dir     = storage.ssd_cache_write_dir
 _ssd_content_path        = storage.ssd_content_path
+# As tarefas em background das réplicas do Cloud abrem sessão por aqui (os testes
+# trocam main.SessionLocal pelo banco deles).
+cloud_replicas.session_factory = lambda: SessionLocal()
 
 
 _ssd_move_lock = threading.Lock()
@@ -606,7 +610,7 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="10.2.2", lifespan=lifespan)
+app = FastAPI(title="NestVault", version="10.3.0", lifespan=lifespan)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 app.include_router(cloud_ui_router, prefix="/cloud", tags=["cloud"])
 
@@ -758,6 +762,7 @@ class SettingsUpdate(BaseModel):
     de cada campo vive no SCHEMA de config.py, fonte única também para a tela.
     """
     storage:   Optional[dict] = None
+    cloud:     Optional[dict] = None
     ssd_cache: Optional[dict] = None
     database:  Optional[dict] = None
     db_backup: Optional[dict] = None
@@ -3525,6 +3530,10 @@ def delete_backup(label: str, background_tasks: BackgroundTasks, db: Session = D
     version_ids = [
         r.id for r in db.query(BackupVersion.id).filter(BackupVersion.backup_label == label).all()
     ]
+    # Pasta do servidor inteira saindo do Cloud: o que existe em algum backup volta
+    # ao fator do storage (cloud_replicas). Lido antes de apagar os VersionFile.
+    if b.kind == SERVER_KIND:
+        background_tasks.add_task(cloud_replicas.apply_bg, cloud_replicas.label_shas(db, label))
     if not is_admin(user):
         now = datetime.now()
         n = _trash_versions(db, version_ids, user, now)
@@ -3574,6 +3583,8 @@ def update_settings(req: SettingsUpdate, db: Session = Depends(get_db)):
         log.info(f"[settings] {len(changed)} parametro(s) alterado(s): {', '.join(sorted(changed))}")
         if any(k.startswith("photos.") for k in changed):
             cloud_media.indexer.wake()  # reavalia pausa/ritmo já, sem esperar o ciclo de 10 min
+        if "cloud.replication_factor" in changed:
+            cloud_replicas.start_reconcile()  # cria/remove as cópias já (job na Atividade)
     return config.public()
 
 
@@ -4159,8 +4170,8 @@ def _upsert_version_file_sync(version_id: int, original_path: str, sha256: str,
     return vf.id
 
 
-def _finish_replicas_sync(sha256: str, replica_source: Path, db: Session) -> None:
-    _ensure_replicas(sha256, replica_source, db)
+def _finish_replicas_sync(sha256: str, replica_source: Path, db: Session, cloud: bool = False) -> None:
+    _ensure_replicas(sha256, replica_source, db, cloud=cloud)
     db.commit()
 
 
@@ -4318,10 +4329,13 @@ async def cloud_drive_upload(
 
     def _register():
         d = cloud_drive.get(db, label, user)
-        return cloud_drive.put_file(db, d, rel, sha256, mtime or time.time(), user)
-    vf_id = await asyncio.to_thread(_register)
+        return cloud_drive.put_file(db, d, rel, sha256, mtime or time.time(), user), d.touched
+    vf_id, touched = await asyncio.to_thread(_register)
     if replica_source is not None:
-        await asyncio.to_thread(_finish_replicas_sync, sha256, replica_source, db)
+        await asyncio.to_thread(_finish_replicas_sync, sha256, replica_source, db, True)
+    # O conteúdo que já existia (dedup) sobe para o fator do Cloud; o que foi
+    # substituído e saiu do Cloud volta ao fator do backup, se existir em algum.
+    await asyncio.to_thread(cloud_replicas.apply_bg, touched)
     if new_for_quota:
         await asyncio.to_thread(quota.commit_new_content, db, user, size)
 
@@ -4773,7 +4787,8 @@ def list_trash(db: Session = Depends(get_db)):
 
 
 @app.post("/maintenance/trash/restore", dependencies=[Depends(require_admin)])
-def restore_trash(req: TrashRestoreRequest, db: Session = Depends(get_db)):
+def restore_trash(req: TrashRestoreRequest, background_tasks: BackgroundTasks,
+                  db: Session = Depends(get_db)):
     """Devolve um label (com todas as versões dele na lixeira) ou uma versão."""
     b = db.query(BackupID).filter(BackupID.label == req.label).first()
     if not b:
@@ -4801,6 +4816,8 @@ def restore_trash(req: TrashRestoreRequest, db: Session = Depends(get_db)):
     if label_restored:
         b.status, b.trashed_at, b.trashed_by = "active", None, None
     db.commit()
+    if b.kind == SERVER_KIND:
+        background_tasks.add_task(cloud_replicas.apply_bg, cloud_replicas.label_shas(db, req.label))
     invalidate_activity()
     log.info(f"[trash] Restaurado: label [{req.label}]"
              + (f" (label reativado)" if label_restored else "")
