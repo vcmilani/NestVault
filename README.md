@@ -358,6 +358,13 @@ Depois disso: confira os valores em `/settings`, remova as linhas `Environment=`
 
 Os parâmetros marcados com **↻** só passam a valer depois de reiniciar o servidor (volumes, engine do banco e chave de criptografia são fixados no import). Os demais são aplicados na hora ao salvar, inclusive o reagendamento dos jobs cron.
 
+**`server`** — exposição na rede
+
+| Chave | Tipo | Padrão | ↻ | Descrição |
+|---|---|---|:-:|---|
+| `trusted_proxies` | lista | `["127.0.0.1", "::1"]` | | IPs de onde `X-Forwarded-Proto` é aceito (reverse proxy com HTTPS). Só esses marcam o cookie de sessão como `secure` |
+| `expose_docs` | bool | `false` | ↻ | Liga `/docs`, `/redoc` e `/openapi.json` (sem login). Fechados por padrão |
+
 **`storage`** — armazenamento e replicação
 
 | Chave | Tipo | Padrão | ↻ | Descrição |
@@ -366,6 +373,7 @@ Os parâmetros marcados com **↻** só passam a valer depois de reiniciar o ser
 | `replication_factor` | int | `1` | | `1` = sem replicação; `2` = espelha em 2 volumes; `0` = todos os volumes saudáveis |
 | `fallback_threshold_gb` | float | `10.0` | | Piso de espaço livre por disco antes de passar para o próximo da lista |
 | `trash_retention_days` | int | `14` | | Quantos dias as exclusões de usuários comuns ficam na [lixeira](#lixeira) antes de a limpeza noturna apagá-las (1–365) |
+| `max_upload_gb` | int | `0` | | Teto por upload: um arquivo maior é recusado (`413`) antes de ocupar disco. `0` = sem teto global; o espaço livre do volume e a cota do usuário continuam valendo |
 | `encryption_enabled` | bool | `false` | ↻ | Criptografia AES-256-GCM em repouso. Omitir se o disco já é criptografado (LUKS, ZFS, FileVault) |
 | `encryption_key` | str 🔒 | `""` | ↻ | 32 bytes em Base64. Obrigatória quando `encryption_enabled` é `true` |
 
@@ -474,6 +482,18 @@ Os campos marcados com 🔒 nunca são devolvidos em texto puro pelo `GET /api/s
 ```bash
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
+
+#### Expondo na rede: use HTTPS
+
+A API Key vai no header `X-API-Key` e o conteúdo dos arquivos no body: em `http://` tudo isso cruza a rede em claro. Fora do `localhost`, coloque um reverse proxy com TLS na frente (Caddy resolve o certificado sozinho):
+
+```caddyfile
+backup.exemplo.com {
+    reverse_proxy 127.0.0.1:8000
+}
+```
+
+Com nginx, repasse `X-Forwarded-Proto` (`proxy_set_header X-Forwarded-Proto $scheme;`). O servidor só aceita esse header de IPs listados em `server.trusted_proxies` (padrão: `127.0.0.1`, `::1`) — é o que marca o cookie de sessão do `/cloud` como `secure`. No cliente, use `--server https://backup.exemplo.com`; para certificado próprio, aponte `REQUESTS_CA_BUNDLE` para a CA.
 
 ### 4. Rodar como serviço (systemd)
 
@@ -612,7 +632,9 @@ nestvault backup ~/documentos \
 | `--server` | | URL do servidor (padrão: `http://localhost:8000`) |
 | `--prefix` | | Prefixo do path no servidor |
 | `--client` | | Nome do cliente — padrão é o hostname da máquina |
-| `--exclude` | | Subpastas a ignorar — aceita múltiplos valores |
+| `--exclude` | | Nomes ou caminhos relativos a ignorar; aceita curingas (`*.tmp`, `cache`, `docs/build`) e pode repetir a opção |
+| `--follow-symlinks` | | Inclui o conteúdo apontado por symlinks de arquivo (por padrão são ignorados — um link para fora da pasta subiria como conteúdo do backup) |
+| `--one-file-system` | | Não entra em pontos de montagem (discos externos, shares de rede, pastas de nuvem) |
 | `--workers` | | Uploads paralelos (padrão: `4`) |
 | `--hash-workers` | | Processos paralelos para cálculo de SHA-256 (padrão: `os.cpu_count()`) |
 | `--batch-size` | | Arquivos por request no `/check/batch` (padrão: `100`) |
@@ -620,6 +642,8 @@ nestvault backup ~/documentos \
 | `--full-rescan-days` | | Idade máxima (dias) da última versão `done` para usar o Smart Skip — veja [Smart Skip](#smart-skip) (padrão: `7`) |
 | `--dry-run` | | Apenas verifica, não envia |
 | `--verbose` | | Logs detalhados (arquivos cacheados e ignorados) |
+
+**Código de saída:** `0` quando tudo foi enviado; `1` quando a versão terminou `failed` (algum arquivo falhou, ou o Smart Skip não conseguiu herdar a versão anterior) — é o que o cron e o systemd veem.
 
 **Resumo ao final do backup:**
 
@@ -860,12 +884,12 @@ nestvault restore /tmp/restore \
 | `--version` | ✅ | Chave da versão (obtida via `versions`) |
 | `--server` | | URL do servidor |
 | `--prefix` | | Restaurar apenas arquivos com esse prefixo |
-| `--exclude` | | Nomes de diretório a ignorar — aceita múltiplos valores |
-| `--overwrite` | | Sobrescreve arquivos existentes |
+| `--exclude` | | Nomes de diretório (ou curingas) a ignorar — pode repetir a opção |
+| `--overwrite` | | Sobrescreve arquivos existentes — só depois de o download ser conferido pelo SHA-256 (o arquivo atual fica intacto se a rede cair ou o hash não bater) |
 | `--workers` | | Downloads paralelos (padrão: `4`) |
 | `--dry-run` | | Apenas lista, não baixa |
 
-A integridade de cada arquivo é validada após o download pelo SHA-256.
+A integridade de cada arquivo é validada após o download pelo SHA-256: o conteúdo é baixado num `.nvpart` ao lado do destino e só troca de lugar depois de conferido, com o `mtime` original restaurado. Código de saída `1` se algum arquivo falhou.
 
 ---
 
@@ -893,6 +917,7 @@ nestvault cleanup \
 | `--all` | Limpa todos os labels do servidor |
 | `--keep` | Quantas versões manter por label (padrão: `5`) |
 | `--server` | URL do servidor |
+| `-y`, `--yes` | Sem confirmação interativa — obrigatório fora de um terminal (cron); sem ela o comando sai com código `2` |
 
 Exemplo de saída com `--all`:
 
@@ -1056,30 +1081,18 @@ Iniciando criptografia de arquivos existentes...
 
 ### Limpeza automática por espaço em disco
 
-O servidor verifica automaticamente o espaço livre **ao finalizar cada backup** (status → `done`). Se o espaço livre no disco estiver abaixo de **5%**, versões antigas são apagadas até que o espaço seja normalizado. Essa verificação ocorre **em background** — o cliente recebe a confirmação do backup imediatamente, sem esperar o scan de disco.
+Quando os volumes ficam abaixo de `storage.fallback_threshold_gb` (ao finalizar um backup ou ao receber um upload), o servidor libera o que **não é histórico**: as versões `incomplete` e `failed` dos labels do **dono do backup** em questão. Nada de outros usuários é tocado, e nenhuma versão `done` é apagada por pressão de disco — desde a v10.4.0, que removeu o comportamento antigo (apagar as versões `done` antigas de todos os labels, sem lixeira: uma chave de cliente comprometida enchia o disco e destruía o histórico dos outros).
 
-Da mesma forma, quando o admin exclui um label (`DELETE /backups/{label}`) ou uma versão (`DELETE /backups/{label}/versions/{key}`), a remoção dos registros no banco é imediata, mas a limpeza dos arquivos físicos órfãos ocorre em background. Exclusões feitas por usuários comuns vão para a [lixeira](#lixeira).
+Quando o admin exclui um label (`DELETE /backups/{label}`) ou uma versão, a remoção dos registros no banco é imediata e a limpeza dos arquivos físicos órfãos ocorre em background. Exclusões feitas por usuários comuns vão para a [lixeira](#lixeira).
 
 **Comportamento:**
 
-- Com múltiplos discos (`storage.dirs`), verifica o **menor** percentual livre entre todos os volumes — o cleanup dispara se **qualquer** disco estiver abaixo de 5%
-- Com um único volume em `storage.dirs`, verifica o espaço do filesystem onde o storage está montado
-- Apaga as versões mais antigas primeiro, distribuindo entre todos os labels
-- **Nunca apaga a versão mais recente** de cada label — cada label sempre terá ao menos 1 versão
-- Após cada deleção, reavalia o espaço e para assim que atingir 5%
-- Registra no terminal do servidor cada versão apagada e o espaço livre atualizado
+- Ficam protegidas mesmo entre `incomplete`/`failed`: a versão em escrita, checkpoints resumíveis do rclone, a `failed` mais recente de cada label (diagnóstico) e `incomplete` com arquivo gravado nas últimas 6 h
+- Se o espaço continuar abaixo do limiar, o upload recebe **`507 Insufficient Storage`** e o admin é avisado no Telegram (no máximo a cada 30 min) — a decisão de apagar histórico é do admin, em **Manutenção** (limpeza por data ou quantidade, lixeira) ou adicionando disco
+- O body de cada upload também tem teto: `Content-Length` acima do espaço livre do volume (ou de `storage.max_upload_gb`) é recusado antes de ler o arquivo
+- Limpezas concorrentes são serializadas; cada uma aparece na **Atividade**
 
-**Logs de exemplo (com dois discos):**
-
-```
-[auto-cleanup] Espaço livre mínimo: 3.2% — abaixo de 5%, iniciando limpeza...
-[auto-cleanup] Removida notebook-joao/2026-03-01T02:00:00 — 4 arquivo(s) do storage — livre mín: 3.8%
-[auto-cleanup] Removida servidor-web/2026-03-05T03:00:00 — 2 arquivo(s) do storage — livre mín: 4.3%
-[auto-cleanup] Removida notebook-joao/2026-03-08T02:00:00 — 7 arquivo(s) do storage — livre mín: 5.1%
-[auto-cleanup] Espaço normalizado (5.1%), encerrando.
-```
-
-> Essa limpeza é um mecanismo de segurança para evitar disco cheio. Para controle previsível de retenção, use o comando [`cleanup`](#cleanup) agendado via cron.
+> Para controle previsível de retenção, use o comando [`cleanup`](#cleanup) agendado via cron.
 
 ---
 
@@ -1100,7 +1113,7 @@ Da mesma forma, quando o admin exclui um label (`DELETE /backups/{label}`) ou um
 0 3 * * 0 BACKUP_API_KEY=sua-chave \
   /home/usuario/client/.venv/bin/python \
   /home/usuario/client/nestvault.py cleanup \
-  --all --keep 10 \
+  --all --keep 10 --yes \
   --server http://192.168.1.100:8000 \
   >> /var/log/backup-cleanup.log 2>&1
 ```
@@ -1114,14 +1127,18 @@ A suíte cobre helpers internos (unitários) e todos os endpoints da API (integr
 ### Instalar dependências de desenvolvimento
 
 ```bash
-pip install pytest pytest-asyncio httpx
+pip install -r requirements-dev.txt     # servidor + cliente + pytest
 ```
 
 ### Executar todos os testes
 
+Da raiz do repositório (o `pyproject.toml` já aponta `server/`, `tests/` e `client/`):
+
 ```bash
-pytest tests/ -v
+pytest -q
 ```
+
+No GitHub, o workflow **Tests** roda a suíte em todo push e pull request, e o workflow de build (disparado por tags `v*`, ex.: `git tag v10.4.0 && git push origin v10.4.0`) só gera os binários depois dela passar e de a tag bater com a versão em `client/nestvault.py` e `server/main.py`. A Release traz `SHA256SUMS` e attestation de proveniência.
 
 ### Executar um módulo específico
 
