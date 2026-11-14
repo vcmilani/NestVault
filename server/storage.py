@@ -56,14 +56,27 @@ class StorageThresholdExceeded(Exception):
 
 # -- Volume health ------------------------------------------------------------
 _degraded_volumes: set[Path] = set()
+# Volumes que saíram de degraded e ainda não foram re-replicados. Antes, o
+# primeiro safe_disk_usage que dava certo (polling da Atividade, stats, /storage/info)
+# tirava o volume do set em silêncio e o volume_health_monitor nunca via a
+# recuperação — rereplicate_to_volume não rodava e o disco voltava com cópias a menos.
+_recovered_volumes: set[Path] = set()
 _deg_lock = threading.Lock()
+
+# Volumes que não devem receber escrita nova (upload, réplica, move SSD → HDD,
+# destino de rebalance) enquanto uma migração de disco os esvazia. Sem isso, o
+# passo 2 da migração apagava da origem arquivos que chegaram depois do snapshot
+# do passo 1 — com fator 1, a única cópia.
+EXCLUDED_VOLUMES: set[str] = set()
 
 
 def safe_disk_usage(v: Path):
     try:
         result = shutil.disk_usage(v)
         with _deg_lock:
-            _degraded_volumes.discard(v)
+            if v in _degraded_volumes:
+                _degraded_volumes.discard(v)
+                _recovered_volumes.add(v)
         return result
     except OSError:
         with _deg_lock:
@@ -75,6 +88,19 @@ def safe_disk_usage(v: Path):
 
 def healthy_volumes() -> list[Path]:
     return [v for v in STORAGE_VOLUMES if v not in _degraded_volumes]
+
+
+def writable_volumes() -> list[Path]:
+    """healthy_volumes() menos os volumes em migração — para escolher destino de escrita."""
+    return [v for v in healthy_volumes() if str(v) not in EXCLUDED_VOLUMES]
+
+
+def drain_recovered_volumes() -> list[Path]:
+    """Volumes que voltaram de degraded desde a última chamada (e esvazia a lista)."""
+    with _deg_lock:
+        recovered = list(_recovered_volumes)
+        _recovered_volumes.clear()
+    return recovered
 
 
 # Amostra por volume em volume_looks_sane(). 32 é barato (32 stat()).
@@ -187,7 +213,7 @@ def expected_stored_size(plain_size: int, encrypted: bool) -> int:
 
 
 def pick_volume() -> Path:
-    hvols_set = set(healthy_volumes())
+    hvols_set = set(writable_volumes())
     if not hvols_set:
         raise RuntimeError("Nenhum volume de storage disponível")
 
@@ -232,7 +258,7 @@ def pick_volume_for_size(size: int, exclude: "set[str]" = frozenset()) -> "Path 
     na hora, mas não para quem já sabe o tamanho e precisa que ele caiba — o
     move SSD → HDD escolhia assim e batia em ENOSPC com arquivos grandes."""
     threshold = STORAGE_FALLBACK_THRESHOLD_GB * 1024 ** 3
-    for vol in healthy_volumes():
+    for vol in writable_volumes():
         if str(vol) in exclude:
             continue
         usage = safe_disk_usage(vol)
@@ -243,7 +269,7 @@ def pick_volume_for_size(size: int, exclude: "set[str]" = frozenset()) -> "Path 
 
 def pick_volume_last_resort() -> Path:
     """Usado apenas quando cleanup não liberou espaço suficiente. Loga CRITICAL."""
-    hvols_set = set(healthy_volumes())
+    hvols_set = set(writable_volumes())
     if not hvols_set:
         raise RuntimeError("Nenhum volume de storage disponível")
     vol = max(hvols_set, key=lambda v: getattr(safe_disk_usage(v), "free", 0))
@@ -297,6 +323,51 @@ class ReplicaSourceCorrupt(Exception):
     """A origem de uma cópia não tem o conteúdo esperado — não deve ser propagada."""
 
 
+def fsync_file(path: Path) -> None:
+    """fsync de um arquivo já fechado: garante os bytes no disco antes do rename
+    que o publica. Sem isso, uma queda de energia (Raspberry Pi em HD USB) podia
+    deixar uma linha commitada apontando para um arquivo vazio ou truncado."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def fsync_dir(path: Path) -> None:
+    """fsync do diretório — persiste o rename/link. Best-effort: nem todo
+    sistema de arquivos ou SO permite abrir diretório para fsync."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def publish_content(tmp: Path, dest: Path) -> bool:
+    """Publica `tmp` (já conferido e sincronizado) em `dest` SEM sobrescrever.
+
+    os.link falha com FileExistsError se `dest` já existe — é o que torna a
+    publicação exclusiva: de dois uploads simultâneos do mesmo sha256 novo, só
+    um publica; o outro recebe False e trata como dedup. Antes, os dois moviam
+    o plaintext para o mesmo caminho e cifravam no lugar — o segundo cifrava o
+    ciphertext do primeiro, a verificação falhava e apagava o arquivo que o
+    primeiro já tinha commitado. Devolve True se publicou (e removeu `tmp`)."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(tmp, dest)
+    except FileExistsError:
+        return False
+    tmp.unlink(missing_ok=True)
+    fsync_dir(dest.parent)
+    return True
+
+
 def copy_verified(src: Path, dest: Path, sha256: str, encrypted: bool,
                   expected_size: int | None = None) -> None:
     """Copia src → dest de forma atômica e conferida.
@@ -327,7 +398,9 @@ def copy_verified(src: Path, dest: Path, sha256: str, encrypted: bool,
             raise ReplicaSourceCorrupt(f"{src}: sha256 da origem não confere")
         if file_sha256(tmp) != src_hash:
             raise OSError(errno.EIO, f"cópia gravada em {dest.parent} não confere com a origem")
+        fsync_file(tmp)
         os.replace(tmp, dest)
+        fsync_dir(dest.parent)
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -366,7 +439,7 @@ def ensure_replicas(sha256: str, source_path: Path, db, cloud: bool = False) -> 
     vol_set = {c.volume_path for c in copies}
 
     target_vols = []
-    for vol in healthy_volumes():
+    for vol in writable_volumes():
         if len(copies) + len(target_vols) >= target:
             break
         if str(vol) not in vol_set:
@@ -453,7 +526,9 @@ def stage_content(src: Path, dest: Path, sha256: str, encrypted: bool,
                 f"{sha256[:8]}… gravado em {dest.parent} não confere após "
                 f"{'cifrar' if encrypted else 'gravar'}"
             )
+        fsync_file(staged)
         os.replace(staged, dest)
+        fsync_dir(dest.parent)
     finally:
         staged.unlink(missing_ok=True)
         src.unlink(missing_ok=True)
@@ -748,7 +823,7 @@ def rebalance_destinations(exclude: set = frozenset()) -> list[Path]:
     na ordem de prioridade declarada em storage.dirs (mesma ordem de STORAGE_VOLUMES)."""
     threshold_bytes = STORAGE_FALLBACK_THRESHOLD_GB * 1024 ** 3
     dests = []
-    for v in healthy_volumes():
+    for v in writable_volumes():
         if v in exclude:
             continue
         usage = safe_disk_usage(v)
@@ -768,17 +843,13 @@ def _pick_rebalance_dest(destinations: list[str], dest_free: dict[str, int], thr
     return None
 
 
-def _remove_rebalance_source_copy(db, copy_id: int, stored_at: str, sha256: str, source_volume: str) -> None:
-    """Apaga a cópia de origem já liberada (copiada para um destino, ou já
-    replicada lá) e realinha FileContent.stored_at se ele apontava para ela."""
+def _remove_rebalance_source_copy(db, copy_id: int, stored_at: str, sha256: str, source_volume: str) -> Path:
+    """Apaga a LINHA da cópia de origem já liberada (copiada para um destino, ou
+    já replicada lá) e realinha FileContent.stored_at se ele apontava para ela.
+    Devolve o caminho do arquivo, que o caller só apaga depois do commit."""
     from database import FileContent, FileContentCopy
-    path = Path(stored_at)
     stale_stored_at = stored_at
     db.query(FileContentCopy).filter(FileContentCopy.id == copy_id).delete(synchronize_session=False)
-    try:
-        path.unlink(missing_ok=True)
-    except OSError as e:
-        log.warning(f"[rebalance] falha ao remover {path}: {e}")
     fc = db.get(FileContent, sha256)
     if fc and fc.stored_at == stale_stored_at:
         alt = (
@@ -789,6 +860,7 @@ def _remove_rebalance_source_copy(db, copy_id: int, stored_at: str, sha256: str,
         )
         if alt:
             fc.stored_at = alt.stored_at
+    return Path(stored_at)
 
 
 _REBALANCE_BATCH = 50
@@ -843,7 +915,7 @@ def rebalance_disks(db, dry_run: bool = False, on_progress=None) -> dict:
             while True:
                 q = (
                     db.query(FileContentCopy.id, FileContentCopy.sha256,
-                             FileContentCopy.stored_at, FileContent.size)
+                             FileContentCopy.stored_at, FileContent.size, FileContent.encrypted)
                     .join(FileContent, FileContent.sha256 == FileContentCopy.sha256)
                     .filter(FileContentCopy.volume_path == source_str)
                 )
@@ -867,18 +939,49 @@ def rebalance_disks(db, dry_run: bool = False, on_progress=None) -> dict:
                 on_progress(f"Origem {source_str}: liberando espaço "
                             f"({fmt_bytes(free)} livres, alvo {fmt_bytes(target_bytes)})")
 
+        # Arquivos de origem já liberados no banco, à espera do commit do lote.
+        # O unlink só acontece depois do commit: antes vinha antes dele, e um
+        # rollback (IntegrityError de réplica concorrente, "database is locked")
+        # devolvia as linhas de origem apontando para arquivos já apagados, com a
+        # cópia nova no destino sem linha nenhuma — com fator 1, conteúdo perdido.
+        pending_unlinks: list[Path] = []
+
+        def _commit_batch() -> None:
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+                pending_unlinks.clear()  # os arquivos de origem continuam íntegros
+                raise
+            for p in pending_unlinks:
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError as e:
+                    log.warning(f"[rebalance] falha ao remover {p}: {e}")
+            pending_unlinks.clear()
+
         for copy in (c for page in _candidate_pages() for c in page):
             size = copy.size
             if free >= target_bytes or not dest_strs:
                 break
             sha256 = copy.sha256
+            encrypted = bool(copy.encrypted)
 
             existing_dest = (
-                db.query(FileContentCopy.volume_path)
+                db.query(FileContentCopy.volume_path, FileContentCopy.stored_at)
                 .filter(FileContentCopy.sha256 == sha256,
                         FileContentCopy.volume_path.in_(dest_strs))
                 .first()
             )
+            # A linha de destino só libera a origem se o arquivo dela estiver
+            # íntegro — uma cópia ausente ou truncada no destino deixaria a
+            # origem (talvez a única cópia real) ser apagada. trim_copies já
+            # conferia; o rebalance confiava só na linha.
+            if existing_dest and not dry_run and not content_matches(
+                    Path(existing_dest.stored_at), sha256, encrypted, encryption_key):
+                log.warning(f"[rebalance] cópia registrada em {existing_dest.volume_path} não confere "
+                            f"para {sha256[:8]}… — recopiando")
+                existing_dest = None
 
             if existing_dest:
                 resolved_dest = existing_dest.volume_path
@@ -895,19 +998,20 @@ def rebalance_disks(db, dry_run: bool = False, on_progress=None) -> dict:
                     continue
                 if not dry_run:
                     dest_path = content_path(sha256, Path(best_dest))
+                    # copy_verified: temporário + rename conferido, e entende
+                    # conteúdo cifrado (o hash direto do arquivo cifrado nunca
+                    # batia com o sha256 — todo rebalance com criptografia pulava).
                     try:
-                        shutil.copy2(str(src_path), str(dest_path))
-                        if file_sha256(dest_path) != sha256:
-                            log.warning(f"[rebalance] SHA-256 inválido após cópia de {sha256[:8]}… "
-                                        f"para {best_dest} — pulando")
-                            dest_path.unlink(missing_ok=True)
-                            src_skipped += 1
-                            continue
-                        db.add(FileContentCopy(sha256=sha256, stored_at=str(dest_path), volume_path=best_dest))
+                        copy_verified(src_path, dest_path, sha256, encrypted)
+                    except ReplicaSourceCorrupt as e:
+                        log.warning(f"[rebalance] origem não confere para {sha256[:8]}… — pulando: {e}")
+                        src_skipped += 1
+                        continue
                     except OSError as e:
                         log.warning(f"[rebalance] falha ao copiar {sha256[:8]}… para {best_dest}: {e}")
                         src_skipped += 1
                         continue
+                    insert_copy_row(db, sha256, str(dest_path), best_dest)
                 dest_free[best_dest] -= size
                 resolved_dest = best_dest
 
@@ -915,10 +1019,11 @@ def rebalance_disks(db, dry_run: bool = False, on_progress=None) -> dict:
                 detail = " (já replicado no destino — apenas liberando a origem)" if existing_dest else ""
                 log.info(f"[rebalance] {copy.stored_at} ({fmt_bytes(size)}, sha256={sha256[:8]}…) "
                          f"{source_str} → {resolved_dest}{detail}")
-                _remove_rebalance_source_copy(db, copy.id, copy.stored_at, sha256, source_str)
+                pending_unlinks.append(
+                    _remove_rebalance_source_copy(db, copy.id, copy.stored_at, sha256, source_str))
                 src_moved += 1
                 if src_moved % _REBALANCE_BATCH == 0:
-                    db.commit()
+                    _commit_batch()
                     if on_progress:
                         on_progress(f"Origem {source_str}: {src_moved} arquivo(s) movido(s) "
                                     f"({fmt_bytes(src_bytes + size)})")
@@ -929,7 +1034,7 @@ def rebalance_disks(db, dry_run: bool = False, on_progress=None) -> dict:
             src_bytes += size
 
         if not dry_run:
-            db.commit()
+            _commit_batch()
 
         moved += src_moved
         total_bytes_moved += src_bytes
@@ -1090,14 +1195,14 @@ def backfill_content_copies() -> None:
                 p = Path(fc.stored_at)
                 vol = str(p.parents[2])
                 try:
-                    db.add(FileContentCopy(sha256=fc.sha256, stored_at=fc.stored_at, volume_path=vol))
-                    db.flush()
+                    with db.begin_nested():
+                        db.add(FileContentCopy(sha256=fc.sha256, stored_at=fc.stored_at, volume_path=vol))
                     count += 1
                 except IntegrityError:
-                    # Upload concorrente já criou a entrada; o rollback desfaz o batch
-                    # atual, mas o NOT EXISTS re-seleciona as linhas na próxima volta.
-                    db.rollback()
-                    break
+                    # Upload concorrente já criou a entrada — o savepoint desfaz só
+                    # esta linha. Antes, o rollback descartava o lote inteiro e o
+                    # `break` deixava o resto do lote para o próximo boot.
+                    continue
             db.commit()
             if len(batch) < _BACKFILL_BATCH:
                 break
@@ -1120,10 +1225,12 @@ async def volume_health_monitor() -> None:
             with _deg_lock:
                 degraded_snapshot = list(_degraded_volumes)
             for v in degraded_snapshot:
-                usage = safe_disk_usage(v)
-                if usage:
-                    log.info(f"[volume] {v} recuperado — iniciando re-replicação")
-                    asyncio.get_running_loop().run_in_executor(None, rereplicate_to_volume, v)
+                safe_disk_usage(v)  # se voltou, entra em _recovered_volumes
+            # Inclui volumes que outro caminho (stats, Atividade, /storage/info)
+            # já viu de volta — antes esses saíam de degraded sem re-replicação.
+            for v in drain_recovered_volumes():
+                log.info(f"[volume] {v} recuperado — iniciando re-replicação")
+                asyncio.get_running_loop().run_in_executor(None, rereplicate_to_volume, v)
         except Exception:
             log.exception("[volume] Erro no monitor de saúde — seguindo para o próximo ciclo")
 
@@ -1197,7 +1304,7 @@ def file_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-# Alias retrocompatível (nome antigo usado pelos workers de SSD cache).
+# Alias retrocompatível (nome antigo usado pelos workers de SSD cache e por testes).
 _file_sha256_raw = file_sha256
 
 
@@ -1382,7 +1489,7 @@ def _choose_ssd_move_dest(move, size: int) -> None:
     current = Path(move.dest_volume)
     threshold = STORAGE_FALLBACK_THRESHOLD_GB * 1024 ** 3
     usage = safe_disk_usage(current)
-    if usage and usage.free - size > threshold:
+    if usage and usage.free - size > threshold and move.dest_volume not in EXCLUDED_VOLUMES:
         return
     new_vol = pick_volume_for_size(size, exclude={move.dest_volume})
     if new_vol is None:
@@ -1423,18 +1530,23 @@ def process_ssd_pending_moves(db) -> tuple[int, list[str]]:
             dest_path = Path(move.dest_path)
             dest_volume = Path(move.dest_volume)
             try:
-                dest_path.parent.mkdir(parents=True, exist_ok=True)
-                ssd_hash = _copy_with_sha256(ssd_path, dest_path)
-                hdd_hash = _file_sha256_raw(dest_path)
-                if ssd_hash != hdd_hash:
-                    dest_path.unlink(missing_ok=True)
+                fc = db.query(FileContent).filter(FileContent.sha256 == move.sha256).first()
+                encrypted = bool(fc.encrypted) if fc else False
+                expected = expected_stored_size(fc.size, encrypted) if fc else None
+                # copy_verified grava num temporário e só renomeia depois de
+                # conferir. Antes era cópia direta no caminho final: um ENOSPC no
+                # meio deixava arquivo parcial lá — e o unlink de erro apagava uma
+                # réplica que ensure_replicas podia já ter registrado nesse caminho
+                # durante um dedup.
+                try:
+                    copy_verified(ssd_path, dest_path, move.sha256, encrypted, expected)
+                except ReplicaSourceCorrupt as e:
                     move.retry_count += 1
-                    log.warning(f"[ssd-cache] {move.sha256[:8]}… cópia corrompida no HDD — retry {move.retry_count}")
+                    log.warning(f"[ssd-cache] {move.sha256[:8]}… cópia no SSD não confere ({e}) — retry {move.retry_count}")
                     if move.retry_count >= MAX_SSD_MOVE_RETRIES:
-                        _park_ssd_move(move, "cópia no HDD não confere (hash)")
+                        _park_ssd_move(move, "cópia no SSD não confere (hash)")
                     db.commit()
                     break
-                fc = db.query(FileContent).filter(FileContent.sha256 == move.sha256).first()
                 if fc:
                     fc.stored_at = str(dest_path)
                 ssd_copy = (db.query(FileContentCopy)
@@ -1521,7 +1633,6 @@ def process_ssd_pending_moves(db) -> tuple[int, list[str]]:
                          f"por tentativa anterior ({dest_path})")
                 break
             except OSError as e:
-                dest_path.unlink(missing_ok=True)
                 if e.errno == errno.ENOSPC and not _redirected:
                     new_vol = pick_volume_for_size(size, exclude={move.dest_volume})
                     if new_vol:

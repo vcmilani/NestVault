@@ -1200,26 +1200,13 @@ class StatsResponse(BaseModel):
 _content_path = storage.content_path
 
 
-def _verify_stored_file(sha256: str, dest: Path, encrypted: bool) -> None:
-    h = hashlib.sha256()
-    try:
-        if encrypted:
-            for chunk in crypto.decrypt_chunks(dest, storage.encryption_key):
-                h.update(chunk)
-        else:
-            with open(dest, "rb") as f:
-                while True:
-                    chunk = f.read(1 << 20)
-                    if not chunk:
-                        break
-                    h.update(chunk)
-    except Exception as exc:
-        dest.unlink(missing_ok=True)
-        raise HTTPException(500, f"Falha ao verificar arquivo no disco: {exc}") from exc
-
-    if h.hexdigest() != sha256:
-        dest.unlink(missing_ok=True)
-        raise HTTPException(500, "Corrupção detectada: sha256 do disco não confere com o esperado")
+def _verify_stored_file(sha256: str, path: Path, encrypted: bool) -> None:
+    """Confere que `path` (um temporário ainda não publicado — quem chama o apaga
+    em erro) decifra e re-hasheia para `sha256`. Wrapper fino sobre
+    storage.content_matches; não apaga nada: antes apagava o próprio `dest`, e
+    num upload concorrente isso destruía o arquivo que o outro já tinha commitado."""
+    if not storage.content_matches(path, sha256, encrypted, storage.encryption_key):
+        raise HTTPException(500, "Corrupção detectada: conteúdo gravado não confere com o sha256 esperado")
 
 
 # Implementação canônica em storage.expected_stored_size (usada também pela
@@ -1792,13 +1779,12 @@ def _mark_job_error(db: Session, job_id: int | None, exc: Exception) -> None:
 
 _MIGRATE_BATCH = 50
 
-def _verify_file_sha256(path: Path, expected: str) -> bool:
-    return storage.file_sha256(path) == expected
-
-
 def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
     """Background task: copia conteúdo de um volume de origem para destinos e remove a origem."""
     db = SessionLocal()
+    # Fecha a origem para escrita nova (upload, réplica, move SSD → HDD, destino
+    # de rebalance) enquanto o job roda — ver storage.EXCLUDED_VOLUMES.
+    storage.EXCLUDED_VOLUMES.add(source)
     try:
         mj = db.get(MaintenanceJob, job_id)
 
@@ -1844,7 +1830,13 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
         copied = 0
         already_on_dest = 0
         skipped = 0
-        failed_sha256s: set[str] = set()
+        # Snapshot das cópias de origem cujo destino foi copiado E conferido: só
+        # essas saem da origem na fase 2. Antes, a fase 2 relia todas as linhas do
+        # volume — um arquivo que chegasse durante a fase 1 (upload, réplica, move
+        # SSD → HDD) era apagado sem nunca ter sido copiado; com fator 1, a única
+        # cópia. storage.EXCLUDED_VOLUMES fecha a origem para escrita nova enquanto
+        # o job roda, como segunda trava.
+        migrated_ids: list[int] = []
 
         # -- Fase 1: copiar arquivos ausentes nos destinos -----------------------
         done = 0
@@ -1852,10 +1844,16 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
             for src_copy in page:
                 done += 1
                 sha256 = src_copy.sha256
+                fc = db.get(FileContent, sha256)
+                if fc is None:
+                    skipped += 1
+                    continue
+                encrypted = bool(fc.encrypted)
 
-                # Verifica se já existe cópia em algum destino
+                # Cópia já registrada num destino só vale com o arquivo íntegro —
+                # senão a origem (talvez a única cópia real) seria apagada na fase 2.
                 existing_dest = (
-                    db.query(FileContentCopy.volume_path)
+                    db.query(FileContentCopy.volume_path, FileContentCopy.stored_at)
                     .filter(
                         FileContentCopy.sha256 == sha256,
                         FileContentCopy.volume_path.in_(list(dest_set)),
@@ -1863,53 +1861,45 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
                     .first()
                 )
                 if existing_dest:
-                    already_on_dest += 1
-                    continue
+                    if storage.content_matches(Path(existing_dest.stored_at), sha256, encrypted,
+                                               storage.encryption_key):
+                        already_on_dest += 1
+                        migrated_ids.append(src_copy.id)
+                        continue
+                    log.warning(f"[migrate-disk] cópia registrada em {existing_dest.volume_path} não confere "
+                                f"para {sha256[:8]}… — recopiando")
 
                 # Escolhe destino com mais espaço livre
                 best_dest = max(dest_free, key=lambda d: dest_free[d])
                 if dest_free[best_dest] <= 0:
                     log.warning(f"[migrate-disk] sem espaço em destinos — pulando {sha256[:8]}…")
                     skipped += 1
-                    failed_sha256s.add(sha256)
                     continue
 
                 src_path = Path(src_copy.stored_at)
                 if not src_path.exists():
                     log.warning(f"[migrate-disk] arquivo físico ausente: {src_path} — pulando")
                     skipped += 1
-                    failed_sha256s.add(sha256)
                     continue
 
                 dest_path = _content_path(sha256, Path(best_dest))
+                # copy_verified: temporário + rename conferido, e entende conteúdo
+                # cifrado (o hash direto do arquivo cifrado nunca batia com o sha256
+                # — toda migração com criptografia pulava todos os arquivos).
                 try:
-                    shutil.copy2(str(src_path), str(dest_path))
-                    if not _verify_file_sha256(dest_path, sha256):
-                        log.warning(f"[migrate-disk] SHA-256 inválido após cópia: {sha256[:8]}…")
-                        dest_path.unlink(missing_ok=True)
-                        skipped += 1
-                        failed_sha256s.add(sha256)
-                        continue
-
-                    fc_copy = FileContentCopy(
-                        sha256=sha256,
-                        stored_at=str(dest_path),
-                        volume_path=best_dest,
-                    )
-                    db.add(fc_copy)
-
-                    # Atualiza estimativa de espaço livre
-                    fc = db.get(FileContent, sha256)
-                    if fc:
-                        dest_free[best_dest] = max(0, dest_free[best_dest] - fc.size)
-
-                    copied += 1
-                except Exception as e:
-                    log.warning(f"[migrate-disk] falha ao copiar {sha256[:8]}…: {e}")
-                    dest_path.unlink(missing_ok=True)
+                    storage.copy_verified(src_path, dest_path, sha256, encrypted)
+                except storage.ReplicaSourceCorrupt as e:
+                    log.warning(f"[migrate-disk] origem não confere para {sha256[:8]}… — pulando: {e}")
                     skipped += 1
-                    failed_sha256s.add(sha256)
                     continue
+                except OSError as e:
+                    log.warning(f"[migrate-disk] falha ao copiar {sha256[:8]}…: {e}")
+                    skipped += 1
+                    continue
+                storage.insert_copy_row(db, sha256, str(dest_path), best_dest)
+                dest_free[best_dest] = max(0, dest_free[best_dest] - fc.size)
+                migrated_ids.append(src_copy.id)
+                copied += 1
 
             # Commit e atualiza progresso ao fim de cada página
             db.commit()
@@ -1924,37 +1914,9 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
 
         db.commit()
 
-        # -- Fase 2: remover cópias do disco de origem -------------------------
-        # Segunda passada sobre as mesmas páginas (a fase 1 não removeu nada), de
-        # novo sem carregar tudo. O DELETE é em lote por id; o unlink continua
-        # arquivo a arquivo porque cada um pode falhar por conta própria.
-        removed_physical = 0
-        log.info(f"[migrate-disk] etapa 1/2 concluída — iniciando etapa 2/2: "
-                 f"removendo cópias de {source} ({len(failed_sha256s)} mantida(s) por falha na cópia)")
-        for page in _source_pages():
-            to_delete_ids = []
-            for src_copy in page:
-                if src_copy.sha256 in failed_sha256s:
-                    continue  # Não remove se a cópia de destino falhou
-                to_delete_ids.append(src_copy.id)
-                src_path = Path(src_copy.stored_at)
-                try:
-                    src_path.unlink(missing_ok=True)
-                    removed_physical += 1
-                except OSError as e:
-                    log.warning(f"[migrate-disk] falha ao remover {src_path}: {e}")
-            if to_delete_ids:
-                db.query(FileContentCopy).filter(
-                    FileContentCopy.id.in_(to_delete_ids)
-                ).delete(synchronize_session=False)
-            mj = db.get(MaintenanceJob, job_id)
-            if mj:
-                mj.summary = f"Etapa 2/2 — removendo da origem: {removed_physical} / {total} arquivo(s)"
-                db.commit()
-                invalidate_activity()
-            log.info(f"[migrate-disk] etapa 2/2: {removed_physical}/{total} arquivo(s) removido(s) da origem")
-
-        # Atualiza FileContent.stored_at que ainda apontam para o volume de origem.
+        # Realinha FileContent.stored_at que ainda aponta para a origem ANTES de
+        # apagar qualquer arquivo dela, para nenhum leitor ver um stored_at de
+        # caminho já removido.
         # startswith() (não like(f"{source}%")) escapa % e _ do path automaticamente —
         # sem isso, um volume cujo path contém esses caracteres (comuns em nomes de
         # disco, ex: "disk_1") batia como coringa de LIKE contra outros paths.
@@ -1975,8 +1937,37 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
             )
             if alt:
                 fc.stored_at = alt.stored_at
-
         db.commit()
+
+        # -- Fase 2: remover da origem só o que foi copiado e conferido ----------
+        # Por lote: linha apagada → commit → unlink. O unlink antes do commit
+        # deixava, num rollback, linhas apontando para arquivos já apagados.
+        removed_physical = 0
+        total_migrated = len(migrated_ids)
+        log.info(f"[migrate-disk] etapa 1/2 concluída — iniciando etapa 2/2: "
+                 f"removendo {total_migrated} cópia(s) de {source} ({skipped} mantida(s) por falha na cópia)")
+        for i in range(0, total_migrated, _MIGRATE_BATCH):
+            batch_ids = migrated_ids[i:i + _MIGRATE_BATCH]
+            paths = [
+                r.stored_at for r in
+                db.query(FileContentCopy.stored_at).filter(FileContentCopy.id.in_(batch_ids)).all()
+            ]
+            db.query(FileContentCopy).filter(
+                FileContentCopy.id.in_(batch_ids)
+            ).delete(synchronize_session=False)
+            db.commit()
+            for raw in paths:
+                try:
+                    Path(raw).unlink(missing_ok=True)
+                    removed_physical += 1
+                except OSError as e:
+                    log.warning(f"[migrate-disk] falha ao remover {raw}: {e}")
+            mj = db.get(MaintenanceJob, job_id)
+            if mj:
+                mj.summary = f"Etapa 2/2 — removendo da origem: {removed_physical} / {total_migrated} arquivo(s)"
+                db.commit()
+                invalidate_activity()
+            log.info(f"[migrate-disk] etapa 2/2: {removed_physical}/{total_migrated} arquivo(s) removido(s) da origem")
 
         summary = (
             f"{copied} copiado(s), {already_on_dest} já existiam no destino, "
@@ -1997,6 +1988,7 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
         _mark_job_error(db, job_id, e)
         raise
     finally:
+        storage.EXCLUDED_VOLUMES.discard(source)
         db.close()
 
 
@@ -3959,6 +3951,11 @@ def _bg_ensure_replicas_batch(sha256s: list[str]) -> None:
                     continue
                 _ensure_replicas(sha, Path(stored_at), db)
                 attempted += 1
+                # Commit por arquivo: o INSERT da primeira cópia abria a transação
+                # de escrita e o lock do SQLite ficava preso durante as cópias
+                # seguintes do bloco (até 100 arquivos) — uploads caíam em
+                # "database is locked", e um crash deixava cópias sem linha.
+                db.commit()
             db.commit()
         # Cada cópia criada já é logada por ensure_replicas; aqui só o fechamento
         # do lote, e só quando houve trabalho (o caso comum é tudo já replicado).
@@ -4066,25 +4063,51 @@ def _store_new_content(
     se usou SSD cache ou se um upload concorrente já venceu)."""
     use_ssd = ssd_dir is not None
     dest = _ssd_content_path(sha256) if use_ssd else _content_path(sha256, volume)
-    shutil.move(str(tmp_path), str(dest))
-    if storage.ENCRYPTION_ENABLED:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    encrypted = storage.ENCRYPTION_ENABLED
+    # O arquivo final é preparado num temporário e publicado com
+    # storage.publish_content (os.link: falha se `dest` já existe). Antes, o
+    # plaintext ia direto para `dest` e era cifrado no lugar: dois uploads
+    # simultâneos do mesmo sha256 novo cifravam um por cima do outro, a
+    # verificação do segundo falhava e apagava o arquivo que o primeiro já tinha
+    # commitado — e, no meio, leitores viam plaintext rotulado como cifrado.
+    if encrypted:
         log.info(f"[upload] cifrando {original_path!r} ({size / 1024 / 1024:.2f} MB) — sha256={sha256[:8]}…")
         _fd, _tmp_enc = tempfile.mkstemp(dir=dest.parent, prefix="_enc_")
         os.close(_fd)
-        tmp_enc = Path(_tmp_enc)
+        tmp_final = Path(_tmp_enc)
         try:
-            crypto.encrypt_stream(dest, tmp_enc, storage.encryption_key)
-            shutil.move(str(tmp_enc), str(dest))
-            _verify_stored_file(sha256, dest, encrypted=True)
-            log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — nova cifrada sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
+            crypto.encrypt_stream(tmp_path, tmp_final, storage.encryption_key)
+            _verify_stored_file(sha256, tmp_final, encrypted=True)
         except Exception:
-            tmp_enc.unlink(missing_ok=True)
-            dest.unlink(missing_ok=True)
+            tmp_final.unlink(missing_ok=True)
             raise
+        finally:
+            tmp_path.unlink(missing_ok=True)
     else:
-        log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — nova sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
-    fc = FileContent(sha256=sha256, stored_at=str(dest), size=size,
-                     encrypted=storage.ENCRYPTION_ENABLED)
+        tmp_final = tmp_path  # já está no volume de destino (ver _stream_request_to_disk)
+    try:
+        storage.fsync_file(tmp_final)
+        published = storage.publish_content(tmp_final, dest)
+    except Exception:
+        tmp_final.unlink(missing_ok=True)
+        raise
+    if not published:
+        winner = _wait_concurrent_content(sha256, db)
+        if winner is not None:
+            tmp_final.unlink(missing_ok=True)
+            return winner, None
+        # Ninguém registrou `dest` (o vencedor caiu entre publicar e commitar):
+        # adota o arquivo se ele confere; senão o substitui pelo nosso.
+        if storage.content_matches(dest, sha256, encrypted, storage.encryption_key):
+            tmp_final.unlink(missing_ok=True)
+            log.warning(f"[upload] {sha256[:8]}… publicado por upload concorrente que não registrou — adotando o arquivo")
+        else:
+            os.replace(tmp_final, dest)
+            log.warning(f"[upload] {sha256[:8]}… arquivo órfão em {dest} não confere — substituído")
+    log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — nova{' cifrada' if encrypted else ''} "
+             f"sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
+    fc = FileContent(sha256=sha256, stored_at=str(dest), size=size, encrypted=encrypted)
     try:
         db.add(fc)
         if use_ssd:
@@ -4121,6 +4144,21 @@ def _store_new_content(
     # _ensure_replicas é chamado APÓS db.commit() em upload_file para não manter
     # o write lock do SQLite durante as cópias de arquivo para volumes réplica.
     return fc, (dest if not use_ssd else None)
+
+
+def _wait_concurrent_content(sha256: str, db: Session) -> Optional[FileContent]:
+    """`dest` já existia na publicação: um upload concorrente do mesmo sha256
+    chegou primeiro. Ele publica e só depois commita, então espera a linha dele
+    aparecer (até 5 s) e a devolve — as réplicas são dele. None se ela não vem:
+    o vencedor caiu entre publicar e commitar, e o caller adota o arquivo."""
+    for _ in range(50):
+        db.rollback()  # fecha a transação de leitura: a próxima query vê o commit do vencedor
+        fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+        if fc is not None:
+            log.info(f"[upload] {sha256[:8]}… upload concorrente venceu — dedup")
+            return fc
+        time.sleep(0.1)
+    return None
 
 
 def _register_existing_content_sync(sha256: str, user: User, db: Session) -> None:
@@ -4724,18 +4762,15 @@ def purge_quarantine(db: Session = Depends(get_db)):
         return {"purged": 0, "versions_failed": 0}
 
     affected_ids: set[int] = set()
+    purge_paths: list[str] = []  # apagados só depois do commit (um rollback não pode perder arquivo)
     for sha in shas:
         affected_ids.update(
             r[0] for r in db.query(VersionFile.version_id)
             .filter(VersionFile.sha256 == sha).distinct().all()
         )
-        for c in db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha).all():
-            try:
-                Path(c.stored_at).unlink()
-            except FileNotFoundError:
-                pass
-            except OSError as e:
-                log.warning(f"[quarantine-purge] não foi possível remover {c.stored_at}: {e}")
+        purge_paths.extend(
+            c.stored_at for c in db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha).all()
+        )
         db.query(VersionFile).filter(VersionFile.sha256 == sha).delete(synchronize_session=False)
         db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha).delete(synchronize_session=False)
         db.query(FileContent).filter(FileContent.sha256 == sha).delete(synchronize_session=False)
@@ -4750,6 +4785,14 @@ def purge_quarantine(db: Session = Depends(get_db)):
         v.finished_at = datetime.now()
         v.integrity_status = None
     db.commit()
+
+    for raw in purge_paths:
+        try:
+            Path(raw).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            log.warning(f"[quarantine-purge] não foi possível remover {raw}: {e}")
 
     log.warning(
         f"[quarantine-purge] {len(shas)} conteúdo(s) apagado(s) definitivamente; "
@@ -4911,16 +4954,22 @@ def _bg_encrypt_existing(job_id: int) -> None:
             last_sha = page[-1].sha256
 
             page_shas = [fc.sha256 for fc in page]
-            copies_q = db.query(FileContentCopy).filter(FileContentCopy.sha256.in_(page_shas))
-            if degraded_strs:
-                copies_q = copies_q.filter(~FileContentCopy.volume_path.in_(degraded_strs))
             encrypt_copies_by_sha: dict[str, list] = {}
-            for c in copies_q.all():
+            for c in db.query(FileContentCopy).filter(FileContentCopy.sha256.in_(page_shas)).all():
                 encrypt_copies_by_sha.setdefault(c.sha256, []).append(c)
 
             for fc in page:
                 i += 1
                 copies = encrypt_copies_by_sha.get(fc.sha256, [])
+
+                # Uma cópia em volume degraded não pode ser cifrada agora — e marcar
+                # encrypted=True com ela ainda em plaintext faria readable_copy servir
+                # plaintext como cifrado quando o disco voltasse (decifrar falha).
+                # Fica para a próxima rodada, com o volume de volta.
+                if any(c.volume_path in degraded_strs for c in copies):
+                    log.warning(f"[encrypt-existing] [{i}/{total}] {fc.sha256[:8]}… cópia em volume degraded — adiado")
+                    skipped += 1
+                    continue
 
                 if not copies:
                     log.warning(f"[encrypt-existing] [{i}/{total}] {fc.sha256[:8]}… sem cópia acessível — pulando")
@@ -4964,7 +5013,8 @@ def _bg_encrypt_existing(job_id: int) -> None:
                         tmp_enc.unlink(missing_ok=True)
                 else:
                     for copy, p, tmp_enc in staged:
-                        shutil.move(str(tmp_enc), str(p))
+                        storage.fsync_file(tmp_enc)
+                        os.replace(tmp_enc, p)
                         log.info(f"[encrypt-existing] [{i}/{total}] cópia em {copy.volume_path} cifrada com sucesso")
 
                 if success:

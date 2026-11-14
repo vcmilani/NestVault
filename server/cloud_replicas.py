@@ -138,6 +138,9 @@ def _fix_one(db: Session, sha: str, is_cloud: bool) -> tuple[int, int]:
     return 0, 0
 
 
+_COMMIT_EVERY = 25
+
+
 def apply(db: Session, shas: Iterable[str], on_progress=None, prefix: str = "") -> tuple[int, int]:
     """Cria ou remove cópias de `shas` até o alvo de cada um. Faz commit.
     Devolve (cópias criadas, cópias removidas)."""
@@ -148,12 +151,18 @@ def apply(db: Session, shas: Iterable[str], on_progress=None, prefix: str = "") 
     progress = storage.ReplicationProgress("cloud-replicas", len(work), total_bytes, db,
                                            on_progress, prefix) if on_progress else None
     added = removed = 0
-    for sha, size, _, is_cloud in work:
+    for n, (sha, size, _, is_cloud) in enumerate(work, 1):
         a, r = _fix_one(db, sha, is_cloud)
         added += a
         removed += r
         if progress:
             progress.tick(copies=a, nbytes=size * a)
+        # Commit periódico: solta o write lock do SQLite entre as cópias. Sem
+        # on_progress (limpeza noturna, apply_bg) o commit só vinha no fim, e o
+        # lock ficava preso durante o job inteiro — uploads caíam em "database is
+        # locked", e um crash deixava as cópias já feitas sem linha no banco.
+        if n % _COMMIT_EVERY == 0:
+            db.commit()
     db.commit()
     if progress:
         progress.emit(force_log=True)

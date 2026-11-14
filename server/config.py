@@ -411,6 +411,8 @@ def _write(path: Path, data: dict) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2, ensure_ascii=False)
             fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())  # queda de energia no meio não pode deixar config vazio
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
     except Exception:
