@@ -84,7 +84,9 @@ def _compute_all(db: Session) -> dict[int, int]:
 def usage_all(db: Session) -> dict[int, int]:
     """{user_id: bytes} de todos os usuários com algum backup."""
     with _lock:
-        if time.monotonic() - _cache["ts"] < _TTL:
+        # ts == 0.0 é "nunca calculado": sem essa guarda, logo após o boot
+        # (monotonic() pequeno) o cache vazio passava por válido e a cota lia 0.
+        if _cache["ts"] and time.monotonic() - _cache["ts"] < _TTL:
             return dict(_cache["usage"])
     usage = _compute_all(db)
     with _lock:

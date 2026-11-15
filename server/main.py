@@ -4295,8 +4295,8 @@ async def _notify_storage_full(detail: str) -> None:
     porque sob pressão de disco todo upload cai aqui."""
     global _storage_full_notified_at
     now = time.monotonic()
-    if now - _storage_full_notified_at < _STORAGE_FULL_NOTIFY_EVERY:
-        return
+    if _storage_full_notified_at and now - _storage_full_notified_at < _STORAGE_FULL_NOTIFY_EVERY:
+        return  # 0.0 = nunca avisou (monotonic() é pequeno logo após o boot)
     _storage_full_notified_at = now
     from daily_digest import _send_telegram
     await _send_telegram(

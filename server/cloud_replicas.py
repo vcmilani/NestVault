@@ -268,7 +268,7 @@ def storage_free_bytes() -> int:
     """Quanto ainda cabe no Cloud: o livre acima do limiar de cada disco saudável,
     dividido pelo nº de cópias que um arquivo novo do Cloud ganha."""
     with _free_lock:
-        if time.monotonic() - _free_cache["ts"] < _FREE_TTL:
+        if _free_cache["ts"] and time.monotonic() - _free_cache["ts"] < _FREE_TTL:  # ts 0 = nunca
             return _free_cache["value"]
     threshold = storage.STORAGE_FALLBACK_THRESHOLD_GB * 1024 ** 3
     free = 0

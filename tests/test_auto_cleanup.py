@@ -295,3 +295,31 @@ def test_sync_rejects_absurd_path_lists(client):
     r = client.post("/sync", json={"backup_label": "b1", "version_key": "v1",
                                    "existing_paths": ["/x"] * 200_001})
     assert r.status_code == 422
+
+
+# -- caches com monotonic(): ts 0.0 é "nunca", mesmo com uptime pequeno ----------------
+
+def test_quota_usage_is_computed_right_after_boot(client, monkeypatch):
+    """time.monotonic() conta desde o boot no Linux: com uptime < TTL, o cache
+    vazio (ts=0.0) passava por válido e a cota lia uso 0 — o CI, num runner novo,
+    viu exatamente isso."""
+    quota.reset()
+    monkeypatch.setattr(quota.time, "monotonic", lambda: 5.0)
+    monkeypatch.setattr(quota, "_compute_all", lambda db: {7: 123})
+    assert quota.usage(m.SessionLocal(), 7) == 123
+
+
+def test_storage_free_bytes_is_computed_right_after_boot(client, monkeypatch):
+    import cloud_replicas
+    cloud_replicas.reset()
+    monkeypatch.setattr(cloud_replicas.time, "monotonic", lambda: 5.0)
+    assert cloud_replicas.storage_free_bytes() > 0  # conftest: 100 GB livres
+
+
+def test_storage_full_notice_is_sent_right_after_boot(telegram, monkeypatch):
+    import asyncio
+    monkeypatch.setattr(m.time, "monotonic", lambda: 5.0)
+    asyncio.run(m._notify_storage_full("disco cheio"))
+    assert len(telegram) == 1
+    asyncio.run(m._notify_storage_full("disco cheio"))
+    assert len(telegram) == 1  # dentro da janela de 30 min: não repete
