@@ -38,6 +38,14 @@ _STORED_EXT = {
 }
 
 
+def _safe_zip_path(name: str) -> str:
+    """Caminho dentro do zip sem '..', sem raiz absoluta e sem segmento vazio.
+    Um backup pode registrar original_path com '..' (o cliente é só uma chave
+    de API), e um descompactador descuidado escreveria fora da pasta de destino."""
+    segs = [s for s in name.replace("\\", "/").split("/") if s not in ("", ".")]
+    return "/".join("__" if s == ".." else s for s in segs)
+
+
 @dataclass
 class Entry:
     name: str           # caminho dentro do zip
@@ -87,10 +95,12 @@ def _unique(name: str, used: set[str]) -> str:
 
 
 def collect(db: Session, label: str, version: str | None, items: list[str],
-            user: User) -> tuple[list[Entry], str]:
+            user: User, hide_hidden: bool = False) -> tuple[list[Entry], str]:
     """(entradas, nome sugerido do .zip). Cada item selecionado vira uma pasta/arquivo
     na raiz do zip, com o próprio nome — como baixar uma seleção num drive. O item
-    "" é o label inteiro (baixar a raiz)."""
+    "" é o label inteiro (baixar a raiz). hide_hidden: usuário com PIN das ocultas
+    ainda trancado — pastas ocultas ficam de fora (ver cloud_ui.hidden)."""
+    from . import hidden
     b = tree.get_label_or_404(db, label, user)
     versions = tree.done_versions(db, label)
     v = tree.pick_version(versions, version)
@@ -101,6 +111,8 @@ def collect(db: Session, label: str, version: str | None, items: list[str],
         rel = tree.norm_rel(raw)
         if any(seg in (".", "..") for seg in rel.split("/")):
             raise HTTPException(400, f"Item invalido: {raw!r}")
+        if hide_hidden and hidden.dir_is_hidden(rel):
+            raise HTTPException(404, f"'{rel}' nao encontrado")
         rels.append(rel)
     if not rels:
         raise HTTPException(400, "Nada selecionado")
@@ -127,6 +139,8 @@ def collect(db: Session, label: str, version: str | None, items: list[str],
                 .filter(*where)
                 .order_by(VersionFile.original_path)
                 .all())
+        if hide_hidden:
+            rows = [r for r in rows if not hidden.file_is_hidden(hidden.rel_of(r.original_path, base))]
         if not rows:
             raise HTTPException(404, f"'{rel}' nao encontrado")
         if len(entries) + len(rows) > MAX_FILES:
@@ -139,7 +153,7 @@ def collect(db: Session, label: str, version: str | None, items: list[str],
             inner = r.original_path[len(full):]  # "" (o próprio arquivo) ou "/sub/x"
             if not inner.startswith("/") and inner:
                 inner = "/" + inner  # raiz sem prefixo comum (base == "")
-            entries.append(Entry(name=top + inner, path=readable[r.sha256],
+            entries.append(Entry(name=_safe_zip_path(top + inner), path=readable[r.sha256],
                                  encrypted=bool(r.encrypted), size=int(r.size or 0),
                                  mtime=r.mtime or 0))
 

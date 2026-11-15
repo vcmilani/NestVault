@@ -76,6 +76,7 @@ class Field:
 
 
 GROUP_LABELS = {
+    "server":    "Servidor",
     "storage":   "Storage",
     "ssd_cache": "SSD Cache",
     "database":  "Banco de dados",
@@ -89,6 +90,15 @@ GROUP_LABELS = {
 }
 
 SCHEMA: list[Field] = [
+    # -- server --
+    Field("server.trusted_proxies", None, "list[str]", ["127.0.0.1", "::1"],
+          "Proxies confiáveis",
+          "IPs de onde o header X-Forwarded-Proto é aceito (reverse proxy com HTTPS na frente). "
+          "Só esses marcam o cookie de sessão como seguro."),
+    Field("server.expose_docs", None, "bool", False,
+          "Expor documentação da API",
+          "Liga /docs, /redoc e /openapi.json (sem login). Desligado por padrão.",
+          requires_restart=True),
     # -- storage --
     Field("storage.dirs", "STORAGE_DIRS", "list[str]", ["./storage"],
           "Volumes de storage",
@@ -114,6 +124,11 @@ SCHEMA: list[Field] = [
           "Exclusões feitas por usuários comuns ficam na lixeira por este prazo e podem ser "
           "restauradas pelo admin; depois a limpeza noturna apaga de vez.",
           min=1, max=365),
+    Field("storage.max_upload_gb", None, "int", 0,
+          "Tamanho máximo por upload (GB)",
+          "Um arquivo maior que isto é recusado (413) antes de ocupar disco. 0 = sem limite "
+          "global; a cota do usuário e o espaço livre do volume continuam valendo.",
+          min=0, max=100000),
     Field("storage.encryption_enabled", "ENCRYPTION_ENABLED", "bool", False,
           "Criptografia em repouso",
           "Cifra os arquivos com AES-256-GCM. Alterar depois de gravar dados torna o conteúdo existente ilegível.",
@@ -330,6 +345,9 @@ def _check(f: Field, value: Any) -> None:
     if f.key == "storage.dirs" and not value:
         raise ConfigError("storage.dirs: informe ao menos um volume de storage")
 
+    if f.key == "digest.ollama_url" and value and not str(value).lower().startswith(("http://", "https://")):
+        raise ConfigError("digest.ollama_url: deve comecar com http:// ou https://")
+
     if f.key == "storage.encryption_key" and value:
         try:
             decoded = base64.b64decode(value, validate=True)
@@ -411,6 +429,8 @@ def _write(path: Path, data: dict) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2, ensure_ascii=False)
             fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())  # queda de energia no meio não pode deixar config vazio
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
     except Exception:
@@ -460,9 +480,9 @@ def pending_restart() -> bool:
 
 
 def _mask(value: str) -> str:
-    if not value:
-        return ""
-    return "••••••" + value[-4:] if len(value) > 8 else "••••••"
+    # Sem sufixo: os 4 últimos caracteres da chave de criptografia ou do token
+    # do Telegram não têm por que sair na tela de configurações.
+    return "••••••" if value else ""
 
 
 def public() -> dict:

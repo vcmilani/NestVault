@@ -2,6 +2,7 @@ import errno
 
 from sqlalchemy.orm import sessionmaker
 
+import hashlib
 import database as db_mod
 from conftest import _make_engine
 import storage as storage_mod
@@ -67,14 +68,14 @@ def test_integrity_error_com_pendencia_viva_conclui_o_move(tmp_path, monkeypatch
     cada 30s. Agora o move é concluído a partir da cópia que já existe."""
     db = _make_session(tmp_path / "test.db")
 
-    sha = "b" * 64
+    sha = hashlib.sha256(b"conteudo").hexdigest()
     ssd_dir = tmp_path / "ssd"
-    (ssd_dir / "_content" / "bb").mkdir(parents=True)
-    ssd_file = ssd_dir / "_content" / "bb" / sha
+    (ssd_dir / "_content" / sha[:2]).mkdir(parents=True)
+    ssd_file = ssd_dir / "_content" / sha[:2] / sha
     ssd_file.write_bytes(b"conteudo")
 
     dest_vol = tmp_path / "hdd1"
-    dest_path = dest_vol / "_content" / "bb" / sha
+    dest_path = dest_vol / "_content" / sha[:2] / sha
     dest_path.parent.mkdir(parents=True)
 
     db.add(db_mod.FileContent(sha256=sha, stored_at=str(ssd_file), size=8))
@@ -188,10 +189,10 @@ def test_move_escolhe_disco_com_espaco_na_hora_de_mover(tmp_path, monkeypatch):
     destino com o tamanho do arquivo e troca para um disco que o comporte."""
     from collections import namedtuple
     db = _make_session(tmp_path / "test.db")
-    sha = "e" * 64
+    sha = hashlib.sha256(b"x" * 4096).hexdigest()
     ssd_dir = tmp_path / "ssd"
-    (ssd_dir / "_content" / "ee").mkdir(parents=True)
-    ssd_file = ssd_dir / "_content" / "ee" / sha
+    (ssd_dir / "_content" / sha[:2]).mkdir(parents=True)
+    ssd_file = ssd_dir / "_content" / sha[:2] / sha
     ssd_file.write_bytes(b"x" * 4096)
     cheio, livre = tmp_path / "hdd1", tmp_path / "hdd2"
     cheio.mkdir(); livre.mkdir()
@@ -200,7 +201,7 @@ def test_move_escolhe_disco_com_espaco_na_hora_de_mover(tmp_path, monkeypatch):
     db.add(db_mod.FileContentCopy(sha256=sha, stored_at=str(ssd_file), volume_path=str(ssd_dir)))
     db.add(db_mod.SsdCachePendingMove(
         sha256=sha, ssd_path=str(ssd_file), dest_volume=str(cheio),
-        dest_path=str(cheio / "_content" / "ee" / sha),
+        dest_path=str(cheio / "_content" / sha[:2] / sha),
     ))
     db.commit()
 
@@ -214,8 +215,8 @@ def test_move_escolhe_disco_com_espaco_na_hora_de_mover(tmp_path, monkeypatch):
 
     assert storage_mod.process_ssd_pending_moves(db) == (1, [sha])
 
-    dest = livre / "_content" / "ee" / sha
+    dest = livre / "_content" / sha[:2] / sha
     assert dest.exists() and not ssd_file.exists()
-    assert not (cheio / "_content" / "ee" / sha).exists()
+    assert not (cheio / "_content" / sha[:2] / sha).exists()
     assert db.get(db_mod.FileContent, sha).stored_at == str(dest)
     assert [c.volume_path for c in db.query(db_mod.FileContentCopy).all()] == [str(livre)]

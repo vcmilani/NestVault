@@ -12,12 +12,54 @@ const fmtSize = b => {
   for (const unit of u) { if (Math.abs(b) < 1024) return b.toFixed(1)+' '+unit; b /= 1024; }
   return b.toFixed(1)+' PB';
 };
-// Escapa também aspas simples — labels com apóstrofo são usados em handlers
-// inline com aspas simples (onclick="fn('${esc(x)}')").
+// Escapa também aspas simples. ATENÇÃO: isso NÃO torna seguro interpolar em
+// handlers inline (onclick="fn('${esc(x)}')"): o navegador decodifica as
+// entidades HTML antes de executar o JS, e a aspa volta. Para passar dados a um
+// handler use data-* + this.dataset (ver users.html).
 const esc = s => String(s ?? '')
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
   .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 const fmtDate = s => s ? s.replace('T',' ').slice(0,19) : '—';
+
+// Tempo relativo em HTML (span com a data completa no title). Mora aqui, e não
+// em nav.js, porque nav.js é carregado DEPOIS do script de cada página — todas
+// precisavam do guard `window.relTime ? ... : fmtDate(...)`. A data vem do
+// servidor e passa por esc(): quando não parseia, voltava crua para innerHTML.
+function relTime(isoStr) {
+  if (!isoStr) return '—';
+  const raw  = String(isoStr).includes('T') ? String(isoStr) : String(isoStr).replace(' ', 'T');
+  const d    = new Date(raw);
+  const full = esc(String(isoStr).replace('T', ' ').slice(0, 19));
+  if (isNaN(d.getTime())) return full;
+  const secs = Math.round((Date.now() - d.getTime()) / 1000);
+  let rel;
+  if (Math.abs(secs) < 10)    rel = 'agora';
+  else if (secs < 60)         rel = secs + 's atrás';
+  else if (secs < 3600)       rel = Math.floor(secs / 60) + 'min atrás';
+  else if (secs < 86400)      rel = Math.floor(secs / 3600) + 'h atrás';
+  else if (secs < 86400 * 30) rel = Math.floor(secs / 86400) + 'd atrás';
+  else                        rel = full.slice(0, 10);
+  return '<span title="' + full + '" style="cursor:default;border-bottom:1px dotted currentColor;color:inherit">' + rel + '</span>';
+}
+window.relTime = relTime;
+
+// Download de um arquivo pelo cookie de sessão do /cloud (o navegador faz o
+// streaming; nada é montado em memória). O explorer baixava via fetch + blob:
+// um arquivo de vários GB derrubava a aba, e revogar a URL logo depois do
+// click() cancelava o download no Safari/Firefox.
+let _nvSessionReady = false;
+async function nvEnsureSession() {
+  if (_nvSessionReady) return true;
+  const r = await fetch('/cloud/session', {method: 'POST', headers: H(), credentials: 'same-origin'});
+  if (r.status === 401) { showLogin(API_KEY ? 'API Key inválida' : ''); return false; }
+  if (!r.ok) { showError('Falha ao abrir sessão (' + r.status + ')'); return false; }
+  _nvSessionReady = true;
+  return true;
+}
+async function nvDownload(fileId) {
+  if (!(await nvEnsureSession())) return;
+  location.href = '/cloud/content/' + encodeURIComponent(fileId) + '?download=true';
+}
 
 // ── Barra de erro / login overlay padrão ────────────────────────────────────
 function showError(msg) {
@@ -163,21 +205,34 @@ if (NV_ADMIN_PAGE) {
 function nvRoleCacheClear() { try { sessionStorage.removeItem('nv-role'); } catch (_) {} }
 
 // Papel da chave: 'admin' | 'user' | 'invalid' (401) | null (erro de rede).
-// Cacheado na aba, amarrado ao fim da chave.
+// Cacheado na aba por 5 min, amarrado ao fim da chave — um admin rebaixado via
+// pela aba inteira a UI de admin (o servidor sempre barrou; era só visual).
+const NV_ROLE_TTL_MS = 5 * 60 * 1000;
 async function nvRole(key) {
   if (!key) return 'invalid';
   const tag = key.slice(-8);
   try {
     const c = JSON.parse(sessionStorage.getItem('nv-role') || 'null');
-    if (c && c.k === tag) return c.role;
+    if (c && c.k === tag && Date.now() - (c.ts || 0) < NV_ROLE_TTL_MS) return c.role;
   } catch (_) {}
   let r;
   try { r = await fetch('/cloud/me', {headers: {'X-API-Key': key}}); } catch (_) { return null; }
   if (r.status === 401) return 'invalid';
   if (!r.ok) return null;
   const role = (await r.json()).role;
-  try { sessionStorage.setItem('nv-role', JSON.stringify({k: tag, role})); } catch (_) {}
+  try { sessionStorage.setItem('nv-role', JSON.stringify({k: tag, role, ts: Date.now()})); } catch (_) {}
   return role;
+}
+
+// Sair das fotos limpa TAMBÉM a chave de admin: num computador compartilhado,
+// o logout da página inicial deixava a área do administrador aberta.
+function nvLogout() {
+  nvRoleCacheClear();
+  localStorage.removeItem('backupApiKey');
+  localStorage.removeItem('nvAdminKey');
+  fetch('/cloud/session', {method: 'DELETE', credentials: 'same-origin'}).catch(() => {});
+  API_KEY = '';
+  showLogin();
 }
 
 function nvAdminLoginTexts() {
@@ -252,14 +307,39 @@ async function nvGuardAdmin() {
             location.href = '/';
             return;
           }
-          localStorage.removeItem('backupApiKey'); API_KEY = ''; showLogin();
+          nvLogout();
         });
       }
     }
     nvGuardAdmin();
+    // Botões só com ícone (✕, ↓, ≡): o title vira aria-label para leitores de tela.
+    document.querySelectorAll('button[title]:not([aria-label])').forEach(b => {
+      if (!/[A-Za-zÀ-ÿ]{2,}/.test(b.textContent)) b.setAttribute('aria-label', b.title);
+    });
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
+
+  // Linhas e cards clicáveis (<tr onclick>, .col-row) não eram alcançáveis pelo
+  // teclado: com role="button" + tabindex="0", Enter/Espaço disparam o click.
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const el = e.target;
+    if (!el || el.tagName === 'BUTTON' || el.tagName === 'A' || el.tagName === 'INPUT'
+        || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return;
+    if (el.getAttribute('role') !== 'button') return;
+    e.preventDefault();
+    el.click();
+  });
+
+  // Atalho: R recarrega os dados da página (quando não se está digitando).
+  // Era duplicado em nav.js, com a própria lista de funções.
+  document.addEventListener('keydown', e => {
+    const tag = e.target.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target.isContentEditable) return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === 'r' || e.key === 'R') { e.preventDefault(); _nvRefresh(); }
+  });
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});

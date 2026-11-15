@@ -47,6 +47,10 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, timeout=_TIMEOUT)
 
 
+_DEVICE_RE = re.compile(r"/dev/[A-Za-z0-9][A-Za-z0-9/_.+-]*")
+_DTYPE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9,+_-]*")
+
+
 def _overrides() -> dict[str, tuple[str, str | None]]:
     """smart.device_overrides: ["/mnt/hd1=/dev/sda", "/mnt/hd2=/dev/sdb:sat"]."""
     out: dict[str, tuple[str, str | None]] = {}
@@ -56,6 +60,11 @@ def _overrides() -> dict[str, tuple[str, str | None]]:
             log.warning(f"[smart] override ignorado (esperado volume=dispositivo): {raw!r}")
             continue
         dev, _, dtype = dev.strip().partition(":")
+        # O valor vai direto para o argv do smartctl (com sudo): só um caminho
+        # em /dev e um tipo alfanumérico — "-d" ou "--foo" aqui viraria opção.
+        if not _DEVICE_RE.fullmatch(dev) or (dtype and not _DTYPE_RE.fullmatch(dtype)):
+            log.warning(f"[smart] override ignorado (dispositivo/tipo invalido): {raw!r}")
+            continue
         out[vol.strip().rstrip("/") or "/"] = (dev, dtype or None)
     return out
 

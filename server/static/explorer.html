@@ -341,7 +341,7 @@
         compareData.added.has(key)    ? '<span class="diff-badge diff-add" title="Adicionado nesta versão">+</span>' :
         compareData.modified.has(key) ? '<span class="diff-badge diff-mod" title="Modificado nesta versão">~</span>' : '';
       return `
-<div class="col-row file-row${sel ? ' selected' : ''}" data-kind="file" data-path="${esc(key)}">
+<div class="col-row file-row${sel ? ' selected' : ''}" data-kind="file" data-path="${esc(key)}" role="button" tabindex="0">
   <span class="t-icon">·</span>
   <span class="t-name" title="${esc(title)}">${esc(f._basename)}</span>
   <div class="t-meta">
@@ -500,26 +500,18 @@
   <span class="flat-path" title="${esc(f.original_path)}">${highlighted}</span>
   <div class="t-meta">
     <span class="t-size">${fmtSize(f.size || 0)}</span>
-    <button class="t-dl" data-id="${f.id}" data-name="${esc(basename(f.original_path))}" onclick="dlFile(+this.dataset.id,this.dataset.name)" title="Baixar arquivo">↓</button>
+    <button class="t-dl" data-id="${f.id}" onclick="dlFile(+this.dataset.id)" title="Baixar arquivo" aria-label="Baixar arquivo">↓</button>
   </div>
 </div>`;
       }).join('');
   }
 
   // -- Download -----------------------------------------------------------------
-  async function dlFile(fileId, filename) {
+  async function dlFile(fileId) {
+    // Pelo cookie de sessão do /cloud (ver nvDownload em app.js): o navegador faz
+    // o streaming — antes era fetch + blob inteiro em memória.
     try {
-      const r = await fetch(`/files/${fileId}/download`, { headers: H() });
-      if (r.status === 401) { showLogin(); return; }
-      if (r.status === 403) { nvNotAdmin(); return; }
-      if (!r.ok) { showError(`Erro ${r.status} ao baixar o arquivo`); return; }
-      const blob = await r.blob();
-      const url  = URL.createObjectURL(blob);
-      const a    = Object.assign(document.createElement('a'), { href: url, download: filename });
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      await nvDownload(fileId);
     } catch(e) {
       showError('Erro ao baixar: ' + e.message);
     }

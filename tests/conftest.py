@@ -127,6 +127,7 @@ def _reset_module_caches():
     cloud_media._timeline_cache.clear()
     cloud_media.indexer._scanned.clear()
     auth_mod._pin_fails.clear()
+    auth_mod._auth_fails.clear()
     quota_mod.reset()
     cloud_replicas_mod.reset()
     smart_mod._last_errors.clear()

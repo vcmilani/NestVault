@@ -30,11 +30,40 @@ _TTL = 600.0
 
 _lock = threading.Lock()
 _cache: dict = {"usage": {}, "ts": 0.0}
+# Bytes de conteúdo novo em uploads ainda em andamento, por usuário. Entram no
+# uso enquanto o upload não commita: N uploads paralelos passavam todos pela
+# checagem contra o mesmo número cacheado e estouravam a cota em N × arquivo.
+_reserved: dict[int, int] = {}
 
 
 def reset() -> None:
     with _lock:
         _cache.update({"usage": {}, "ts": 0.0})
+        _reserved.clear()
+
+
+def reserve(user_id: int, n: int) -> None:
+    if n <= 0:
+        return
+    with _lock:
+        _reserved[user_id] = _reserved.get(user_id, 0) + n
+
+
+def release(user_id: int, n: int) -> None:
+    """Desfaz reserve() — no commit do conteúdo ou em qualquer falha do upload."""
+    if n <= 0:
+        return
+    with _lock:
+        left = _reserved.get(user_id, 0) - n
+        if left > 0:
+            _reserved[user_id] = left
+        else:
+            _reserved.pop(user_id, None)
+
+
+def reserved(user_id: int) -> int:
+    with _lock:
+        return _reserved.get(user_id, 0)
 
 
 def _compute_all(db: Session) -> dict[int, int]:
@@ -55,7 +84,9 @@ def _compute_all(db: Session) -> dict[int, int]:
 def usage_all(db: Session) -> dict[int, int]:
     """{user_id: bytes} de todos os usuários com algum backup."""
     with _lock:
-        if time.monotonic() - _cache["ts"] < _TTL:
+        # ts == 0.0 é "nunca calculado": sem essa guarda, logo após o boot
+        # (monotonic() pequeno) o cache vazio passava por válido e a cota lia 0.
+        if _cache["ts"] and time.monotonic() - _cache["ts"] < _TTL:
             return dict(_cache["usage"])
     usage = _compute_all(db)
     with _lock:
@@ -64,7 +95,8 @@ def usage_all(db: Session) -> dict[int, int]:
 
 
 def usage(db: Session, user_id: int) -> int:
-    return usage_all(db).get(user_id, 0)
+    """Uso contabilizado mais o que está reservado por uploads em andamento."""
+    return usage_all(db).get(user_id, 0) + reserved(user_id)
 
 
 def add_bytes(user_id: int, n: int) -> None:
@@ -115,11 +147,14 @@ def check_new_content(db: Session, user: User, sha256: str, size: int) -> bool:
     if owns(db, user.id, sha256):
         return False
     require_room(db, user, size)
+    reserve(user.id, size)  # o caller faz commit_new_content() ou release() depois
     return True
 
 
 def commit_new_content(db: Session, user: User, size: int) -> None:
-    """Contabiliza o conteúdo novo e manda o aviso de alerts.quota_warn_pct uma vez."""
+    """Contabiliza o conteúdo novo (consumindo a reserva de check_new_content) e
+    manda o aviso de alerts.quota_warn_pct uma vez."""
+    release(user.id, size)
     add_bytes(user.id, size)
     warn_pct = config.get("alerts.quota_warn_pct")
     if not warn_pct or not user.quota_bytes or user.quota_alerted:

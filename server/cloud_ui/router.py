@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from auth import (HIDDEN_COOKIE, HIDDEN_TTL, SESSION_COOKIE, SESSION_TTL, effective_role,
+from auth import (HIDDEN_COOKIE, HIDDEN_TTL, SESSION_COOKIE, SESSION_TTL, effective_role, revoke_session,
                   get_current_user, get_user_header_or_cookie, hidden_unlocked,
                   make_hidden_token, make_session_token, pin_locked_for,
                   register_pin_attempt, require_owner_or_admin)
@@ -25,7 +25,8 @@ from database import (BackupID, BackupVersion, FileContent, MediaInfo, User, Ver
                       SERVER_KIND, TRASHED_STATUS, check_pin)
 from urllib.parse import quote
 
-from . import archive, content, drive, duplicates, media, tree
+import config
+from . import archive, content, drive, duplicates, hidden, media, tree
 
 router = APIRouter()
 log = logging.getLogger("backup-server")
@@ -34,8 +35,14 @@ log = logging.getLogger("backup-server")
 # -- Sessão -------------------------------------------------------------------
 
 def _is_https(request: Request) -> bool:
-    return (request.url.scheme == "https"
-            or request.headers.get("x-forwarded-proto", "").lower() == "https")
+    """HTTPS direto, ou X-Forwarded-Proto vindo de um proxy confiável
+    (server.trusted_proxies). O header é do cliente: sem a lista, qualquer um
+    o enviava e recebia o cookie sem `secure` numa conexão HTTP."""
+    if request.url.scheme == "https":
+        return True
+    client = request.client.host if request.client else ""
+    trusted = config.get("server.trusted_proxies") or []
+    return client in trusted and request.headers.get("x-forwarded-proto", "").lower() == "https"
 
 
 @router.post("/session")
@@ -65,7 +72,12 @@ def get_me(db: Session = Depends(get_db), user: User = Depends(get_user_header_o
 
 
 @router.delete("/session")
-def delete_session(response: Response):
+def delete_session(request: Request, response: Response, db: Session = Depends(get_db)):
+    # Revoga no servidor também: só apagar o cookie no navegador deixava um
+    # token roubado válido até os 7 dias vencerem.
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        revoke_session(db, token)
     response.delete_cookie(SESSION_COOKIE, path="/")
     log.info("[cloud] sessao encerrada (logout)")
     return {"ok": True}
@@ -74,7 +86,8 @@ def delete_session(response: Response):
 # -- Drive --------------------------------------------------------------------
 
 @router.get("/tree")
-def get_tree(label: Optional[str] = None,
+def get_tree(request: Request,
+             label: Optional[str] = None,
              path: str = "",
              version: Optional[str] = None,
              offset: int = Query(0, ge=0),
@@ -93,9 +106,12 @@ def get_tree(label: Optional[str] = None,
     v = tree.pick_version(versions, version)
     base = tree.label_base(db, label, versions)
     rel = tree.norm_rel(path)
+    hidden.require_visible_dir(request, user, rel)
     editable = b.kind == SERVER_KIND
     extra = tree.empty_dirs(db, label, rel) if editable else []
     children = tree.list_children(db, v, base, rel, offset, limit, sort, extra)
+    if hidden.locked(request, user):
+        children["folders"] = [f for f in children["folders"] if not hidden.dir_is_hidden(f["name"])]
     return {
         "label": label, "path": rel,
         "kind": b.kind or "backup", "editable": editable,
@@ -108,13 +124,15 @@ def get_tree(label: Optional[str] = None,
 
 
 @router.get("/duplicates")
-def get_duplicates(min_size: int = Query(duplicates.DEFAULT_MIN_SIZE, ge=1),
+def get_duplicates(request: Request,
+                   min_size: int = Query(duplicates.DEFAULT_MIN_SIZE, ge=1),
                    limit: int = Query(100, ge=1, le=duplicates.MAX_GROUPS),
                    db: Session = Depends(get_db),
                    user: User = Depends(get_user_header_or_cookie)):
     """Grupos de arquivos idênticos (mesmo sha256) entre os labels do usuário, na
     versão mais recente de cada um. Apagar usa POST /drive/delete (só pastas do servidor)."""
-    return duplicates.find(db, user, min_size, limit)
+    result = duplicates.find(db, user, min_size, limit)
+    return hidden.filter_duplicates(result) if hidden.locked(request, user) else result
 
 
 @router.get("/versions")
@@ -126,7 +144,7 @@ def get_versions(label: str, db: Session = Depends(get_db),
 
 
 @router.get("/search")
-def search(label: str, q: str = Query(..., min_length=1, max_length=200),
+def search(request: Request, label: str, q: str = Query(..., min_length=1, max_length=200),
            version: Optional[str] = None,
            limit: int = Query(200, ge=1, le=1000),
            db: Session = Depends(get_db),
@@ -135,22 +153,28 @@ def search(label: str, q: str = Query(..., min_length=1, max_length=200),
     versions = tree.done_versions(db, label)
     v = tree.pick_version(versions, version)
     base = tree.label_base(db, label, versions)
-    return {"version_key": v.version_key, "results": tree.search(db, v, base, q, limit)}
+    results = tree.search(db, v, base, q, limit)
+    if hidden.locked(request, user):
+        results = [r for r in results if not hidden.file_is_hidden(r["path"])]
+    return {"version_key": v.version_key, "results": results}
 
 
 @router.get("/history")
-def get_history(label: str, path: str, db: Session = Depends(get_db),
+def get_history(request: Request, label: str, path: str, db: Session = Depends(get_db),
                 user: User = Depends(get_user_header_or_cookie)):
     """Versões em que o arquivo `path` (relativo à raiz do label) existe."""
     tree.get_label_or_404(db, label, user)
+    rel = tree.norm_rel(path)
+    if hidden.locked(request, user) and hidden.file_is_hidden(rel):
+        raise HTTPException(404, "Arquivo nao encontrado")
     versions = tree.done_versions(db, label)
     base = tree.label_base(db, label, versions)
-    return tree.history(db, label, base + tree.norm_rel(path))
+    return tree.history(db, label, base + rel)
 
 
-def _file_row(db: Session, file_id: int, user: User):
+def _file_row(db: Session, file_id: int, user: User, request: Request | None = None):
     row = (db.query(VersionFile.original_path, VersionFile.sha256, BackupID.owner_user_id,
-                    FileContent.size, FileContent.encrypted)
+                    FileContent.size, FileContent.encrypted, BackupVersion.backup_label)
            .join(BackupVersion, BackupVersion.id == VersionFile.version_id)
            .join(BackupID, BackupID.label == BackupVersion.backup_label)
            .join(FileContent, FileContent.sha256 == VersionFile.sha256)
@@ -161,6 +185,8 @@ def _file_row(db: Session, file_id: int, user: User):
     if not row:
         raise HTTPException(404, "Arquivo nao encontrado")
     require_owner_or_admin(row.owner_user_id, user)
+    if request is not None:
+        hidden.require_visible_file(request, user, db, row.backup_label, row.original_path)
     return row
 
 
@@ -169,14 +195,14 @@ def get_content(file_id: int, request: Request, download: bool = False,
                 db: Session = Depends(get_db),
                 user: User = Depends(get_user_header_or_cookie)):
     """Conteúdo do arquivo inline (preview) ou como download, com suporte a Range."""
-    row = _file_row(db, file_id, user)
+    row = _file_row(db, file_id, user, request)
     return content.stream(request, db, sha256=row.sha256, name=Path(row.original_path).name,
                           size=row.size, encrypted=bool(row.encrypted), download=download,
                           who=f"{user.username} file_id={file_id}")
 
 
 @router.post("/zip")
-def download_zip(label: str = Form(...), items: list[str] = Form(...),
+def download_zip(request: Request, label: str = Form(...), items: list[str] = Form(...),
                  version: Optional[str] = Form(None),
                  dry_run: bool = Form(False),
                  db: Session = Depends(get_db),
@@ -185,7 +211,8 @@ def download_zip(label: str = Form(...), items: list[str] = Form(...),
     gerado em streaming. Formulário (e não JSON) para o navegador poder baixar
     direto, com o cookie de sessão — é leitura, como /content. dry_run só valida
     e conta: a página confere antes, para um erro não virar uma página de JSON."""
-    entries, name = archive.collect(db, label, version or None, items, user)
+    entries, name = archive.collect(db, label, version or None, items, user,
+                                    hide_hidden=hidden.locked(request, user))
     if dry_run:
         return {"name": name, "files": len(entries), "size": sum(e.size for e in entries),
                 "unreadable": sum(1 for e in entries if e.path is None)}
@@ -397,6 +424,7 @@ class PinUnlock(BaseModel):
 
 @router.post("/photos/unlock")
 def unlock_hidden(req: PinUnlock, request: Request, response: Response,
+                  db: Session = Depends(get_db),
                   user: User = Depends(get_current_user)):
     """Confere o PIN das ocultas e emite o cookie de desbloqueio (HIDDEN_TTL).
     Escrita: exige o header X-API-Key, como as outras. Erros seguidos bloqueiam
@@ -407,7 +435,7 @@ def unlock_hidden(req: PinUnlock, request: Request, response: Response,
     if wait:
         raise HTTPException(429, f"Muitas tentativas — tente de novo em {wait}s")
     ok = check_pin(req.pin, user.hidden_pin_hash)
-    register_pin_attempt(user, ok)
+    register_pin_attempt(user, ok, db)
     if not ok:
         log.info(f"[photos] {user.username}: PIN das ocultas incorreto")
         raise HTTPException(403, "PIN incorreto")
@@ -476,7 +504,7 @@ def get_photo_full(file_id: int, request: Request, db: Session = Depends(get_db)
                    user: User = Depends(get_user_header_or_cookie)):
     """A foto em resolução total para o visualizador de /photos: o próprio original
     quando o navegador abre o formato, senão (HEIC, TIFF) convertido para JPEG."""
-    row = _file_row(db, file_id, user)
+    row = _file_row(db, file_id, user, request)
     name = Path(row.original_path).name
     if media.kind_of(name) != "image":
         raise HTTPException(404, "Nao e uma foto")
@@ -507,6 +535,8 @@ def get_thumb(sha256: str, request: Request, size: Literal["sm", "lg"] = "sm",
     mi = db.get(MediaInfo, sha256)
     path = (mi.thumb_sm if size == "sm" else mi.thumb_lg) if mi else None
     if not path or not media.thumb_visible_to(db, user, sha256):
+        raise HTTPException(404, "Miniatura nao encontrada")
+    if hidden.locked(request, user) and hidden.sha_is_hidden(db, user, sha256):
         raise HTTPException(404, "Miniatura nao encontrada")
     p = Path(path)
     if not p.exists():

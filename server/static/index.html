@@ -248,7 +248,7 @@
     if (s < 3600)  return (s / 60).toFixed(1) + 'min';
     return (s / 3600).toFixed(1) + 'h';
   };
-  const badge = s => `<span class="badge badge-${s}">${s}</span>`;
+  const badge = s => `<span class="badge badge-${esc(s)}">${esc(s)}</span>`;
 
   async function loadAll() {
     clearError();
@@ -349,7 +349,7 @@
       const isExp = b.label === expandedLabel;
       const runCls = b.has_running ? ' row-running' : '';
       return `
-        <tr class="${isExp?'expanded':''}${runCls}" data-label="${esc(b.label)}" onclick="toggleVersions(this.dataset.label,this)">
+        <tr class="${isExp?'expanded':''}${runCls}" data-label="${esc(b.label)}" onclick="toggleVersions(this.dataset.label,this)" role="button" tabindex="0">
           <td><span class="chevron">▶</span>${esc(b.label)}</td>
           <td class="dim-cell">${esc(b.client_name||'—')}<div class="owner-sub">☺ ${esc(b.owner_username||'—')}</div></td>
           <td>${badge(b.status)}${b.is_stale ? ` <span class="badge badge-failed" title="Sem versão nova há mais de ${b.expected_interval_hours}h (+ tolerância)">⏰ atrasado</span>` : ''}</td>

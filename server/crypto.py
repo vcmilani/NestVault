@@ -65,6 +65,9 @@ def encrypt_stream(src: Path, dst: Path, key: bytes) -> None:
             fout.write(len(ct).to_bytes(4, "little"))
             fout.write(ct)
             chunk_idx += 1
+        # Bytes no disco antes do rename que publica o arquivo — ver storage.fsync_file.
+        fout.flush()
+        os.fsync(fout.fileno())
 
 
 def decrypt_chunks(path: Path, key: bytes) -> Generator[bytes, None, None]:
