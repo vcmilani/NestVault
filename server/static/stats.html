@@ -180,7 +180,6 @@
   </div>
   <div class="header-right">
     <span class="last-updated" id="lastUpdated"></span>
-    <button class="hbtn always-visible" id="statsRefresh" onclick="load(true)" title="Recalcular as estatísticas agora (ignora o cache de 5 min)">↻<span class="hbtn-label"> Recalcular</span></button>
     <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
     <a class="hbtn" href="/admin" title="Dashboard">←<span class="hbtn-label"> Dashboard</span></a>
     <a class="hbtn" href="/disks" title="Discos">⊞<span class="hbtn-label"> Discos</span></a>
@@ -217,6 +216,7 @@
   <!-- 1. Resumo -->
   <div class="section-head" style="margin-bottom:10px">
     <div class="section-title">Resumo</div>
+    <button class="small-btn" id="statsRefresh" onclick="load(true)" title="Recalcular as estatísticas agora, sem esperar o cache vencer">↻ Recalcular</button>
   </div>
   <div class="stats-bar">
     <div class="stat-box">
@@ -469,7 +469,7 @@
 
   async function load(refresh) {
     const btn = document.getElementById('statsRefresh');
-    if (refresh) { btn.disabled = true; btn.style.opacity = '.5'; }
+    if (refresh) { btn.disabled = true; btn.textContent = '↻ Recalculando…'; }
     try {
       const r = await fetch('/api/stats' + (refresh ? '?refresh=true' : ''), {headers: H()});
       if (r.status === 401) { showLogin('API Key inválida.'); return; }
@@ -483,7 +483,7 @@
     } catch(e) {
       showError('Não foi possível conectar: '+e.message);
     } finally {
-      btn.disabled = false; btn.style.opacity = '';
+      btn.disabled = false; btn.textContent = '↻ Recalcular';
     }
   }
 
