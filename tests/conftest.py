@@ -117,7 +117,7 @@ def _wait_background_stats_refresh():
 def _reset_module_caches():
     """Zera caches/sinais de módulo que persistem entre testes (isolamento)."""
     m._reclaimable_cache.update({"value": 0, "ts": 0.0, "gen": -1})
-    m._stats_cache.update({"data": None, "ts": 0.0})
+    m._stats_cache.update({"data": None, "ts": 0.0, "build_s": 0.0})
     m._historical_cache.update({"data": None, "ts": 0.0})
     m._activity_wake.clear()
     m._activity_loop_stop.clear()

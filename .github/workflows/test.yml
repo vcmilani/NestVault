@@ -2,9 +2,15 @@ name: Tests
 
 # Roda a suite em todo push e PR. Antes só existia o workflow de build, disparado
 # por tag: os testes nunca rodavam no CI e um release podia sair quebrado.
+#
+# workflow_call: o build.yml reusa este workflow como portão antes dos binários.
+# push restrito a branches: em push de tag quem roda a suite é o build.yml (via
+# workflow_call); sem o filtro ela rodaria duas vezes para a mesma tag.
 on:
   push:
+    branches: ['**']
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
