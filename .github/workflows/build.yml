@@ -53,6 +53,10 @@ jobs:
             artifact_path: client/dist/nestvault-macos-x64
             strip: "false"
             python_arch: x64
+            # O Python do setup-python no macOS é universal2: no runner arm64 ele
+            # roda nativo e o PyInstaller gera arm64. Forçar x86_64 (Rosetta) faz
+            # o pip baixar wheels x86_64 e o bootloader sair x86_64.
+            run_prefix: arch -x86_64
             expect_arch: x86_64
 
           - os: macos-latest
@@ -83,8 +87,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r client/requirements.txt
-          pip install "pyinstaller==${PYINSTALLER_VERSION}"
+          ${{ matrix.run_prefix }} python -m pip install -r client/requirements.txt
+          ${{ matrix.run_prefix }} python -m pip install "pyinstaller==${PYINSTALLER_VERSION}"
         shell: bash
 
       - name: Build executable
@@ -96,7 +100,7 @@ jobs:
           if [ "${{ matrix.strip }}" = "true" ]; then
             ARGS="$ARGS --strip"
           fi
-          pyinstaller $ARGS nestvault.py
+          ${{ matrix.run_prefix }} python -m PyInstaller $ARGS nestvault.py
 
       - name: Check macOS architecture
         if: runner.os == 'macOS'
