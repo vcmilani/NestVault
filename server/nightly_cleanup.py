@@ -12,6 +12,7 @@ from typing import Callable
 from database import SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy, VersionFile, MaintenanceJob, SsdCachePendingMove, engine, TRASHED_STATUS, SERVER_KIND
 from sqlalchemy import func, delete, exists
 from cache_state import invalidate_activity
+import auth
 
 log = logging.getLogger("backup-server")
 
@@ -24,6 +25,42 @@ _BATCH      = 50
 _TMP_PREFIXES = ("_cloud_tmp_", "_rclone_tmp_", "_tmp_", "_enc_")
 # Prefixos de diretórios de staging temporários (download em lote do rclone).
 _TMP_DIR_PREFIXES = ("_rclone_stage_",)
+# Sufixo do arquivo "reivindicado" pelo orphan cleanup entre o commit e o unlink
+# (ver _claim_for_purge). Um crash nesse meio deixa o arquivo com este sufixo; a
+# varredura de temporários o recolhe depois de 24 h.
+PURGE_SUFFIX = ".__purge__"
+
+
+def _claim_for_purge(paths: list[str]) -> list[tuple[Path, Path]]:
+    """Renomeia cada arquivo para `<nome>.__purge__` ainda dentro da transação.
+
+    O unlink por caminho vinha depois do commit — e um upload do mesmo sha256
+    que chegasse nessa janela via `fc is None`, publicava um arquivo novo no
+    mesmo caminho e tinha o arquivo dele apagado em seguida (linha nova apontando
+    para nada). Renomeado, o caminho fica livre para o upload e o que se apaga é
+    garantidamente o arquivo antigo. Devolve os pares (original, renomeado)."""
+    claimed: list[tuple[Path, Path]] = []
+    for raw in dict.fromkeys(paths):
+        orig = Path(raw)
+        target = orig.with_name(orig.name + PURGE_SUFFIX)
+        try:
+            os.replace(orig, target)
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            log.warning(f"[cleanup-orphans] não foi possível reservar {orig} para remoção: {e}")
+            continue
+        claimed.append((orig, target))
+    return claimed
+
+
+def _unclaim(claimed: list[tuple[Path, Path]]) -> None:
+    """Desfaz _claim_for_purge quando a transação não commitou."""
+    for orig, target in claimed:
+        try:
+            os.replace(target, orig)
+        except OSError as e:
+            log.error(f"[cleanup-orphans] não foi possível devolver {target} para {orig}: {e}")
 
 
 def _delete_versions(db, version_ids: list[int]) -> None:
@@ -128,6 +165,12 @@ def _cleanup_orphan_contents(
     for sha256 in orphan_shas:
         copies   = copies_by_sha.get(sha256, [])
         copy_ids = [c["id"] for c in copies]
+        targets  = [c["stored_at"] for c in copies]
+        if sha256 in ssd_moves_by_sha:
+            targets.append(ssd_moves_by_sha[sha256])
+        if not copies:
+            targets.append(stored_by_sha[sha256])
+        claimed: list[tuple[Path, Path]] = []
         try:
             # FK children de FileContent: deletar antes do parent (respeita PRAGMA foreign_keys=ON).
             if sha256 in ssd_moves_by_sha:
@@ -150,41 +193,26 @@ def _cleanup_orphan_contents(
                 # Re-referenciado por upload concurrent — desfaz deleção das cópias e segue.
                 db.rollback()
                 continue
+            # Reivindica os arquivos ANTES do commit (ver _claim_for_purge).
+            claimed = _claim_for_purge(targets)
             db.commit()
         except Exception:
             db.rollback()
+            _unclaim(claimed)
             raise
 
         # Deleção física (best-effort): falha deixa arquivo órfão no disco, mas o DB é consistente.
         size = size_by_sha.get(sha256, 0)
-        if sha256 in ssd_moves_by_sha:
+        for orig, purge_path in claimed:
             try:
-                Path(ssd_moves_by_sha[sha256]).unlink()
-            except (FileNotFoundError, OSError):
-                pass
-            else:
-                if on_delete:
-                    on_delete(sha256, ssd_moves_by_sha[sha256], size)
-        for c in copies:
-            try:
-                Path(c["stored_at"]).unlink()
+                purge_path.unlink()
             except FileNotFoundError:
                 pass
             except OSError as e:
-                log.warning(f"[cleanup-orphans] Não foi possível remover {c['stored_at']}: {e}")
+                log.warning(f"[cleanup-orphans] Não foi possível remover {orig}: {e}")
             else:
                 if on_delete:
-                    on_delete(sha256, c["stored_at"], size)
-        if not copies:
-            try:
-                Path(stored_by_sha[sha256]).unlink()
-            except FileNotFoundError:
-                pass
-            except OSError as e:
-                log.warning(f"[cleanup-orphans] Não foi possível remover {stored_by_sha[sha256]}: {e}")
-            else:
-                if on_delete:
-                    on_delete(sha256, stored_by_sha[sha256], size)
+                    on_delete(sha256, str(orig), size)
 
         bytes_freed += size
         removed += 1
@@ -238,6 +266,8 @@ def _sweep_one_volume(vol: Path, cutoff: float) -> tuple[int, int]:
     # _content/<2-hex>/, não na raiz do volume — glob(f"{prefix}*") sozinho nunca via
     # esses arquivos, então um crash durante a cifragem deixava lixo permanente ali.
     candidates = _safe_glob(vol, "_content/*/_enc_*")
+    # Arquivos reivindicados pelo orphan cleanup cujo unlink não aconteceu (crash).
+    candidates += _safe_glob(vol, f"_content/*/*{PURGE_SUFFIX}")
     for prefix in _TMP_PREFIXES:
         candidates += _safe_glob(vol, f"{prefix}*")
     for f in candidates:
@@ -736,6 +766,7 @@ def run_nightly_cleanup() -> None:
         try:
             from cloud_ui import drive
             drive_purged = drive.purge_expired(db, trash_cutoff)
+            auth.purge_revoked_sessions(db)
             if drive_purged:
                 log.info(f"[nightly-cleanup] {drive_purged} item(ns) apagado(s) da lixeira "
                          f"das pastas do servidor")

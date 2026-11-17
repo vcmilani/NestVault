@@ -1,5 +1,5 @@
 """
-NestVault  v10.3.0
+NestVault  v10.4.0
 Cada execucao de backup cria uma nova versao dentro do label.
 Conteudo identico e armazenado uma unica vez no servidor (deduplicacao por sha256).
 
@@ -12,6 +12,16 @@ Uso:
     nestvault backups --server http://192.168.1.100:8000
 
 Changelog (cliente — histórico completo do sistema no README):
+  v10.4 Exit code 1 quando backup/restore/cleanup terminam com erro (cron e
+        systemd enxergam a falha); `cleanup --yes` para rodar sem terminal;
+        restore grava num .nvpart e só troca o arquivo depois de conferir o
+        sha256 (--overwrite não trunca mais o original antes do download) e
+        restaura o mtime; Smart Skip marca a versão como failed se o /absorb
+        falhar (antes ficava uma versão "done" vazia que virava baseline);
+        symlinks de arquivo ignorados por padrão (--follow-symlinks) e
+        --one-file-system; --exclude com curingas e caminhos relativos;
+        labels e nomes de arquivo escapados na saída; retentativa em
+        criar/fechar versão; um só prompt de chave em 401, e nenhum sem tty.
   v10.2 HTTP 507 (cota do usuário ou servidor sem espaço) aborta o backup com a
         mensagem do servidor em vez de retentar cinco vezes cada arquivo.
   v9.3  Restore entende caminhos gravados por clientes Windows (C:\\..., \\\\nas\\...)
@@ -57,10 +67,12 @@ Changelog (cliente — histórico completo do sistema no README):
         reconciliação de replicação (reconcile-replication).
 """
 
-VERSION = "v10.3.0"
+VERSION = "v10.4.0"
 
 import os, re, sys, hashlib, argparse, base64, json, socket, threading, time
+from fnmatch import fnmatch
 from pathlib import Path
+from urllib.parse import quote
 from typing import Optional, Callable
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
@@ -92,7 +104,7 @@ def _header():
 
 
 def _kv(key: str, val: str, val_style: str = TEXT):
-    console.print(f"  [{DIM}]{key:<12}[/{DIM}]  [{val_style}]{val}[/{val_style}]")
+    console.print(f"  [{DIM}]{key:<12}[/{DIM}]  [{val_style}]{escape(str(val))}[/{val_style}]")
 
 
 def _info(msg: str):
@@ -103,17 +115,20 @@ def _ok(msg: str):
     console.print(f"  [{GREEN}]{msg}[/{GREEN}]")
 
 
+# _err/_warn/_dim recebem texto cru (caminhos, nomes de arquivo, mensagens de
+# exceção) e o escapam: um nome como "x[/b].txt" derrubava o rich com MarkupError
+# dentro do próprio handler de erro, e "[docs]" simplesmente sumia da saída.
 def _err(msg: str):
-    console.print(f"  [bold {RED}]✗[/bold {RED}]  [{RED}]{msg}[/{RED}]")
+    console.print(f"  [bold {RED}]✗[/bold {RED}]  [{RED}]{escape(msg)}[/{RED}]")
 
 
 def _warn(msg: str):
-    console.print(f"  [{AMBER}]⚠[/{AMBER}]  [{AMBER}]{msg}[/{AMBER}]")
+    console.print(f"  [{AMBER}]⚠[/{AMBER}]  [{AMBER}]{escape(msg)}[/{AMBER}]")
 
 
 def _dim(msg: str):
     if _verbose:
-        console.print(f"  [{DIM}]{msg}[/{DIM}]")
+        console.print(f"  [{DIM}]{escape(msg)}[/{DIM}]")
 
 
 def _make_progress() -> Progress:
@@ -163,14 +178,41 @@ API_KEY = _load_api_key()
 IGNORED_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 
 
-def _prompt_api_key():
+_prompt_lock = threading.Lock()
+
+
+def _prompt_api_key(rejected: Optional[str] = None) -> bool:
+    """Pede a chave no terminal após um 401. True se a chave mudou.
+
+    Um só prompt por chave rejeitada: com --workers 8 cada thread abria o seu
+    getpass por cima dos outros. Sem terminal (cron), não há o que perguntar —
+    antes o getpass levantava EOFError dentro do worker."""
     global API_KEY
-    import getpass
-    _warn("Autenticação necessária — informe a API Key.")
-    key = getpass.getpass("  API Key: ").strip()
-    if key:
-        API_KEY = key
+    with _prompt_lock:
+        if rejected is not None and API_KEY != rejected:
+            return True  # outra thread já trocou a chave
+        if not sys.stdin.isatty():
+            _err("Autenticação negada (401) e sem terminal para pedir a chave — defina BACKUP_API_KEY.")
+            return False
+        import getpass
+        _warn("Autenticação necessária — informe a API Key.")
+        try:
+            key = getpass.getpass("  API Key: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return False
+        if key and key != API_KEY:
+            API_KEY = key
+            return True
+        return False
+
+
 CHUNK_SIZE = 1024 * 1024  # 1 MB
+
+
+def _q(part: str) -> str:
+    """Segmento de URL: um label com '#', '?', '%' ou '/' truncava a URL ou caía
+    em outra rota."""
+    return quote(str(part), safe="")
 
 
 # -- Helpers ------------------------------------------------------------------
@@ -218,7 +260,9 @@ class _AuthSession(requests.Session):
     def request(self, method, url, **kwargs):
         r = super().request(method, url, **kwargs)
         if r.status_code == 401:
-            _prompt_api_key()
+            rejected = (kwargs.get('headers') or {}).get('X-API-Key')
+            if not _prompt_api_key(rejected):
+                return r  # sem chave nova: o caller vê o 401 e conta o erro
             if 'headers' in kwargs and API_KEY:
                 kwargs['headers']['X-API-Key'] = API_KEY
             data = kwargs.get('data')
@@ -340,7 +384,7 @@ def ensure_backup(server, label, client_name, prefix):
 
 
 def create_version(server, label, version_key):
-    r = _session.post(f"{server}/backups/{label}/versions",
+    r = _session.post(f"{server}/backups/{_q(label)}/versions",
                       json={"version_key": version_key},
                       headers=build_headers(), timeout=10)
     r.raise_for_status()
@@ -348,7 +392,7 @@ def create_version(server, label, version_key):
 
 
 def finish_version(server, label, version_key, status="done"):
-    r = _session.patch(f"{server}/backups/{label}/versions/{version_key}",
+    r = _session.patch(f"{server}/backups/{_q(label)}/versions/{_q(version_key)}",
                        json={"status": status},
                        headers=build_headers(), timeout=10)
     r.raise_for_status()
@@ -469,7 +513,7 @@ def register_batch(server, label, version_key, items: list[dict]) -> dict:
 
 def absorb_version(server: str, label: str, version_key: str, source_version_key: str) -> dict:
     r = _session.post(
-        f"{server}/backups/{label}/versions/{version_key}/absorb",
+        f"{server}/backups/{_q(label)}/versions/{_q(version_key)}/absorb",
         json={"source_version_key": source_version_key},
         headers=build_headers(),
         timeout=60,
@@ -482,14 +526,22 @@ def _server_version(server: str) -> tuple[int, int]:
     """(major, minor) reportados pelo /health — (0, 0) se indisponível.
     Uma única chamada alimenta todos os gates de feature (batch check >= 2.6,
     batch register >= 7.8)."""
-    try:
-        r = _session.get(f"{server}/health", headers=build_headers(), timeout=5)
-        if not r.ok:
-            return (0, 0)
-        parts = r.json().get("version", "0.0.0").split(".")
-        return (int(parts[0]), int(parts[1]))
-    except Exception:
-        return (0, 0)
+    last = None
+    for attempt in range(2):
+        try:
+            r = _session.get(f"{server}/health", headers=build_headers(), timeout=5)
+            if r.ok:
+                parts = r.json().get("version", "0.0.0").split(".")
+                return (int(parts[0]), int(parts[1]))
+            last = f"HTTP {r.status_code}"
+        except Exception as e:  # noqa: BLE001
+            last = str(e)
+        if attempt == 0:
+            time.sleep(1)
+    # Antes caía em silêncio no modo lento (check por arquivo, sem lote) — uma
+    # falha passageira do /health custava um backup inteiro sem batch.
+    _warn(f"/health indisponível ({last}) — seguindo no modo compatível, sem lote")
+    return (0, 0)
 
 
 def _fmt_purge_after(iso: Optional[str]) -> str:
@@ -501,7 +553,7 @@ def _fmt_purge_after(iso: Optional[str]) -> str:
 
 
 def delete_label_api(server, label):
-    r = _session.delete(f"{server}/backups/{label}", headers=build_headers(), timeout=30)
+    r = _session.delete(f"{server}/backups/{_q(label)}", headers=build_headers(), timeout=30)
     r.raise_for_status()
     return r.json()
 
@@ -558,8 +610,9 @@ def _local_cache_dir() -> Path:
 
 
 def _local_cache_path(label: str) -> Path:
+    # Sufixo com hash do label: "a/b" e "a_b" viravam o mesmo arquivo.
     safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in label)
-    return _local_cache_dir() / f"{safe}.json"
+    return _local_cache_dir() / f"{safe}-{hashlib.sha1(label.encode()).hexdigest()[:8]}.json"
 
 
 def _load_local_hash_cache(label: str) -> dict:
@@ -589,11 +642,14 @@ def _save_local_hash_cache(label: str, version_key: str, files: dict):
 
 def _fetch_prev_cache(server, label) -> tuple[Optional[str], dict]:
     try:
-        r = _session.get(f"{server}/backups/{label}/versions",
+        r = _session.get(f"{server}/backups/{_q(label)}/versions",
                          headers=build_headers(), timeout=10)
         if not r.ok:
             return None, {}
-        last_done = next((v for v in r.json() if v["status"] == "done"), None)
+        # Uma versão done SEM arquivos não serve de baseline: era o que um absorb
+        # falho deixava para trás, e o run seguinte herdava do vazio.
+        last_done = next((v for v in r.json()
+                          if v["status"] == "done" and v.get("file_count", 1) > 0), None)
         if not last_done:
             return None, {}
         version_key = last_done["version_key"]
@@ -644,6 +700,24 @@ def _smart_skip_eligible(
 
 
 # -- Backup -------------------------------------------------------------------
+def _excluded(name: str, rel: str, patterns: list) -> bool:
+    """--exclude casa pelo nome (`*.tmp`, `node_modules`) ou pelo caminho relativo
+    à raiz (`docs/cache`, `*/build`). Antes só o nome exato."""
+    return any(fnmatch(name, p) or fnmatch(rel, p) for p in patterns)
+
+
+def _absorb_ok(absorb_result: Optional[dict], smart_skip_used: bool, prev_cache: dict) -> bool:
+    """O absorb cumpriu o papel? Falhou → não. No smart skip, herdar zero
+    arquivos de uma versão anterior que tinha arquivos também é falha: a versão
+    ficaria "done" e vazia, o próximo run herdaria dela, e o `cleanup --keep N`
+    acabaria apagando todas as versões reais."""
+    if absorb_result is None:
+        return False
+    if smart_skip_used and prev_cache and absorb_result.get("inherited", 0) == 0:
+        return False
+    return True
+
+
 def _chunked(lst: list, n: int):
     for i in range(0, len(lst), n):
         yield lst[i:i + n]
@@ -653,6 +727,7 @@ def backup_directory(
     directory, label, server=DEFAULT_SERVER, dry_run=False,
     path_prefix=None, exclude=None, client_name=None, workers=4, verbose=False,
     batch_size=100, hash_workers=None, accumulate=False, full_rescan_days=7.0,
+    follow_symlinks=False, one_file_system=False,
 ):
     global _verbose
     _verbose = verbose
@@ -666,8 +741,9 @@ def backup_directory(
     version_key = now_key()
 
     if not dry_run:
-        ensure_backup(server, label, client_name, path_prefix)
-        create_version(server, label, version_key)
+        # Com retentativa: um soluço de rede aqui abortava com traceback.
+        _with_retries(lambda: ensure_backup(server, label, client_name, path_prefix), "backups")
+        _with_retries(lambda: create_version(server, label, version_key), "versao")
 
     _kv("Label", label, AMBER)
     _kv("Versao", version_key)
@@ -686,12 +762,17 @@ def backup_directory(
     # a árvore inteira numa lista extra e ordenar globalmente no final.
     pending = []
     n_dirs = 0
-    exclude_set = set(exclude or [])
+    n_symlinks = 0
+    n_other_fs = 0
+    patterns = list(exclude or [])
+    root_dev = root.stat().st_dev if one_file_system else None
     with _scan_progress() as scan_progress:
         scan_task = scan_progress.add_task("Varrendo…", total=None)
         for dirpath, dirnames, filenames in os.walk(root, onerror=lambda e: _dim(f"Aviso: {e}")):
             n_dirs += 1
-            current = escape(_short_path(os.path.relpath(dirpath, root)))
+            rel_dir = os.path.relpath(dirpath, root)
+            rel_dir = "" if rel_dir == "." else rel_dir.replace(os.sep, "/")
+            current = escape(_short_path(rel_dir or "."))
 
             def _show_scan():
                 scan_progress.update(
@@ -705,13 +786,34 @@ def backup_directory(
             _show_scan()
             # Poda in-place: pastas do --exclude (e tudo abaixo delas) nem são
             # lidas, em vez de percorridas inteiras e filtradas arquivo a arquivo.
-            dirnames[:] = sorted(d for d in dirnames if d not in exclude_set)
+            # Com --one-file-system, pontos de montagem (volume externo, share de
+            # rede, ~/Library/CloudStorage) também ficam de fora.
+            kept = []
+            for d in sorted(dirnames):
+                rel_d = f"{rel_dir}/{d}" if rel_dir else d
+                if _excluded(d, rel_d, patterns):
+                    continue
+                if root_dev is not None:
+                    try:
+                        if os.lstat(os.path.join(dirpath, d)).st_dev != root_dev:
+                            n_other_fs += 1
+                            continue
+                    except OSError:
+                        continue
+                kept.append(d)
+            dirnames[:] = kept
             for i, name in enumerate(sorted(filenames), 1):
                 if i % 1000 == 0:
                     _show_scan()
-                if name in IGNORED_NAMES or name in exclude_set:
+                rel_f = f"{rel_dir}/{name}" if rel_dir else name
+                if name in IGNORED_NAMES or _excluded(name, rel_f, patterns):
                     continue
                 fp = Path(dirpath) / name
+                # Symlink de arquivo: is_file() o seguia, e um link para fora da
+                # raiz (~/.ssh/id_rsa, /etc/...) subia como conteúdo do backup.
+                if fp.is_symlink() and not follow_symlinks:
+                    n_symlinks += 1
+                    continue
                 if not fp.is_file():
                     continue
                 op = str(fp) if not path_prefix else str(Path(path_prefix) / fp.relative_to(root))
@@ -719,6 +821,10 @@ def backup_directory(
 
     total = len(pending)
     _kv("Arquivos", str(total))
+    if n_symlinks:
+        _dim(f"{n_symlinks} symlink(s) ignorado(s) (use --follow-symlinks para incluir)")
+    if n_other_fs:
+        _dim(f"{n_other_fs} ponto(s) de montagem ignorado(s) (--one-file-system)")
 
     stats = {"uploaded": 0, "registered": 0, "fast": 0, "skipped": 0, "errors": 0}
     lock         = threading.Lock()
@@ -962,7 +1068,14 @@ def backup_directory(
                     check_futures = []
                     buffer = []
                     for hf in as_completed(hash_futures):
-                        op, sha256, size, mtime = hf.result()
+                        try:
+                            op, sha256, size, mtime = hf.result()
+                        except Exception as exc:  # noqa: BLE001 — BrokenProcessPool etc.
+                            _err(f"Hash falhou ({hash_futures[hf][1]}): {exc}")
+                            with lock:
+                                stats["errors"] += 1
+                            _update_bar()
+                            continue
                         if sha256 is None:
                             _warn(f"Arquivo desapareceu durante hashing — ignorado: {op}")
                             with lock:
@@ -1013,6 +1126,12 @@ def backup_directory(
                         return
 
                     sha256 = sha256_file(fp)
+                    if dry_run:
+                        # A versão não existe no servidor: /check devolveria 404.
+                        _dim(f"UP    {op}  ({fmt_size(size)})  [dry-run]")
+                        with lock:
+                            stats["uploaded"] += 1
+                        return
                     check  = _with_retries(lambda: check_file(server, label, version_key, op, sha256, size, mtime), op)
 
                     if not check["needs_upload"]:
@@ -1068,10 +1187,22 @@ def backup_directory(
         status = "failed" if stats["errors"] else "done"
         if (accumulate or smart_skip_used) and status == "done" and prev_done_key:
             try:
-                absorb_result = absorb_version(server, label, version_key, prev_done_key)
-            except Exception as e:
+                absorb_result = _with_retries(
+                    lambda: absorb_version(server, label, version_key, prev_done_key), "absorb")
+            except Exception as e:  # noqa: BLE001
                 _err(f"Absorb: {e}")
-        finish_version(server, label, version_key, status)
+                absorb_result = None
+            if not _absorb_ok(absorb_result, smart_skip_used, prev_cache):
+                _err("Versao sem os arquivos herdados — marcada como failed para nao virar baseline vazia")
+                status = "failed"
+                with lock:
+                    stats["errors"] += 1
+        try:
+            _with_retries(lambda: finish_version(server, label, version_key, status), "finish")
+        except requests.RequestException as e:
+            _err(f"Nao foi possivel fechar a versao ({e}) — ela fica 'running' ate a limpeza noturna")
+            with lock:
+                stats["errors"] += 1
 
         # Cache local: so grava o snapshot completo quando a versao nao usou
         # --accumulate (que herda arquivos ausentes localmente do servidor,
@@ -1084,7 +1215,7 @@ def backup_directory(
     status_text  = "concluido" if not stats["errors"] else "com erros"
 
     lines = [
-        f"[{DIM}]Label[/{DIM}]        [{AMBER}][{label}][/{AMBER}]",
+        f"[{DIM}]Label[/{DIM}]        [{AMBER}]{escape(f'[{label}]')}[/{AMBER}]",
         f"[{DIM}]Versao[/{DIM}]       [{TEXT}]{version_key}[/{TEXT}]",
         f"[{DIM}]Verificados[/{DIM}]  [{TEXT}]{total}[/{TEXT}]",
         f"[{GREEN}]Enviados[/{GREEN}]     [{GREEN}]{stats['uploaded']}[/{GREEN}]",
@@ -1094,6 +1225,11 @@ def backup_directory(
     ]
     if stats["errors"]:
         lines.append(f"[bold {RED}]Erros[/bold {RED}]        [{RED}]{stats['errors']}[/{RED}]")
+    if _abort_event.is_set():
+        # Depois do abort as tarefas na fila saem sem contar em nada.
+        processed = sum(stats.values())
+        if total > processed:
+            lines.append(f"[{DIM}]Nao enviados[/{DIM}] [{RED}]{total - processed}[/{RED}]  [{DIM}](backup abortado)[/{DIM}]")
     if absorb_result is not None:
         modo = "smart skip" if smart_skip_used else "modo acumulativo"
         lines.append(
@@ -1142,8 +1278,8 @@ def list_backups(server=DEFAULT_SERVER, client_name=None):
 
     for b in backups:
         table.add_row(
-            b["label"],
-            b.get("client_name") or "—",
+            escape(b["label"]),
+            escape(b.get("client_name") or "—"),
             str(b["version_count"]),
             str(b["file_count"]),
             fmt_size(b["total_size_bytes"]),
@@ -1157,13 +1293,13 @@ def list_backups(server=DEFAULT_SERVER, client_name=None):
 
 # -- List versions ------------------------------------------------------------
 def list_versions(label, server=DEFAULT_SERVER):
-    r = _session.get(f"{server}/backups/{label}/versions",
+    r = _session.get(f"{server}/backups/{_q(label)}/versions",
                      headers=build_headers(), timeout=10)
     r.raise_for_status()
     versions = r.json()
 
     if not versions:
-        _info(f"Nenhuma versao encontrada em [{label}].")
+        _info(f"Nenhuma versao encontrada em {escape(f'[{label}]')}.")
         return
 
     _STATUS_STYLE = {
@@ -1202,8 +1338,8 @@ def list_versions(label, server=DEFAULT_SERVER):
         status = v["status"]
         sc = _STATUS_STYLE.get(status, TEXT)
         table.add_row(
-            v["version_key"],
-            f"[{sc}]{status}[/{sc}]",
+            escape(v["version_key"]),
+            f"[{sc}]{escape(status)}[/{sc}]",
             str(v["file_count"]),
             fmt_size(v["total_size_bytes"]),
             dur_str,
@@ -1281,23 +1417,24 @@ def restore(destination, label, version_key, server=DEFAULT_SERVER,
         _err(f"Erro ao buscar arquivos: {e}")
         sys.exit(1)
 
+    stats = {"restored": 0, "skipped": 0, "errors": 0}
     if not files:
         _info("Nenhum arquivo ativo nesta versao.")
-        return
+        return stats
 
     _kv("Arquivos", str(len(files)))
     console.print()
 
-    stats = {"restored": 0, "skipped": 0, "errors": 0}
     lock = threading.Lock()
 
     # Fase 1 (sequencial, sem I/O): filtros de path e seleção do que processar.
-    to_process: list[tuple[int, str, Path, str, int]] = []
+    to_process: list[tuple[int, str, Path, str, int, Optional[float]]] = []
     for record in files:
         file_id       = record["id"]
         original_path = record["original_path"]
         sha256        = record["sha256"]
         size          = record["size"]
+        mtime         = record.get("mtime")
 
         parts = _restore_relative(original_path, path_prefix)
         dest_file = dest_root.joinpath(*parts) if parts else None
@@ -1319,11 +1456,11 @@ def restore(destination, label, version_key, server=DEFAULT_SERVER,
             stats["skipped"] += 1
             continue
 
-        if any(ex in Path(relative).parts for ex in (exclude or [])):
+        if any(_excluded(part, relative, exclude or []) for part in Path(relative).parts):
             stats["skipped"] += 1
             continue
 
-        to_process.append((file_id, relative, dest_file, sha256, size))
+        to_process.append((file_id, relative, dest_file, sha256, size, mtime))
 
     # Fase 2 (paralela, mesmo padrão do backup): hash de existentes + download.
     with _make_progress() as progress:
@@ -1337,7 +1474,13 @@ def restore(destination, label, version_key, server=DEFAULT_SERVER,
             progress.update(overall, advance=1, description=desc)
 
         def _restore_one(item):
-            file_id, relative, dest_file, sha256, size = item
+            file_id, relative, dest_file, sha256, size, mtime = item
+            # Baixa num .nvpart ao lado e só troca pelo destino depois de conferir
+            # o sha256: com --overwrite, o original era truncado antes do download
+            # e uma queda de rede (ou hash errado) deixava o arquivo do usuário
+            # pela metade ou apagado. Sem --overwrite, o parcial ficava para trás
+            # e virava "DIFF" no run seguinte.
+            part = dest_file.with_name(dest_file.name + ".nvpart")
             try:
                 if dest_file.exists() and not overwrite:
                     match = sha256_file(dest_file) == sha256
@@ -1361,23 +1504,30 @@ def restore(destination, label, version_key, server=DEFAULT_SERVER,
                     total=total_bytes / (1024 * 1024),
                 )
                 try:
-                    with open(dest_file, "wb") as f:
+                    with open(part, "wb") as f:
                         for chunk in r.iter_content(chunk_size=65536):
                             f.write(chunk)
                             progress.update(task_id, advance=len(chunk) / (1024 * 1024))
                 finally:
                     progress.remove_task(task_id)
 
-                if sha256_file(dest_file) != sha256:
-                    _err(f"Integridade falhou — {relative} removido")
-                    dest_file.unlink()
+                if sha256_file(part) != sha256:
+                    _err(f"Integridade falhou — {relative} descartado (o arquivo existente ficou intacto)")
+                    part.unlink(missing_ok=True)
                     with lock:
                         stats["errors"] += 1
                     return
+                if mtime:
+                    try:
+                        os.utime(part, (mtime, mtime))
+                    except OSError:
+                        pass
+                os.replace(part, dest_file)
                 with lock:
                     stats["restored"] += 1
 
             except requests.RequestException as e:
+                part.unlink(missing_ok=True)
                 _err(f"{relative}: {e}")
                 with lock:
                     stats["errors"] += 1
@@ -1385,6 +1535,7 @@ def restore(destination, label, version_key, server=DEFAULT_SERVER,
                 # Permissão, disco cheio, etc. — sem isso, o erro subia por
                 # list(pool.map(...)) e abortava o restore inteiro no meio,
                 # em vez de contar como erro deste arquivo e seguir os demais.
+                part.unlink(missing_ok=True)
                 _err(f"{relative}: erro de E/S — {e.strerror or e}")
                 with lock:
                     stats["errors"] += 1
@@ -1426,12 +1577,13 @@ def restore(destination, label, version_key, server=DEFAULT_SERVER,
         padding=(0, 2),
     ))
     console.print()
+    return stats
 
 
 # -- Cleanup ------------------------------------------------------------------
 def _cleanup_label(label, keep, server=DEFAULT_SERVER):
     r = _session.post(
-        f"{server}/backups/{label}/cleanup",
+        f"{server}/backups/{_q(label)}/cleanup",
         json={"backup_label": label, "keep": keep},
         headers=build_headers(), timeout=30,
     )
@@ -1446,7 +1598,7 @@ def _cleanup_label(label, keep, server=DEFAULT_SERVER):
     storage_tag = ("storage=em background" if result.get("scheduled")
                    else f"storage={storage}")
     _info(
-        f"[{AMBER}][{label}][/{AMBER}]  "
+        f"[{AMBER}]{escape(f'[{label}]')}[/{AMBER}]  "
         f"[{GREEN}]mantidas={kept}[/{GREEN}]  "
         f"[{RED}]{removed_tag}={len(removed)}[/{RED}]  "
         f"[{DIM}]{storage_tag}[/{DIM}]"
@@ -1458,7 +1610,19 @@ def _cleanup_label(label, keep, server=DEFAULT_SERVER):
     return result
 
 
-def cleanup(label=None, keep=5, server=DEFAULT_SERVER):
+def _confirm(prompt: str, yes: bool) -> bool:
+    """Confirmação interativa. --yes pula; sem terminal (cron) não dá para
+    perguntar — antes o input() morria com EOFError e a retenção nunca rodava."""
+    if yes:
+        return True
+    if not sys.stdin.isatty():
+        _err("Sem terminal para confirmar — use --yes para rodar sem interacao (ex.: no cron)")
+        sys.exit(2)
+    return input(prompt).strip().lower() in ("s", "sim")
+
+
+def cleanup(label=None, keep=5, server=DEFAULT_SERVER, yes=False) -> int:
+    """Devolve quantos labels falharam (0 = tudo certo)."""
     if label:
         labels = [label]
     else:
@@ -1467,13 +1631,13 @@ def cleanup(label=None, keep=5, server=DEFAULT_SERVER):
         labels = [b["label"] for b in r.json()]
         if not labels:
             _info("Nenhum backup encontrado.")
-            return
+            return 0
         _kv("Cleanup", f"todos os labels ({len(labels)} encontrados)  keep={keep}")
 
     console.print()
     if label:
         console.print(
-            f"  [{AMBER}]Label:[/{AMBER}]  [{TEXT}]{label}[/{TEXT}]  "
+            f"  [{AMBER}]Label:[/{AMBER}]  [{TEXT}]{escape(label)}[/{TEXT}]  "
             f"[{DIM}]manter as {keep} versoes mais recentes[/{DIM}]\n"
         )
     else:
@@ -1481,15 +1645,15 @@ def cleanup(label=None, keep=5, server=DEFAULT_SERVER):
             f"  [{AMBER}]Labels:[/{AMBER}]  [{TEXT}]{len(labels)} label(s)[/{TEXT}]  "
             f"[{DIM}]manter as {keep} versoes mais recentes por label[/{DIM}]\n"
         )
-    confirm = input("  Confirmar limpeza? [s/N] ")
-    if confirm.strip().lower() not in ("s", "sim"):
+    if not _confirm("  Confirmar limpeza? [s/N] ", yes):
         _info("Operacao cancelada.")
-        return
+        return 0
 
     console.print()
     total_versions = 0
     total_storage  = 0
     scheduled      = False
+    failed         = 0
     for lbl in labels:
         try:
             result = _cleanup_label(lbl, keep, server)
@@ -1497,6 +1661,7 @@ def cleanup(label=None, keep=5, server=DEFAULT_SERVER):
             total_storage  += result.get("storage_files_removed", 0)
             scheduled = scheduled or bool(result.get("scheduled"))
         except requests.RequestException as e:
+            failed += 1
             _err(f"[{lbl}]: {e}")
 
     if len(labels) > 1:
@@ -1514,26 +1679,26 @@ def cleanup(label=None, keep=5, server=DEFAULT_SERVER):
         _dim("  A limpeza do storage segue em background no servidor "
              "(acompanhe em Atividade no dashboard).")
     console.print()
+    return failed
 
 
 # -- Delete label -------------------------------------------------------------
 def delete_label(label, server=DEFAULT_SERVER, force=False):
     if not force:
         console.print(
-            f"\n  [{RED}]Atenção:[/{RED}] isso remove o label [{AMBER}][{label}][/{AMBER}] "
+            f"\n  [{RED}]Atenção:[/{RED}] isso remove o label [{AMBER}]{escape(f'[{label}]')}[/{AMBER}] "
             f"e [{RED}]TODAS[/{RED}] as suas versoes.\n"
         )
-        confirm = input("  Confirmar? [s/N] ")
-        if confirm.strip().lower() not in ("s", "sim"):
+        if not _confirm("  Confirmar? [s/N] ", False):
             _info("Operacao cancelada.")
             return
     try:
         result = delete_label_api(server, label)
         if result.get("trashed"):
-            _ok(f"Label [{label}] enviado a lixeira do servidor — o admin pode restaura-lo "
+            _ok(f"Label {escape(f'[{label}]')} enviado a lixeira do servidor — o admin pode restaura-lo "
                 f"ate {_fmt_purge_after(result.get('purge_after'))}.")
         else:
-            _ok(f"Label [{label}] excluido. Limpeza do storage iniciada em background.")
+            _ok(f"Label {escape(f'[{label}]')} excluido. Limpeza do storage iniciada em background.")
     except requests.RequestException as e:
         _err(f"Erro ao excluir label: {e}")
         sys.exit(1)
@@ -1607,8 +1772,7 @@ def encrypt_existing(server=DEFAULT_SERVER):
         f"\n  [{RED}]Atenção:[/{RED}] isso cifra [{AMBER}]TODOS[/{AMBER}] os arquivos "
         f"não cifrados no storage. [{RED}]Esta operação é irreversível.[/{RED}]\n"
     )
-    confirm = input("  Confirmar? [s/N] ")
-    if confirm.strip().lower() not in ("s", "sim"):
+    if not _confirm("  Confirmar? [s/N] ", False):
         _info("Operacao cancelada.")
         return
     _info("Iniciando criptografia de arquivos existentes...")
@@ -1651,6 +1815,8 @@ def encrypt_existing(server=DEFAULT_SERVER):
 def main():
     parser = argparse.ArgumentParser(
         description=f"NestVault {VERSION} — backup com deduplicacao e criptografia",
+        epilog="Codigos de saida: 0 sucesso; 1 backup/restore/cleanup com erros; 2 uso incorreto "
+               "(ex.: confirmacao necessaria sem terminal).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1662,7 +1828,13 @@ def main():
     pb.add_argument("--server", default=DEFAULT_SERVER)
     pb.add_argument("--prefix", default=None)
     pb.add_argument("--client", default=None)
-    pb.add_argument("--exclude", nargs="+", default=[])
+    pb.add_argument("--exclude", nargs="+", action="append", default=[], metavar="PADRAO",
+                    help="Nomes ou caminhos relativos a ignorar; aceita curingas (*.tmp, cache, docs/build). "
+                         "Pode repetir a opcao.")
+    pb.add_argument("--follow-symlinks", action="store_true", dest="follow_symlinks",
+                    help="Inclui o conteudo apontado por symlinks de arquivo (padrao: ignorados)")
+    pb.add_argument("--one-file-system", action="store_true", dest="one_file_system",
+                    help="Nao entra em pontos de montagem (discos externos, shares, pastas de nuvem)")
     pb.add_argument("--workers", type=int, default=4)
     pb.add_argument("--hash-workers", type=int, default=None, dest="hash_workers",
                     help="Processos paralelos para calcular SHA256 (padrao: os.cpu_count())")
@@ -1698,8 +1870,8 @@ def main():
     pr.add_argument("--prefix", default=None)
     pr.add_argument("--overwrite", action="store_true")
     pr.add_argument("--dry-run", action="store_true")
-    pr.add_argument("--exclude", nargs="+", default=[],
-                    help="Nomes de diretório a ignorar durante o restore")
+    pr.add_argument("--exclude", nargs="+", action="append", default=[], metavar="PADRAO",
+                    help="Nomes de diretório (ou curingas) a ignorar durante o restore; pode repetir")
     pr.add_argument("--workers", type=int, default=4,
                     help="Downloads paralelos (padrao: 4)")
 
@@ -1711,6 +1883,8 @@ def main():
     pc.add_argument("--keep", type=int, default=5,
                     help="Versoes a manter por label (padrao: 5)")
     pc.add_argument("--server", default=DEFAULT_SERVER)
+    pc.add_argument("-y", "--yes", action="store_true",
+                    help="Sem confirmacao interativa (obrigatorio fora de um terminal, ex.: cron)")
 
     # delete-label
     pdl = sub.add_parser("delete-label", help="Exclui um label e todas as suas versoes")
@@ -1751,17 +1925,25 @@ def main():
     if hasattr(args, "server") and not (args.server or "").startswith(("http://", "https://")):
         parser.error(f"--server invalido: {args.server!r}. Use http://host:porta ou https://host:porta")
 
+    # --exclude aceita "a b" (nargs) e repetição (append): achata a lista de listas.
+    if hasattr(args, "exclude"):
+        args.exclude = [p for group in args.exclude for p in (group if isinstance(group, list) else [group])]
+
     _header()
 
     if args.command == "backup":
         _kv("Comando", "BACKUP")
-        backup_directory(
+        stats = backup_directory(
             args.directory, args.label, args.server,
             args.dry_run, args.prefix, args.exclude,
             args.client, args.workers, args.verbose, args.batch_size,
             args.hash_workers, accumulate=args.accumulate,
             full_rescan_days=args.full_rescan_days,
+            follow_symlinks=args.follow_symlinks, one_file_system=args.one_file_system,
         )
+        # Exit code real: cron/systemd viam sucesso mesmo com a versão "failed".
+        if stats["errors"]:
+            sys.exit(1)
 
     elif args.command == "backups":
         list_backups(args.server, args.client)
@@ -1771,20 +1953,24 @@ def main():
 
     elif args.command == "restore":
         _kv("Comando", "RESTORE")
-        restore(
+        stats = restore(
             args.destination, args.label, args.version_key,
             args.server, args.prefix, args.dry_run, args.overwrite,
             exclude=args.exclude, workers=args.workers,
         )
+        if stats["errors"]:
+            sys.exit(1)
 
     elif args.command == "cleanup":
         _kv("Comando", "CLEANUP")
         if getattr(args, "all", False):
-            cleanup(label=None, keep=args.keep, server=args.server)
+            failed = cleanup(label=None, keep=args.keep, server=args.server, yes=args.yes)
         elif args.label:
-            cleanup(label=args.label, keep=args.keep, server=args.server)
+            failed = cleanup(label=args.label, keep=args.keep, server=args.server, yes=args.yes)
         else:
             _err("Informe --label <nome> ou --all")
+            sys.exit(2)
+        if failed:
             sys.exit(1)
 
     elif args.command == "delete-label":

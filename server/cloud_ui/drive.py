@@ -22,7 +22,7 @@ from fastapi import HTTPException
 from sqlalchemy import exists, func, insert, literal, or_, select
 from sqlalchemy.orm import Session
 
-from database import (BackupID, BackupVersion, FileContent, ServerFolder, ServerTrashEntry,
+from database import (BackupID, BackupVersion, FileContent, ServerFolder, ServerTrashEntry, TRASHED_STATUS,
                       User, VersionFile, SERVER_KIND, SERVER_LIVE_KEY, SERVER_TRASH_KEY,
                       SERVER_TRASH_STATUS)
 from . import tree
@@ -255,9 +255,11 @@ def rename(db: Session, d: Drive, path: str, new_name: str, user: User) -> str:
     dst = join(parent, new_name)
     if dst == src:
         return dst
-    # Só troca maiúscula/minúscula: não é colisão com ele mesmo.
-    if dst.lower() != src.lower():
-        _require_free(db, d, dst)
+    # kind_at compara com caixa exata: trocar só maiúscula/minúscula não colide
+    # com o próprio item, mas colide com um 'foo' que já exista ao lado de 'Foo'
+    # — antes esse caso pulava a checagem e acabava em IntegrityError (500) ou
+    # em duas pastas fundidas em silêncio.
+    _require_free(db, d, dst)
     _relocate(db, d, src, dst)
     db.commit()
     log.info(f"[drive] {user.username} renomeou {d.label}:{src!r} → {new_name!r}")
@@ -394,9 +396,13 @@ def purge_expired(db: Session, cutoff: datetime) -> int:
     entries = db.query(ServerTrashEntry).filter(ServerTrashEntry.deleted_at < cutoff).all()
     if not entries:
         return 0
+    # A versão trash de uma pasta que está inteira na lixeira do admin fica com
+    # status TRASHED_STATUS (ver main._trash_versions). Sem incluí-lo aqui, a
+    # entrada vencida era apagada mas as linhas de VersionFile com o token dela
+    # ficavam para sempre — inalcançáveis e segurando o conteúdo no disco.
     trash_ids = dict(db.query(BackupVersion.backup_label, BackupVersion.id)
                      .filter(BackupVersion.version_key == SERVER_TRASH_KEY,
-                             BackupVersion.status == SERVER_TRASH_STATUS,
+                             BackupVersion.status.in_([SERVER_TRASH_STATUS, TRASHED_STATUS]),
                              BackupVersion.backup_label.in_({e.label for e in entries}))
                      .all())
     count = 0

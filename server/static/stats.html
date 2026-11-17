@@ -86,6 +86,29 @@
   .diskhist-labels{display:flex;margin-top:6px}
   .diskhist-label{flex:1;min-width:0;font-size:8px;color:var(--text-mute);text-align:center;overflow:hidden;white-space:nowrap}
 
+  /* Calendário de backups por dia */
+  .bcal-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}
+  .bcal-month{font-size:12px;letter-spacing:.06em;text-transform:capitalize}
+  .bcal-month-sub{font-size:10px;color:var(--text-dim);margin-left:8px;text-transform:none}
+  .bcal-nav{display:flex;gap:4px}
+  .bcal-btn{background:var(--bg3);border:1px solid var(--border);color:var(--text);font:inherit;font-size:12px;padding:3px 10px;cursor:pointer}
+  .bcal-btn:disabled{opacity:.35;cursor:default}
+  .bcal-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:3px}
+  .bcal-wd{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-mute);text-align:center;padding-bottom:2px}
+  .bcal-day{position:relative;min-height:48px;border:1px solid var(--border);background:var(--bg3);padding:4px 6px;display:flex;flex-direction:column;justify-content:space-between;cursor:default}
+  .bcal-day.empty{background:transparent;border-color:transparent}
+  .bcal-day.future{opacity:.4}
+  .bcal-day.today{outline:1px solid var(--amber);outline-offset:-1px}
+  .bcal-num{font-size:10px;color:var(--text-dim)}
+  .bcal-day.today .bcal-num{color:var(--amber);font-weight:600}
+  .bcal-count{font-size:15px;font-weight:300;text-align:right;font-variant-numeric:tabular-nums;color:var(--text)}
+  .bcal-count.zero{color:var(--text-mute);font-size:11px}
+  .bcal-legend{display:flex;gap:16px;margin-top:10px;font-size:10px;color:var(--text-dim);flex-wrap:wrap}
+  @media(max-width:480px){
+    .bcal-day{min-height:38px;padding:3px 4px}
+    .bcal-count{font-size:12px}
+  }
+
   /* Changes chart (stacked) */
   .changes-chart{display:flex;align-items:flex-end;gap:3px;height:72px;border-bottom:1px solid var(--border);margin-bottom:4px;overflow:hidden}
   .changes-col{display:flex;flex-direction:column;justify-content:flex-end;flex:1;min-width:0;height:100%;cursor:default}
@@ -286,6 +309,15 @@
     <div class="loading">Carregando</div>
   </div>
 
+  <!-- 4a. Calendário de backups por dia -->
+  <div class="section-head" style="margin-bottom:10px">
+    <div class="section-title">Backups por dia — calendário</div>
+    <span class="section-sub">versões de backup existentes criadas em cada dia, incluindo hoje</span>
+  </div>
+  <div id="backupsCalSection" style="margin-bottom:28px">
+    <div class="loading">Carregando</div>
+  </div>
+
   <!-- 4b. Alterações por dia -->
   <div class="section-head" style="margin-bottom:10px">
     <div class="section-title">Alterações por dia — últimos 30 dias</div>
@@ -456,6 +488,7 @@
     renderDiskHistory(data.disk_usage_days || []);
     renderReclaimableByLabel(data.reclaimable_by_label || []);
     renderTrend(data.trend_days);
+    renderBackupsCalendar(data.backups_days || [], data.server_time);
     renderChanges(data.changes_days);
     renderFreed(data.freed_days || []);
     renderTopBackups(data.top_backups);
@@ -721,6 +754,87 @@
         <div class="trend-legend">
           <span><div class="trend-dot" style="background:var(--chart-2,#d95926)"></div>Versões (máx ${maxV})</span>
           <span><div class="trend-dot" style="background:var(--chart-1,#3987e5)"></div>Volume de dados (máx ${esc(fmtSize(maxS))})</span>
+        </div>
+      </div>`;
+  }
+
+  // ── Calendário: backups existentes por dia ───────────────────────────────
+  // O mês exibido sobrevive aos refreshes automáticos da página.
+  const _bcal = {counts: {}, today: '', min: '', ym: null};
+  const _ymKey = (y, m) => `${y}-${String(m + 1).padStart(2, '0')}`;
+
+  function renderBackupsCalendar(days, serverTime) {
+    _bcal.counts = {};
+    days.forEach(d => { _bcal.counts[d.date] = d.count; });
+    // "Hoje" pelo relógio do servidor: as datas das versões são do fuso dele.
+    const now = new Date();
+    _bcal.today = (serverTime && /^\d{4}-\d{2}-\d{2}/.test(serverTime))
+      ? serverTime.slice(0, 10)
+      : `${_ymKey(now.getFullYear(), now.getMonth())}-${String(now.getDate()).padStart(2, '0')}`;
+    _bcal.min = days.length ? days[0].date.slice(0, 7) : _bcal.today.slice(0, 7);
+    if (!_bcal.ym) _bcal.ym = _bcal.today.slice(0, 7);
+    drawBackupsCalendar();
+  }
+
+  function shiftBackupsCalendar(delta) {
+    const [y, m] = _bcal.ym.split('-').map(Number);
+    const d = new Date(y, m - 1 + delta, 1);
+    const ym = _ymKey(d.getFullYear(), d.getMonth());
+    if (ym < _bcal.min || ym > _bcal.today.slice(0, 7)) return;
+    _bcal.ym = ym;
+    drawBackupsCalendar();
+  }
+
+  function drawBackupsCalendar() {
+    const el = document.getElementById('backupsCalSection');
+    const [y, m] = _bcal.ym.split('-').map(Number);
+    const first = new Date(y, m - 1, 1);
+    const nDays = new Date(y, m, 0).getDate();
+    const monthName = first.toLocaleDateString('pt-BR', {month: 'long', year: 'numeric'});
+
+    let monthTotal = 0, maxCount = 0;
+    for (let d = 1; d <= nDays; d++) {
+      const c = _bcal.counts[`${_bcal.ym}-${String(d).padStart(2, '0')}`] || 0;
+      monthTotal += c;
+      if (c > maxCount) maxCount = c;
+    }
+
+    const wds = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb']
+      .map(w => `<div class="bcal-wd">${w}</div>`).join('');
+    let cells = '';
+    for (let i = 0; i < first.getDay(); i++) cells += '<div class="bcal-day empty"></div>';
+    for (let d = 1; d <= nDays; d++) {
+      const key = `${_bcal.ym}-${String(d).padStart(2, '0')}`;
+      const c = _bcal.counts[key] || 0;
+      const isToday = key === _bcal.today;
+      const isFuture = key > _bcal.today;
+      const cls = ['bcal-day', isToday ? 'today' : '', isFuture ? 'future' : ''].join(' ');
+      // Intensidade proporcional ao máximo do mês (12%–55% de --chart-1).
+      const bg = c > 0
+        ? `background:color-mix(in srgb, var(--chart-1,#3987e5) ${Math.round(12 + 43 * c / Math.max(maxCount, 1))}%, var(--bg3))`
+        : '';
+      const tip = `${key}${isToday ? ' (hoje)' : ''}\n${c} backup${c === 1 ? '' : 's'}`;
+      cells += `<div class="${cls}" style="${bg}" title="${esc(tip)}">
+        <div class="bcal-num">${d}</div>
+        <div class="bcal-count${c ? '' : ' zero'}">${isFuture ? '' : c}</div>
+      </div>`;
+    }
+
+    const prevDisabled = _bcal.ym <= _bcal.min ? 'disabled' : '';
+    const nextDisabled = _bcal.ym >= _bcal.today.slice(0, 7) ? 'disabled' : '';
+    el.innerHTML = `
+      <div class="trend-wrap">
+        <div class="bcal-head">
+          <div class="bcal-month">${esc(monthName)}<span class="bcal-month-sub">${monthTotal} backup${monthTotal === 1 ? '' : 's'} no mês</span></div>
+          <div class="bcal-nav">
+            <button class="bcal-btn" onclick="shiftBackupsCalendar(-1)" ${prevDisabled} aria-label="Mês anterior">‹</button>
+            <button class="bcal-btn" onclick="_bcal.ym=_bcal.today.slice(0,7);drawBackupsCalendar()" aria-label="Mês atual">Hoje</button>
+            <button class="bcal-btn" onclick="shiftBackupsCalendar(1)" ${nextDisabled} aria-label="Próximo mês">›</button>
+          </div>
+        </div>
+        <div class="bcal-grid">${wds}${cells}</div>
+        <div class="bcal-legend">
+          <span>Cada dia mostra quantas versões de backup concluídas, criadas naquele dia, ainda existem (fora da lixeira). Pastas do servidor não entram.</span>
         </div>
       </div>`;
   }

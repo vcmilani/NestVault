@@ -1,4 +1,5 @@
 import hashlib
+import threading
 import hmac
 import logging
 import os
@@ -12,7 +13,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 import config
-from database import get_db, ApiKey, User, hash_api_key
+from database import RevokedSession, get_db, ApiKey, User, hash_api_key
 
 log = logging.getLogger("backup-server")
 
@@ -41,10 +42,48 @@ def _touch(db: Session, key: ApiKey) -> None:
         db.commit()
 
 
-def get_current_user(x_api_key: Optional[str] = Header(None),
+# -- Freio em chave inválida -------------------------------------------------
+# Chaves geradas têm 256 bits, mas a de bootstrap é o que estiver em
+# BACKUP_API_KEY — e nada limitava as tentativas. Por IP: mais que
+# _AUTH_MAX_FAILS chaves erradas em _AUTH_WINDOW segundos → 429 até a janela
+# virar. Em memória (por processo): é um freio, não um registro.
+_AUTH_WINDOW = 60.0
+_AUTH_MAX_FAILS = 20
+_auth_fails: dict[str, tuple[int, float]] = {}  # ip -> (erros, início da janela)
+_auth_lock = threading.Lock()
+
+
+def _client_ip(request: Optional[Request]) -> str:
+    return request.client.host if request is not None and request.client else "?"
+
+
+def _auth_throttle(ip: str) -> None:
+    with _auth_lock:
+        fails, start = _auth_fails.get(ip, (0, 0.0))
+        if time.time() - start > _AUTH_WINDOW:
+            _auth_fails.pop(ip, None)
+            return
+        if fails >= _AUTH_MAX_FAILS:
+            raise HTTPException(429, "Muitas tentativas de autenticacao — aguarde um minuto")
+
+
+def _auth_failed(ip: str) -> None:
+    with _auth_lock:
+        fails, start = _auth_fails.get(ip, (0, 0.0))
+        if time.time() - start > _AUTH_WINDOW:
+            fails, start = 0, time.time()
+        _auth_fails[ip] = (fails + 1, start)
+        if fails + 1 == _AUTH_MAX_FAILS:
+            log.warning(f"[auth] {ip}: {_AUTH_MAX_FAILS} chaves invalidas em {_AUTH_WINDOW:.0f}s — bloqueado")
+
+
+def get_current_user(request: Request,
+                      x_api_key: Optional[str] = Header(None),
                       db: Session = Depends(get_db)) -> User:
     if not x_api_key:
         raise HTTPException(401, "API key ausente")
+    ip = _client_ip(request)
+    _auth_throttle(ip)
     key_hash = hash_api_key(x_api_key)
     # A comparação é a própria query: o WHERE já exige igualdade exata do hash, então
     # um `user` retornado tem, por definição, api_key_hash == key_hash — um
@@ -59,6 +98,7 @@ def get_current_user(x_api_key: Optional[str] = Header(None),
            .filter(ApiKey.key_hash == key_hash, User.is_active == True)  # noqa: E712
            .first())
     if not row:
+        _auth_failed(ip)
         raise HTTPException(401, "API key invalida")
     key, user = row
     _touch(db, key)
@@ -148,6 +188,29 @@ def make_session_token(db: Session, user: User) -> str:
     return f"{user.id}:{key_id}:{exp}:{_sign(user.id, key_id, exp, key_hash)}"
 
 
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def revoke_session(db: Session, token: str) -> None:
+    """Logout: o token deixa de valer no servidor (antes só o cookie era apagado
+    no navegador, e um token copiado seguia válido até vencer)."""
+    try:
+        exp = int(token.split(":")[2])
+    except (IndexError, ValueError):
+        return
+    db.merge(RevokedSession(token_hash=_token_hash(token), exp=exp))
+    db.commit()
+
+
+def purge_revoked_sessions(db: Session) -> int:
+    """Limpeza noturna: revogações de tokens já vencidos não precisam mais existir."""
+    n = db.query(RevokedSession).filter(RevokedSession.exp < int(time.time())).delete(
+        synchronize_session=False)
+    db.commit()
+    return n
+
+
 def _user_from_session(token: str, db: Session) -> Optional[User]:
     try:
         uid_s, kid_s, exp_s, sig = token.split(":")
@@ -155,6 +218,8 @@ def _user_from_session(token: str, db: Session) -> Optional[User]:
     except ValueError:
         return None  # inclusive o formato antigo uid:exp:sig, anterior às chaves de cliente
     if exp < time.time():
+        return None
+    if db.get(RevokedSession, _token_hash(token)) is not None:
         return None
     user = db.get(User, uid)
     if not user or not user.is_active:
@@ -173,7 +238,7 @@ def get_user_header_or_cookie(request: Request,
                                db: Session = Depends(get_db)) -> User:
     """Header X-API-Key (como get_current_user) ou, na falta dele, o cookie de sessão."""
     if x_api_key:
-        return get_current_user(x_api_key, db)
+        return get_current_user(request, x_api_key, db)
     token = request.cookies.get(SESSION_COOKIE)
     user = _user_from_session(token, db) if token else None
     if not user:
@@ -191,7 +256,12 @@ HIDDEN_TTL    = 15 * 60
 
 PIN_MAX_FAILS = 5
 PIN_LOCKOUT   = 5 * 60
+# Estado em memória (fallback sem banco); a fonte da verdade são as colunas
+# users.pin_fails / users.pin_locked_until, que sobrevivem a restart e valem
+# entre workers. O lock fecha a corrida: tentativas paralelas viam todas o
+# contador abaixo de PIN_MAX_FAILS e nunca eram bloqueadas.
 _pin_fails: dict[int, tuple[int, float]] = {}  # user_id -> (erros seguidos, bloqueado até)
+_pin_lock = threading.Lock()
 
 
 def _sign_hidden(user_id: int, exp: int, pin_hash: str) -> str:
@@ -219,25 +289,48 @@ def hidden_unlocked(request: Request, user: User) -> bool:
     return hmac.compare_digest(sig, _sign_hidden(uid, exp, user.hidden_pin_hash))
 
 
+def _pin_state(user: User) -> tuple[int, float]:
+    fails, until = _pin_fails.get(user.id, (0, 0.0))
+    return (max(fails, int(getattr(user, "pin_fails", 0) or 0)),
+            max(until, float(getattr(user, "pin_locked_until", 0.0) or 0.0)))
+
+
+def _pin_persist(db: Optional[Session], user: User, fails: int, until: float) -> None:
+    _pin_fails[user.id] = (fails, until)
+    if db is None:
+        return
+    db.query(User).filter(User.id == user.id).update(
+        {"pin_fails": fails, "pin_locked_until": until or None}, synchronize_session=False)
+    db.commit()
+    user.pin_fails, user.pin_locked_until = fails, (until or None)
+
+
 def pin_locked_for(user: User) -> int:
     """Segundos restantes de bloqueio por excesso de PIN errado (0 = liberado)."""
-    _fails, until = _pin_fails.get(user.id, (0, 0.0))
+    with _pin_lock:
+        _fails, until = _pin_state(user)
     return max(0, int(until - time.time() + 0.999))
 
 
-def register_pin_attempt(user: User, ok: bool) -> None:
-    if ok:
-        _pin_fails.pop(user.id, None)
-        return
-    fails, _until = _pin_fails.get(user.id, (0, 0.0))
-    fails += 1
-    if fails >= PIN_MAX_FAILS:
-        _pin_fails[user.id] = (0, time.time() + PIN_LOCKOUT)
-        log.warning(f"[photos] {user.username}: {fails} PINs errados — bloqueado por {PIN_LOCKOUT}s")
-    else:
-        _pin_fails[user.id] = (fails, 0.0)
+def register_pin_attempt(user: User, ok: bool, db: Optional[Session] = None) -> None:
+    with _pin_lock:
+        if ok:
+            _pin_persist(db, user, 0, 0.0)
+            return
+        fails, _until = _pin_state(user)
+        fails += 1
+        if fails >= PIN_MAX_FAILS:
+            _pin_persist(db, user, 0, time.time() + PIN_LOCKOUT)
+            log.warning(f"[photos] {user.username}: {fails} PINs errados — bloqueado por {PIN_LOCKOUT}s")
+        else:
+            _pin_persist(db, user, fails, 0.0)
 
 
-def reset_pin_attempts(user_id: int) -> None:
+def reset_pin_attempts(user_id: int, db: Optional[Session] = None) -> None:
     """PIN novo (ou removido) pelo admin: zera os erros e o bloqueio."""
-    _pin_fails.pop(user_id, None)
+    with _pin_lock:
+        _pin_fails.pop(user_id, None)
+        if db is not None:
+            db.query(User).filter(User.id == user_id).update(
+                {"pin_fails": 0, "pin_locked_until": None}, synchronize_session=False)
+            db.commit()

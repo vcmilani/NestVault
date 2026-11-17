@@ -3,11 +3,11 @@
    APIs e páginas HTML seguem sempre pela rede (dados de backup nunca
    devem vir de cache). Servido em /sw.js (escopo raiz) via main.py. */
 
-/* IMPORTANTE: incremente a versão sempre que alterar qualquer arquivo de
-   STATIC_ASSETS. O HTML das páginas vem sempre da rede, mas estes assets são
-   cache-first — sem o bump o navegador mistura HTML novo com CSS/JS antigo
-   (ex.: uma var CSS nova fica indefinida e o elemento some da tela). */
-const CACHE = 'nestvault-static-v8';
+/* A versão do cache é a do servidor (main.py substitui __NV_VERSION__ ao servir
+   /sw.js): todo release renova o cache sozinho. Antes era um número manual, e
+   esquecer o bump misturava HTML novo com CSS/JS antigo. */
+const CACHE = 'nestvault-static-__NV_VERSION__';
+const CACHE_PREFIX = 'nestvault-static-';
 const STATIC_ASSETS = [
   '/static/theme.css',
   '/static/app.css',
@@ -23,14 +23,18 @@ const STATIC_ASSETS = [
 ];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(STATIC_ASSETS)));
+  // allSettled: uma fonte ausente não impede a instalação do resto (addAll
+  // falhava o install inteiro).
+  e.waitUntil(caches.open(CACHE).then(c => Promise.allSettled(STATIC_ASSETS.map(a => c.add(a)))));
   self.skipWaiting();
 });
 
 self.addEventListener('activate', e => {
+  // Só os caches deste app: apagar todos os caches da origem derrubava os de
+  // outros apps servidos no mesmo host.
   e.waitUntil(
     caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
+      Promise.all(keys.filter(k => k.startsWith(CACHE_PREFIX) && k !== CACHE).map(k => caches.delete(k)))
     ).then(() => self.clients.claim())
   );
 });

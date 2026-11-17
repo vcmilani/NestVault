@@ -1,5 +1,5 @@
 """
-NestVault  v10.3.0
+NestVault  v10.4.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -145,7 +145,7 @@ v7.2.0:
 - activity.html: labels adicionados para todos os tipos de job de manutenção
 """
 
-from fastapi import FastAPI, Request, HTTPException, Depends, Header, BackgroundTasks, Query
+from fastapi import FastAPI, Request, Response, HTTPException, Depends, Header, BackgroundTasks, Query
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
@@ -165,6 +165,7 @@ from database import (
     init_db, get_db, SessionLocal, BackupID, BackupVersion, FileContent, FileContentCopy,
     VersionFile, MaintenanceJob, SsdCachePendingMove, RcloneBackupJob, DiskSnapshot,
     DiskUsageDaily, User, ApiKey, hash_api_key, hash_pin, bootstrap_admin_user, TRASHED_STATUS,
+    live_label_filter as db_live_label_filter,
     SERVER_KIND, SERVER_TRASH_STATUS,
 )
 import config
@@ -196,6 +197,26 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("backup-server")
+
+# httpx loga em INFO a URL completa de cada request — e a do Telegram carrega o
+# token do bot no caminho (api.telegram.org/bot<token>/sendMessage). Quem lê o
+# journald lia o token. O filtro abaixo é a segunda rede, para qualquer logger.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+class _RedactSecrets(logging.Filter):
+    _TOKEN = re.compile(r"bot\d+:[A-Za-z0-9_-]{20,}")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if "bot" in msg and self._TOKEN.search(msg):
+            record.msg = self._TOKEN.sub("bot<redigido>", msg)
+            record.args = ()
+        return True
+
+
+for _h in logging.getLogger().handlers:
+    _h.addFilter(_RedactSecrets())
 
 # -- Config -------------------------------------------------------------------
 # Os aliases locais de storage.* foram removidos na v8.0.0: eram cópias feitas
@@ -561,7 +582,11 @@ async def lifespan(_: FastAPI):
     config.flush_boot_log()  # config.py é importado antes do basicConfig acima
     log.info(f"Config: {config.path()}")
     init_db()
-    bootstrap_admin_user(os.getenv("BACKUP_API_KEY", ""))
+    _bootstrap_key = os.getenv("BACKUP_API_KEY", "")
+    bootstrap_admin_user(_bootstrap_key)
+    if 0 < len(_bootstrap_key) < 32:
+        log.warning(f"[auth] BACKUP_API_KEY tem só {len(_bootstrap_key)} caracteres — é a chave do admin; "
+                    f"use algo longo e aleatório (ex.: openssl rand -base64 32) e troque-a em Usuários")
     _cleanup_stale_running_states()
     if storage.ENCRYPTION_ENABLED:
         storage.encryption_key = crypto.load_key()  # lança ValueError se inválida — falha rápido
@@ -610,7 +635,10 @@ async def lifespan(_: FastAPI):
     sched.scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="NestVault", version="10.3.0", lifespan=lifespan)
+# /docs, /redoc e /openapi.json ficam fechados por padrão (server.expose_docs):
+# descreviam toda a API, com nomes de headers e rotas, sem login.
+_DOCS = {} if config.get("server.expose_docs") else {"docs_url": None, "redoc_url": None, "openapi_url": None}
+app = FastAPI(title="NestVault", version="10.4.0", lifespan=lifespan, **_DOCS)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 app.include_router(cloud_ui_router, prefix="/cloud", tags=["cloud"])
 
@@ -661,13 +689,19 @@ app.add_middleware(_SecurityHeadersMiddleware)
 
 
 # -- Schemas: Requests --------------------------------------------------------
+# Label: até 128 caracteres, sem barra, barra invertida ou caractere de controle,
+# sem espaço nas pontas. Entra em URLs (/backups/{label}/...), em nomes de zip e
+# no log; antes qualquer string era aceita.
+_LABEL_PATTERN = r"^[^/\\\x00-\x1f ](?:[^/\\\x00-\x1f]*[^/\\\x00-\x1f ])?$"
+
+
 class BackupCreate(BaseModel):
-    label: str
+    label: str = Field(..., min_length=1, max_length=128, pattern=_LABEL_PATTERN)
     client_name: Optional[str] = None
     prefix: Optional[str] = None
 
 class BackupRename(BaseModel):
-    new_label: str
+    new_label: str = Field(..., min_length=1, max_length=128, pattern=_LABEL_PATTERN)
 
 class BackupOwnerUpdate(BaseModel):
     owner_user_id: int
@@ -689,7 +723,10 @@ class ApiKeyCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=64, description="Onde a chave vai ser usada, ex.: MacBook")
 
 class VersionCreate(BaseModel):
-    version_key: str = Field(..., description="ISO datetime: 2026-04-25T10:42:31")
+    # Entra em URLs e no HTML das páginas (era interpolado em innerHTML sem
+    # validação do lado do servidor).
+    version_key: str = Field(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._:+-]+$",
+                             description="ISO datetime: 2026-04-25T10:42:31")
 
 class VersionFinish(BaseModel):
     status: Literal["done", "failed"] = "done"
@@ -742,7 +779,7 @@ class RegisterBatchResponse(BaseModel):
 class SyncRequest(BaseModel):
     backup_label: str
     version_key: str
-    existing_paths: list[str]
+    existing_paths: list[str] = Field(..., max_length=200_000)
 
 class CleanupRequest(BaseModel):
     backup_label: str
@@ -1105,6 +1142,10 @@ class TrendDay(BaseModel):
     version_count: int
     total_size_bytes: int
 
+class BackupsDay(BaseModel):
+    date: str
+    count: int
+
 class ChangeDay(BaseModel):
     date: str
     added: int
@@ -1174,6 +1215,7 @@ class StatsResponse(BaseModel):
     space_saved_bytes: int
     trend_days: list[TrendDay]
     changes_days: list[ChangeDay]
+    backups_days: list[BackupsDay] = []
     top_backups: list[TopBackupEntry]
     maintenance_by_type: list[MaintenanceTypeStat]
     last_maintenance_jobs: list[MaintenanceJobInfo]
@@ -1195,26 +1237,13 @@ class StatsResponse(BaseModel):
 _content_path = storage.content_path
 
 
-def _verify_stored_file(sha256: str, dest: Path, encrypted: bool) -> None:
-    h = hashlib.sha256()
-    try:
-        if encrypted:
-            for chunk in crypto.decrypt_chunks(dest, storage.encryption_key):
-                h.update(chunk)
-        else:
-            with open(dest, "rb") as f:
-                while True:
-                    chunk = f.read(1 << 20)
-                    if not chunk:
-                        break
-                    h.update(chunk)
-    except Exception as exc:
-        dest.unlink(missing_ok=True)
-        raise HTTPException(500, f"Falha ao verificar arquivo no disco: {exc}") from exc
-
-    if h.hexdigest() != sha256:
-        dest.unlink(missing_ok=True)
-        raise HTTPException(500, "Corrupção detectada: sha256 do disco não confere com o esperado")
+def _verify_stored_file(sha256: str, path: Path, encrypted: bool) -> None:
+    """Confere que `path` (um temporário ainda não publicado — quem chama o apaga
+    em erro) decifra e re-hasheia para `sha256`. Wrapper fino sobre
+    storage.content_matches; não apaga nada: antes apagava o próprio `dest`, e
+    num upload concorrente isso destruía o arquivo que o outro já tinha commitado."""
+    if not storage.content_matches(path, sha256, encrypted, storage.encryption_key):
+        raise HTTPException(500, "Corrupção detectada: conteúdo gravado não confere com o sha256 esperado")
 
 
 # Implementação canônica em storage.expected_stored_size (usada também pela
@@ -1222,28 +1251,110 @@ def _verify_stored_file(sha256: str, dest: Path, encrypted: bool) -> None:
 _expected_stored_size = storage.expected_stored_size
 
 
-async def _stream_request_to_disk(request: Request, volume: Path) -> tuple[str, int, Path]:
+class UploadTooLarge(Exception):
+    """O body passou de `max_bytes` em _stream_request_to_disk (tmp já apagado)."""
+    def __init__(self, max_bytes: int):
+        super().__init__(max_bytes)
+        self.max_bytes = max_bytes
+
+
+_STREAM_FLUSH_BYTES = 1 << 20
+
+
+async def _stream_request_to_disk(request: Request, volume: Path,
+                                  max_bytes: Optional[int] = None) -> tuple[str, int, Path]:
     """
     Faz streaming do body raw da request para disco calculando sha256 em paralelo.
     Sem multipart — o body e o arquivo diretamente (binario puro).
     Tmp escrito no mesmo volume de destino para evitar cross-device move.
     Retorna (sha256, size, tmp_path).
+
+    `max_bytes`: aborta com UploadTooLarge assim que o body passa disso — antes
+    não havia teto nenhum, e um único request enchia o volume inteiro. A escrita
+    em disco sai do event loop em blocos de ~1 MB (asyncio.to_thread): o f.write
+    síncrono aqui serializava todos os uploads num HD USB lento.
     """
     h    = hashlib.sha256()
     size = 0
     fd, _tmp = tempfile.mkstemp(dir=volume, prefix="_tmp_")
     os.close(fd)
     tmp_path = Path(_tmp)
+    buf: list[bytes] = []
+    buffered = 0
     try:
         with open(tmp_path, "wb", buffering=0) as f:
+            def _flush() -> None:
+                for b in buf:
+                    f.write(b)
+                buf.clear()
+
             async for chunk in request.stream():
                 h.update(chunk)
-                f.write(chunk)
                 size += len(chunk)
+                if max_bytes is not None and size > max_bytes:
+                    raise UploadTooLarge(max_bytes)
+                buf.append(chunk)
+                buffered += len(chunk)
+                if buffered >= _STREAM_FLUSH_BYTES:
+                    await asyncio.to_thread(_flush)
+                    buffered = 0
+            if buf:
+                await asyncio.to_thread(_flush)
         return h.hexdigest(), size, tmp_path
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
+
+
+_DISK_RESERVE_BYTES = 64 << 20
+
+
+def _upload_limit(db: Session, user: User, write_dir: Path) -> tuple[Optional[int], str]:
+    """Maior body aceito para este upload e o que limita ("max" = setting
+    storage.max_upload_gb, "disk" = espaço livre no volume de gravação, menos
+    uma reserva). (None, "") = sem limite.
+
+    Decidido ANTES de receber o body: não havia teto nenhum, e um único request
+    enchia o volume até o ENOSPC — era isso que disparava a limpeza automática.
+    A cota do usuário não entra aqui de propósito: ela só vale para conteúdo que
+    ele ainda não tem, e isso só se sabe depois do sha256 (check_new_content)."""
+    limits: list[tuple[int, str]] = []
+    cap_gb = config.get("storage.max_upload_gb") or 0
+    if cap_gb:
+        limits.append((int(cap_gb) * 1024 ** 3, "max"))
+    usage = storage.safe_disk_usage(write_dir)
+    if usage:
+        limits.append((max(0, int(usage.free - _DISK_RESERVE_BYTES)), "disk"))
+    if not limits:
+        return None, ""
+    return min(limits)
+
+
+def _oversize_error(kind: str, max_bytes: int, size: Optional[int]) -> HTTPException:
+    have = f" ({storage.fmt_bytes(size)})" if size is not None else ""
+    if kind == "disk":
+        return HTTPException(507, f"Sem espaço no storage para este arquivo{have} — "
+                                  f"{storage.fmt_bytes(max_bytes)} disponíveis no volume")
+    return HTTPException(413, f"Arquivo{have} maior que o limite de upload ({storage.fmt_bytes(max_bytes)})")
+
+
+def _check_content_length(request: Request, max_bytes: Optional[int], kind: str) -> None:
+    """Recusa pelo Content-Length, sem ler o body, o que não caberia."""
+    if max_bytes is None:
+        return
+    raw = request.headers.get("content-length")
+    if raw and raw.isdigit() and int(raw) > max_bytes:
+        raise _oversize_error(kind, max_bytes, int(raw))
+
+
+async def _stream_upload_limited(request: Request, write_dir: Path, db: Session, user: User) -> tuple[str, int, Path]:
+    """_stream_request_to_disk com o teto de _upload_limit — 413/507 ao passar."""
+    max_bytes, kind = await asyncio.to_thread(_upload_limit, db, user, write_dir)
+    _check_content_length(request, max_bytes, kind)
+    try:
+        return await _stream_request_to_disk(request, write_dir, max_bytes)
+    except UploadTooLarge as e:
+        raise _oversize_error(kind, e.max_bytes, None) from None
 
 
 def _get_backup_or_404(label: str, db: Session, user: Optional[User] = None) -> BackupID:
@@ -1308,8 +1419,8 @@ def _trash_versions(db: Session, version_ids: list[int], user: User, now: dateti
 
 
 def _live_label_filter():
-    """BackupID fora da lixeira (status NULL em linhas antigas conta como vivo)."""
-    return or_(BackupID.status.is_(None), BackupID.status != TRASHED_STATUS)
+    """BackupID fora da lixeira — implementação canônica em database.live_label_filter."""
+    return db_live_label_filter()
 
 
 def _version_stats(v: BackupVersion, db: Session) -> VersionInfo:
@@ -1403,12 +1514,29 @@ def _backup_info(b: BackupID, db: Session) -> BackupInfo:
     )
 
 
-def _auto_cleanup_if_needed(db: Session, exclude_version_id: Optional[int] = None) -> tuple[str | None, int]:
-    """Retorna (resumo, bytes_liberados) — resumo é None se nenhuma limpeza foi necessária.
+_auto_cleanup_lock = threading.Lock()
 
-    exclude_version_id: versão que o chamador está ativamente escrevendo agora —
-    nunca pode ser removida, mesmo que esteja incomplete/failed, senão o upload em
-    andamento acaba inserindo VersionFile órfão apontando para uma versão já deletada.
+
+def _auto_cleanup_if_needed(db: Session, exclude_version_id: Optional[int] = None,
+                            owner_user_id: Optional[int] = None) -> tuple[str | None, int]:
+    """Libera espaço sob pressão de disco apagando só o que não é histórico: as
+    versões incomplete/failed dos labels de UM dono (quem está enviando).
+    Retorna (resumo, bytes_liberados) — resumo None se nenhuma limpeza foi necessária.
+
+    Antes apagava, de todos os usuários e sem passar pela lixeira, as versões
+    done antigas (mantendo só a última de cada label): qualquer chave de
+    cliente — ou um ransomware com ela — enchia o disco e destruía o histórico
+    dos outros. Agora o histórico done nunca é tocado aqui; se o lixo do dono
+    não basta, o upload recebe 507 e o admin decide (Manutenção, lixeira, cota).
+
+    owner_user_id=None só vale para chamadas internas de admin: considera todos
+    os labels (ainda assim só incomplete/failed).
+
+    Protegidos mesmo entre incomplete/failed: a versão em escrita
+    (exclude_version_id — senão o upload em andamento insere VersionFile órfão),
+    checkpoints resumíveis do rclone (progress_json), a failed mais recente de
+    cada label (diagnóstico do último erro) e incomplete com arquivo gravado nas
+    últimas 6 h (outro cliente ainda escrevendo — /upload aceita incomplete).
     """
     factor = _target_replicas()
     ok = _volumes_with_free_space()
@@ -1417,72 +1545,59 @@ def _auto_cleanup_if_needed(db: Session, exclude_version_id: Optional[int] = Non
 
     log.warning(
         f"[auto-cleanup] Apenas {ok}/{len(_healthy_volumes())} volume(s) com ≥{storage.STORAGE_FALLBACK_THRESHOLD_GB:.0f} GB livre "
-        f"— fator de replicação={factor} não pode ser mantido, iniciando limpeza..."
+        f"— fator de replicação={factor} não pode ser mantido, removendo versões incomplete/failed"
+        f"{' do dono ' + str(owner_user_id) if owner_user_id is not None else ''}..."
     )
 
-    total_removed = 0
-    bytes_total = 0
-
-    # 1ª prioridade: versões incomplete e failed — sempre deletáveis
-    stale_query = db.query(BackupVersion).filter(BackupVersion.status.in_(["incomplete", "failed"]))
-    if exclude_version_id is not None:
-        stale_query = stale_query.filter(BackupVersion.id != exclude_version_id)
-    stale = stale_query.all()
-    if stale:
-        stale_ids = [v.id for v in stale]
-        db.query(VersionFile).filter(VersionFile.version_id.in_(stale_ids)).delete(synchronize_session=False)
-        for v in stale:
-            db.delete(v)
-        db.commit()
-        _, freed = _cleanup_orphan_contents(db)
-        bytes_total += freed
-        ok = _volumes_with_free_space()
-        total_removed += len(stale)
-        log.info(f"[auto-cleanup] {len(stale)} versão(ões) incomplete/failed removida(s) — volumes com espaço: {ok}/{len(_healthy_volumes())}")
-        if ok >= factor:
-            log.info(f"[auto-cleanup] Replicação pode ser mantida ({ok} volume(s) ok), encerrando.")
-            return f"{total_removed} versão(ões) removida(s) (incompletas/falhas)", bytes_total
-
-    # 2ª prioridade: versões done antigas (mantém sempre a mais recente por label)
-    labels_with_versions = (
-        db.query(BackupVersion.backup_label)
-        .filter(BackupVersion.status == "done")
-        .group_by(BackupVersion.backup_label)
-        .having(func.count(BackupVersion.id) >= 2)
-        .all()
+    cutoff = datetime.now() - timedelta(hours=6)
+    last_file = (
+        db.query(VersionFile.version_id, func.max(VersionFile.created_at).label("last_at"))
+        .group_by(VersionFile.version_id)
+        .subquery()
     )
-
-    # Monta fila de versões deletáveis: todas exceto a mais recente de cada label
-    deletable: list[BackupVersion] = []
-    for (label,) in labels_with_versions:
-        versions = (
-            db.query(BackupVersion)
-            .filter(BackupVersion.backup_label == label, BackupVersion.status == "done")
-            .order_by(BackupVersion.created_at.asc())
-            .all()
+    q = (
+        db.query(BackupVersion)
+        .join(BackupID, BackupID.label == BackupVersion.backup_label)
+        .outerjoin(last_file, last_file.c.version_id == BackupVersion.id)
+        .filter(
+            BackupVersion.status.in_(["incomplete", "failed"]),
+            BackupVersion.progress_json.is_(None),
+            BackupID.kind != SERVER_KIND,
+            or_(BackupVersion.status != "incomplete",
+                func.coalesce(last_file.c.last_at, BackupVersion.created_at) < cutoff),
         )
-        deletable.extend(versions[:-1])  # mantém sempre a última
+    )
+    if owner_user_id is not None:
+        q = q.filter(BackupID.owner_user_id == owner_user_id)
+    if exclude_version_id is not None:
+        q = q.filter(BackupVersion.id != exclude_version_id)
+    candidates = q.order_by(BackupVersion.created_at.asc()).all()
 
-    deletable.sort(key=lambda v: v.created_at)  # mais antigas primeiro
+    latest_failed: dict[str, int] = {}
+    for v in candidates:
+        if v.status == "failed":
+            latest_failed[v.backup_label] = v.id  # ordem asc: a última vista é a mais recente
+    stale = [v for v in candidates if not (v.status == "failed" and latest_failed[v.backup_label] == v.id)]
 
-    for v in deletable:
-        if exclude_version_id is not None and v.id == exclude_version_id:
-            continue
-        label, key = v.backup_label, v.version_key
-        db.query(VersionFile).filter(VersionFile.version_id == v.id).delete(synchronize_session=False)
+    if not stale:
+        log.info("[auto-cleanup] nenhuma versão incomplete/failed removível — espaço continua abaixo do limiar")
+        return "Nenhuma versão removível (só histórico done) — espaço continua baixo", 0
+
+    names = [f"{v.backup_label}/{v.version_key}" for v in stale]
+    stale_ids = [v.id for v in stale]
+    db.query(VersionFile).filter(VersionFile.version_id.in_(stale_ids)).delete(synchronize_session=False)
+    for v in stale:
         db.delete(v)
-        removed, freed = _cleanup_orphan_contents_no_commit(db)
-        db.commit()
-        bytes_total += freed
-        ok = _volumes_with_free_space()
-        total_removed += 1
-        log.info(f"[auto-cleanup] Removida {label}/{key} — {removed} arquivo(s) — volumes com espaço: {ok}/{len(_healthy_volumes())}")
-        if ok >= factor:
-            log.info(f"[auto-cleanup] Replicação pode ser mantida ({ok} volume(s) ok), encerrando.")
-            return f"{total_removed} versão(ões) removida(s)", bytes_total
-
-    log.info(f"[auto-cleanup] Concluído — todas as labels com 1 versão. Volumes com espaço: {ok}/{len(_healthy_volumes())}.")
-    return f"{total_removed} versão(ões) removida(s)", bytes_total
+    db.commit()
+    _, freed = _cleanup_orphan_contents(db)
+    ok = _volumes_with_free_space()
+    log.info(f"[auto-cleanup] {len(stale)} versão(ões) incomplete/failed removida(s) "
+             f"({storage.fmt_bytes(freed)}) — volumes com espaço: {ok}/{len(_healthy_volumes())}: "
+             + ", ".join(names[:10]) + (f" … (+{len(names) - 10})" if len(names) > 10 else ""))
+    summary = f"{len(stale)} versão(ões) incomplete/failed removida(s)"
+    if ok < factor:
+        summary += " — espaço continua abaixo do limiar"
+    return summary, freed
 
 
 def _cleanup_orphan_contents(db: Session) -> tuple[int, int]:
@@ -1573,14 +1688,24 @@ def _bg_cleanup_orphan_contents(job_id: int | None = None) -> None:
 
 
 def _auto_cleanup_with_job(db: Session, exclude_version_id: Optional[int] = None,
-                           origin: str = "") -> tuple[str | None, int]:
+                           origin: str = "", owner_user_id: Optional[int] = None) -> tuple[str | None, int]:
     """Roda _auto_cleanup_if_needed registrando um MaintenanceJob "auto-cleanup".
+
+    Serializado por _auto_cleanup_lock: dois uploads sob pressão de disco rodavam
+    duas limpezas ao mesmo tempo sobre as mesmas versões (StaleDataError → 500).
+    Quem espera o lock refaz a checagem de espaço e normalmente não faz nada.
 
     O job nasce "running" ANTES da limpeza (antes só era gravado no fim, já "done",
     então a execução nunca aparecia como em andamento) e termina "error" se a limpeza
     estourar no meio — versões já apagadas antes do erro não somem sem registro.
     Não cria job quando não há pressão de espaço (o caso comum, a cada finish_version).
     Exceções são relançadas depois de registradas."""
+    with _auto_cleanup_lock:
+        return _auto_cleanup_with_job_locked(db, exclude_version_id, origin, owner_user_id)
+
+
+def _auto_cleanup_with_job_locked(db: Session, exclude_version_id: Optional[int],
+                                  origin: str, owner_user_id: Optional[int]) -> tuple[str | None, int]:
     if _volumes_with_free_space() >= _target_replicas():
         return None, 0
     mj = MaintenanceJob(job_type="auto-cleanup", status="running",
@@ -1590,7 +1715,7 @@ def _auto_cleanup_with_job(db: Session, exclude_version_id: Optional[int] = None
     mj_id = mj.id
     invalidate_activity()
     try:
-        summary, bytes_freed = _auto_cleanup_if_needed(db, exclude_version_id)
+        summary, bytes_freed = _auto_cleanup_if_needed(db, exclude_version_id, owner_user_id)
     except Exception as e:
         log.exception(f"[auto-cleanup] erro durante a limpeza automática{origin}")
         db.rollback()
@@ -1614,12 +1739,13 @@ def _auto_cleanup_with_job(db: Session, exclude_version_id: Optional[int] = None
     return summary, bytes_freed
 
 
-def _bg_auto_cleanup() -> None:
-    """Background task: cria sua propria sessao DB e executa auto-cleanup se necessario."""
+def _bg_auto_cleanup(owner_user_id: Optional[int] = None) -> None:
+    """Background task: cria sua propria sessao DB e executa auto-cleanup se necessario
+    (só o lixo dos labels de `owner_user_id` — ver _auto_cleanup_if_needed)."""
     db = SessionLocal()
     try:
         log.debug("[bg-auto-cleanup] verificando necessidade de limpeza automática")
-        _auto_cleanup_with_job(db, origin=" após fim de backup")
+        _auto_cleanup_with_job(db, origin=" após fim de backup", owner_user_id=owner_user_id)
     except Exception:
         pass  # já registrado no log e no MaintenanceJob por _auto_cleanup_with_job
     finally:
@@ -1787,13 +1913,12 @@ def _mark_job_error(db: Session, job_id: int | None, exc: Exception) -> None:
 
 _MIGRATE_BATCH = 50
 
-def _verify_file_sha256(path: Path, expected: str) -> bool:
-    return storage.file_sha256(path) == expected
-
-
 def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
     """Background task: copia conteúdo de um volume de origem para destinos e remove a origem."""
     db = SessionLocal()
+    # Fecha a origem para escrita nova (upload, réplica, move SSD → HDD, destino
+    # de rebalance) enquanto o job roda — ver storage.EXCLUDED_VOLUMES.
+    storage.EXCLUDED_VOLUMES.add(source)
     try:
         mj = db.get(MaintenanceJob, job_id)
 
@@ -1839,7 +1964,13 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
         copied = 0
         already_on_dest = 0
         skipped = 0
-        failed_sha256s: set[str] = set()
+        # Snapshot das cópias de origem cujo destino foi copiado E conferido: só
+        # essas saem da origem na fase 2. Antes, a fase 2 relia todas as linhas do
+        # volume — um arquivo que chegasse durante a fase 1 (upload, réplica, move
+        # SSD → HDD) era apagado sem nunca ter sido copiado; com fator 1, a única
+        # cópia. storage.EXCLUDED_VOLUMES fecha a origem para escrita nova enquanto
+        # o job roda, como segunda trava.
+        migrated_ids: list[int] = []
 
         # -- Fase 1: copiar arquivos ausentes nos destinos -----------------------
         done = 0
@@ -1847,10 +1978,16 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
             for src_copy in page:
                 done += 1
                 sha256 = src_copy.sha256
+                fc = db.get(FileContent, sha256)
+                if fc is None:
+                    skipped += 1
+                    continue
+                encrypted = bool(fc.encrypted)
 
-                # Verifica se já existe cópia em algum destino
+                # Cópia já registrada num destino só vale com o arquivo íntegro —
+                # senão a origem (talvez a única cópia real) seria apagada na fase 2.
                 existing_dest = (
-                    db.query(FileContentCopy.volume_path)
+                    db.query(FileContentCopy.volume_path, FileContentCopy.stored_at)
                     .filter(
                         FileContentCopy.sha256 == sha256,
                         FileContentCopy.volume_path.in_(list(dest_set)),
@@ -1858,53 +1995,45 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
                     .first()
                 )
                 if existing_dest:
-                    already_on_dest += 1
-                    continue
+                    if storage.content_matches(Path(existing_dest.stored_at), sha256, encrypted,
+                                               storage.encryption_key):
+                        already_on_dest += 1
+                        migrated_ids.append(src_copy.id)
+                        continue
+                    log.warning(f"[migrate-disk] cópia registrada em {existing_dest.volume_path} não confere "
+                                f"para {sha256[:8]}… — recopiando")
 
                 # Escolhe destino com mais espaço livre
                 best_dest = max(dest_free, key=lambda d: dest_free[d])
                 if dest_free[best_dest] <= 0:
                     log.warning(f"[migrate-disk] sem espaço em destinos — pulando {sha256[:8]}…")
                     skipped += 1
-                    failed_sha256s.add(sha256)
                     continue
 
                 src_path = Path(src_copy.stored_at)
                 if not src_path.exists():
                     log.warning(f"[migrate-disk] arquivo físico ausente: {src_path} — pulando")
                     skipped += 1
-                    failed_sha256s.add(sha256)
                     continue
 
                 dest_path = _content_path(sha256, Path(best_dest))
+                # copy_verified: temporário + rename conferido, e entende conteúdo
+                # cifrado (o hash direto do arquivo cifrado nunca batia com o sha256
+                # — toda migração com criptografia pulava todos os arquivos).
                 try:
-                    shutil.copy2(str(src_path), str(dest_path))
-                    if not _verify_file_sha256(dest_path, sha256):
-                        log.warning(f"[migrate-disk] SHA-256 inválido após cópia: {sha256[:8]}…")
-                        dest_path.unlink(missing_ok=True)
-                        skipped += 1
-                        failed_sha256s.add(sha256)
-                        continue
-
-                    fc_copy = FileContentCopy(
-                        sha256=sha256,
-                        stored_at=str(dest_path),
-                        volume_path=best_dest,
-                    )
-                    db.add(fc_copy)
-
-                    # Atualiza estimativa de espaço livre
-                    fc = db.get(FileContent, sha256)
-                    if fc:
-                        dest_free[best_dest] = max(0, dest_free[best_dest] - fc.size)
-
-                    copied += 1
-                except Exception as e:
-                    log.warning(f"[migrate-disk] falha ao copiar {sha256[:8]}…: {e}")
-                    dest_path.unlink(missing_ok=True)
+                    storage.copy_verified(src_path, dest_path, sha256, encrypted)
+                except storage.ReplicaSourceCorrupt as e:
+                    log.warning(f"[migrate-disk] origem não confere para {sha256[:8]}… — pulando: {e}")
                     skipped += 1
-                    failed_sha256s.add(sha256)
                     continue
+                except OSError as e:
+                    log.warning(f"[migrate-disk] falha ao copiar {sha256[:8]}…: {e}")
+                    skipped += 1
+                    continue
+                storage.insert_copy_row(db, sha256, str(dest_path), best_dest)
+                dest_free[best_dest] = max(0, dest_free[best_dest] - fc.size)
+                migrated_ids.append(src_copy.id)
+                copied += 1
 
             # Commit e atualiza progresso ao fim de cada página
             db.commit()
@@ -1919,37 +2048,9 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
 
         db.commit()
 
-        # -- Fase 2: remover cópias do disco de origem -------------------------
-        # Segunda passada sobre as mesmas páginas (a fase 1 não removeu nada), de
-        # novo sem carregar tudo. O DELETE é em lote por id; o unlink continua
-        # arquivo a arquivo porque cada um pode falhar por conta própria.
-        removed_physical = 0
-        log.info(f"[migrate-disk] etapa 1/2 concluída — iniciando etapa 2/2: "
-                 f"removendo cópias de {source} ({len(failed_sha256s)} mantida(s) por falha na cópia)")
-        for page in _source_pages():
-            to_delete_ids = []
-            for src_copy in page:
-                if src_copy.sha256 in failed_sha256s:
-                    continue  # Não remove se a cópia de destino falhou
-                to_delete_ids.append(src_copy.id)
-                src_path = Path(src_copy.stored_at)
-                try:
-                    src_path.unlink(missing_ok=True)
-                    removed_physical += 1
-                except OSError as e:
-                    log.warning(f"[migrate-disk] falha ao remover {src_path}: {e}")
-            if to_delete_ids:
-                db.query(FileContentCopy).filter(
-                    FileContentCopy.id.in_(to_delete_ids)
-                ).delete(synchronize_session=False)
-            mj = db.get(MaintenanceJob, job_id)
-            if mj:
-                mj.summary = f"Etapa 2/2 — removendo da origem: {removed_physical} / {total} arquivo(s)"
-                db.commit()
-                invalidate_activity()
-            log.info(f"[migrate-disk] etapa 2/2: {removed_physical}/{total} arquivo(s) removido(s) da origem")
-
-        # Atualiza FileContent.stored_at que ainda apontam para o volume de origem.
+        # Realinha FileContent.stored_at que ainda aponta para a origem ANTES de
+        # apagar qualquer arquivo dela, para nenhum leitor ver um stored_at de
+        # caminho já removido.
         # startswith() (não like(f"{source}%")) escapa % e _ do path automaticamente —
         # sem isso, um volume cujo path contém esses caracteres (comuns em nomes de
         # disco, ex: "disk_1") batia como coringa de LIKE contra outros paths.
@@ -1970,8 +2071,37 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
             )
             if alt:
                 fc.stored_at = alt.stored_at
-
         db.commit()
+
+        # -- Fase 2: remover da origem só o que foi copiado e conferido ----------
+        # Por lote: linha apagada → commit → unlink. O unlink antes do commit
+        # deixava, num rollback, linhas apontando para arquivos já apagados.
+        removed_physical = 0
+        total_migrated = len(migrated_ids)
+        log.info(f"[migrate-disk] etapa 1/2 concluída — iniciando etapa 2/2: "
+                 f"removendo {total_migrated} cópia(s) de {source} ({skipped} mantida(s) por falha na cópia)")
+        for i in range(0, total_migrated, _MIGRATE_BATCH):
+            batch_ids = migrated_ids[i:i + _MIGRATE_BATCH]
+            paths = [
+                r.stored_at for r in
+                db.query(FileContentCopy.stored_at).filter(FileContentCopy.id.in_(batch_ids)).all()
+            ]
+            db.query(FileContentCopy).filter(
+                FileContentCopy.id.in_(batch_ids)
+            ).delete(synchronize_session=False)
+            db.commit()
+            for raw in paths:
+                try:
+                    Path(raw).unlink(missing_ok=True)
+                    removed_physical += 1
+                except OSError as e:
+                    log.warning(f"[migrate-disk] falha ao remover {raw}: {e}")
+            mj = db.get(MaintenanceJob, job_id)
+            if mj:
+                mj.summary = f"Etapa 2/2 — removendo da origem: {removed_physical} / {total_migrated} arquivo(s)"
+                db.commit()
+                invalidate_activity()
+            log.info(f"[migrate-disk] etapa 2/2: {removed_physical}/{total_migrated} arquivo(s) removido(s) da origem")
 
         summary = (
             f"{copied} copiado(s), {already_on_dest} já existiam no destino, "
@@ -1992,6 +2122,7 @@ def _bg_migrate_disk(source: str, destinations: list[str], job_id: int) -> None:
         _mark_job_error(db, job_id, e)
         raise
     finally:
+        storage.EXCLUDED_VOLUMES.discard(source)
         db.close()
 
 
@@ -2170,7 +2301,10 @@ def service_worker():
     sw = STATIC_DIR / "sw.js"
     if not sw.exists():
         raise HTTPException(404)
-    return FileResponse(sw, media_type="application/javascript")
+    # Versão do cache = versão do servidor (ver comentário em sw.js).
+    body = sw.read_text(encoding="utf-8").replace("__NV_VERSION__", app.version)
+    return Response(body, media_type="application/javascript",
+                    headers={"Cache-Control": "no-cache"})
 
 
 def _build_stats_data(db: Session) -> StatsResponse:
@@ -2267,6 +2401,21 @@ def _build_stats_data(db: Session) -> StatsResponse:
 
     trend_days = [TrendDay(date=r.day, version_count=r.n, total_size_bytes=size_by_day.get(r.day, 0))
                   for r in trend_counts]
+
+    # --- Q5a: calendário — versões de backup existentes por dia (todo o histórico) ---
+    # Conta as versões "done" que ainda existem (fora da lixeira e não apagadas),
+    # agrupadas pelo dia de criação. Pastas do servidor (kind="server") ficam de
+    # fora: a versão "live" delas não é um backup.
+    backups_days_rows = db.query(
+        date_expr.label("day"),
+        func.count(BackupVersion.id).label("n"),
+    ).join(BackupID, BackupID.label == BackupVersion.backup_label
+    ).filter(
+        BackupVersion.status == "done",
+        BackupVersion.created_at.isnot(None),
+        BackupID.kind != SERVER_KIND,
+    ).group_by(date_expr).order_by(date_expr).all()
+    backups_days = [BackupsDay(date=r.day, count=int(r.n)) for r in backups_days_rows if r.day]
 
     # --- Q5b: alterações por dia (adicionados/modificados/removidos, últimos 30 dias) ---
     # Agregado inteiramente no banco — nenhuma linha de version_files chega ao Python.
@@ -2581,6 +2730,7 @@ def _build_stats_data(db: Session) -> StatsResponse:
         space_saved_bytes=space_saved,
         trend_days=trend_days,
         changes_days=changes_days,
+        backups_days=backups_days,
         top_backups=top_backups,
         maintenance_by_type=maintenance_by_type,
         last_maintenance_jobs=last_maintenance_jobs,
@@ -3337,7 +3487,7 @@ def set_hidden_pin(user_id: int, req: HiddenPinSet, db: Session = Depends(get_db
     u = _user_or_404(db, user_id)
     u.hidden_pin_hash = hash_pin(req.pin)
     db.commit(); db.refresh(u)
-    reset_pin_attempts(u.id)
+    reset_pin_attempts(u.id, db)
     log.info(f"[users] PIN das fotos ocultas definido para '{u.username}'")
     return _user_info(u)
 
@@ -3347,7 +3497,7 @@ def delete_hidden_pin(user_id: int, db: Session = Depends(get_db)):
     u = _user_or_404(db, user_id)
     u.hidden_pin_hash = None
     db.commit(); db.refresh(u)
-    reset_pin_attempts(u.id)
+    reset_pin_attempts(u.id, db)
     log.info(f"[users] PIN das fotos ocultas removido de '{u.username}'")
     return _user_info(u)
 
@@ -3706,7 +3856,7 @@ def finish_version(label: str, version_key: str, req: VersionFinish, background_
     mark_backup_activity()
     log.info(f"[versao] {label}/{version_key} → {req.status}")
     if req.status == "done":
-        background_tasks.add_task(_bg_auto_cleanup)
+        background_tasks.add_task(_bg_auto_cleanup, v.backup.owner_user_id)
         cloud_media.indexer.wake()  # fotos novas entram na timeline
         if _should_process_ssd_moves(db):
             background_tasks.add_task(_bg_process_ssd_pending_moves)
@@ -3723,8 +3873,11 @@ def absorb_version(label: str, version_key: str, req: AbsorbRequest, db: Session
     arquivos ausentes do cliente (deletados) sao preservados via absorb da versao anterior.
     """
     dest = _get_version_or_404(label, version_key, db, user)
-    if dest.status != "running":
-        raise HTTPException(409, f"Versão destino está '{dest.status}' — absorb só permitido em versões running")
+    # "incomplete" é aceito como no /upload: a limpeza noturna marca assim uma
+    # versão running sem arquivo novo há 6 h, e um backup longo (um arquivo
+    # grande, uma pausa) voltava daqui com 409 sem conseguir fechar.
+    if dest.status not in ("running", "incomplete"):
+        raise HTTPException(409, f"Versão destino está '{dest.status}' — absorb só permitido em versões running/incomplete")
     src = _get_version_or_404(label, req.source_version_key, db, user)
 
     total_src = (
@@ -3938,6 +4091,11 @@ def _bg_ensure_replicas_batch(sha256s: list[str]) -> None:
                     continue
                 _ensure_replicas(sha, Path(stored_at), db)
                 attempted += 1
+                # Commit por arquivo: o INSERT da primeira cópia abria a transação
+                # de escrita e o lock do SQLite ficava preso durante as cópias
+                # seguintes do bloco (até 100 arquivos) — uploads caíam em
+                # "database is locked", e um crash deixava cópias sem linha.
+                db.commit()
             db.commit()
         # Cada cópia criada já é logada por ensure_replicas; aqui só o fechamento
         # do lote, e só quando houve trabalho (o caso comum é tudo já replicado).
@@ -3963,8 +4121,8 @@ def register_batch(req: RegisterBatchRequest, background_tasks: BackgroundTasks,
     o lote. Disponível a partir do servidor 7.8.
     """
     v = _get_version_or_404(req.backup_label, req.version_key, db, user)
-    if v.status != "running":
-        raise HTTPException(409, f"Versão está '{v.status}' — register só permitido em versões running")
+    if v.status not in ("running", "incomplete"):  # incomplete: ver /absorb
+        raise HTTPException(409, f"Versão está '{v.status}' — register só permitido em versões running/incomplete")
 
     # Conteúdos presentes no storage E visíveis ao usuário (posse prévia, ou admin) — duas queries IN
     sha256s = {i.sha256 for i in req.files}
@@ -4045,25 +4203,51 @@ def _store_new_content(
     se usou SSD cache ou se um upload concorrente já venceu)."""
     use_ssd = ssd_dir is not None
     dest = _ssd_content_path(sha256) if use_ssd else _content_path(sha256, volume)
-    shutil.move(str(tmp_path), str(dest))
-    if storage.ENCRYPTION_ENABLED:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    encrypted = storage.ENCRYPTION_ENABLED
+    # O arquivo final é preparado num temporário e publicado com
+    # storage.publish_content (os.link: falha se `dest` já existe). Antes, o
+    # plaintext ia direto para `dest` e era cifrado no lugar: dois uploads
+    # simultâneos do mesmo sha256 novo cifravam um por cima do outro, a
+    # verificação do segundo falhava e apagava o arquivo que o primeiro já tinha
+    # commitado — e, no meio, leitores viam plaintext rotulado como cifrado.
+    if encrypted:
         log.info(f"[upload] cifrando {original_path!r} ({size / 1024 / 1024:.2f} MB) — sha256={sha256[:8]}…")
         _fd, _tmp_enc = tempfile.mkstemp(dir=dest.parent, prefix="_enc_")
         os.close(_fd)
-        tmp_enc = Path(_tmp_enc)
+        tmp_final = Path(_tmp_enc)
         try:
-            crypto.encrypt_stream(dest, tmp_enc, storage.encryption_key)
-            shutil.move(str(tmp_enc), str(dest))
-            _verify_stored_file(sha256, dest, encrypted=True)
-            log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — nova cifrada sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
+            crypto.encrypt_stream(tmp_path, tmp_final, storage.encryption_key)
+            _verify_stored_file(sha256, tmp_final, encrypted=True)
         except Exception:
-            tmp_enc.unlink(missing_ok=True)
-            dest.unlink(missing_ok=True)
+            tmp_final.unlink(missing_ok=True)
             raise
+        finally:
+            tmp_path.unlink(missing_ok=True)
     else:
-        log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — nova sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
-    fc = FileContent(sha256=sha256, stored_at=str(dest), size=size,
-                     encrypted=storage.ENCRYPTION_ENABLED)
+        tmp_final = tmp_path  # já está no volume de destino (ver _stream_request_to_disk)
+    try:
+        storage.fsync_file(tmp_final)
+        published = storage.publish_content(tmp_final, dest)
+    except Exception:
+        tmp_final.unlink(missing_ok=True)
+        raise
+    if not published:
+        winner = _wait_concurrent_content(sha256, db)
+        if winner is not None:
+            tmp_final.unlink(missing_ok=True)
+            return winner, None
+        # Ninguém registrou `dest` (o vencedor caiu entre publicar e commitar):
+        # adota o arquivo se ele confere; senão o substitui pelo nosso.
+        if storage.content_matches(dest, sha256, encrypted, storage.encryption_key):
+            tmp_final.unlink(missing_ok=True)
+            log.warning(f"[upload] {sha256[:8]}… publicado por upload concorrente que não registrou — adotando o arquivo")
+        else:
+            os.replace(tmp_final, dest)
+            log.warning(f"[upload] {sha256[:8]}… arquivo órfão em {dest} não confere — substituído")
+    log.info(f"[upload] {backup_label}/{version_key} ← {original_path!r} — nova{' cifrada' if encrypted else ''} "
+             f"sha256={sha256[:8]}… ({size / 1024 / 1024:.2f} MB)")
+    fc = FileContent(sha256=sha256, stored_at=str(dest), size=size, encrypted=encrypted)
     try:
         db.add(fc)
         if use_ssd:
@@ -4100,6 +4284,41 @@ def _store_new_content(
     # _ensure_replicas é chamado APÓS db.commit() em upload_file para não manter
     # o write lock do SQLite durante as cópias de arquivo para volumes réplica.
     return fc, (dest if not use_ssd else None)
+
+
+_storage_full_notified_at = 0.0
+_STORAGE_FULL_NOTIFY_EVERY = 1800.0
+
+
+async def _notify_storage_full(detail: str) -> None:
+    """Avisa o admin no Telegram que o storage está cheio — no máximo a cada 30 min,
+    porque sob pressão de disco todo upload cai aqui."""
+    global _storage_full_notified_at
+    now = time.monotonic()
+    if _storage_full_notified_at and now - _storage_full_notified_at < _STORAGE_FULL_NOTIFY_EVERY:
+        return  # 0.0 = nunca avisou (monotonic() é pequeno logo após o boot)
+    _storage_full_notified_at = now
+    from daily_digest import _send_telegram
+    await _send_telegram(
+        f"🛑 *NestVault — Storage cheio*\n\n{detail}\n\n"
+        f"Uploads estão sendo recusados (507). Libere espaço em Manutenção "
+        f"(limpeza por data/quantidade, lixeira) ou adicione disco."
+    )
+
+
+def _wait_concurrent_content(sha256: str, db: Session) -> Optional[FileContent]:
+    """`dest` já existia na publicação: um upload concorrente do mesmo sha256
+    chegou primeiro. Ele publica e só depois commita, então espera a linha dele
+    aparecer (até 5 s) e a devolve — as réplicas são dele. None se ela não vem:
+    o vencedor caiu entre publicar e commitar, e o caller adota o arquivo."""
+    for _ in range(50):
+        db.rollback()  # fecha a transação de leitura: a próxima query vê o commit do vencedor
+        fc = db.query(FileContent).filter(FileContent.sha256 == sha256).first()
+        if fc is not None:
+            log.info(f"[upload] {sha256[:8]}… upload concorrente venceu — dedup")
+            return fc
+        time.sleep(0.1)
+    return None
 
 
 def _register_existing_content_sync(sha256: str, user: User, db: Session) -> None:
@@ -4238,22 +4457,23 @@ async def upload_file(
             volume = _pick_volume()
         except storage.StorageThresholdExceeded as _exc:
             log.warning("[upload] Todos os volumes abaixo do limiar — acionando limpeza automática antes de continuar...")
-            from daily_digest import _send_telegram
-            await _send_telegram(
-                f"⚠️ *NestVault — Alerta de Armazenamento*\n\n"
-                f"{_exc}\n\n"
-                f"Iniciando limpeza automática de versões antigas..."
-            )
             # O helper registra o MaintenanceJob (running → done/error) para que a
-            # limpeza por pressão de disco apareça na Atividade enquanto roda.
-            await asyncio.to_thread(_auto_cleanup_with_job, db, version_id, " durante upload")
+            # limpeza por pressão de disco apareça na Atividade enquanto roda. Só o
+            # lixo (incomplete/failed) dos labels do dono deste backup sai.
+            owner_id = await asyncio.to_thread(lambda: v.backup.owner_user_id)
+            await asyncio.to_thread(_auto_cleanup_with_job, db, version_id, " durante upload", owner_id)
             try:
                 volume = _pick_volume()
             except storage.StorageThresholdExceeded:
-                volume = storage.pick_volume_last_resort()
+                # Sem "último recurso": antes o upload seguia gravando abaixo do
+                # limiar depois de apagar versões done de TODOS os usuários. Agora o
+                # histórico fica, o upload para e o admin decide o que liberar.
+                await _notify_storage_full(str(_exc))
+                raise HTTPException(507, "Sem espaço no storage — o administrador foi avisado; "
+                                         "libere espaço pela Manutenção antes de continuar")
         ssd_dir   = await asyncio.to_thread(_ssd_cache_write_dir, db)
         write_dir = ssd_dir if ssd_dir else volume
-        sha256, size, tmp_path = await _stream_request_to_disk(request, write_dir)
+        sha256, size, tmp_path = await _stream_upload_limited(request, write_dir, db, user)
 
         try:
             if await asyncio.to_thread(quota.check_new_content, db, user, sha256, size):
@@ -4264,16 +4484,21 @@ async def upload_file(
             )
         except Exception:
             tmp_path.unlink(missing_ok=True)
+            quota.release(user.id, new_for_quota)
             raise
 
-    vf_id = await asyncio.to_thread(
-        _upsert_version_file_sync, version_id, original_path, sha256, mtime, db
-    )
+    try:
+        vf_id = await asyncio.to_thread(
+            _upsert_version_file_sync, version_id, original_path, sha256, mtime, db
+        )
 
-    # Replica copies are created AFTER the write lock is released so that
-    # concurrent uploads are not blocked during potentially slow file I/O.
-    if replica_source is not None:
-        await asyncio.to_thread(_finish_replicas_sync, sha256, replica_source, db)
+        # Replica copies are created AFTER the write lock is released so that
+        # concurrent uploads are not blocked during potentially slow file I/O.
+        if replica_source is not None:
+            await asyncio.to_thread(_finish_replicas_sync, sha256, replica_source, db)
+    except Exception:
+        quota.release(user.id, new_for_quota)
+        raise
     if new_for_quota:
         await asyncio.to_thread(quota.commit_new_content, db, user, new_for_quota)
 
@@ -4289,6 +4514,7 @@ async def upload_file(
 @app.put("/cloud/drive/upload", tags=["cloud"])
 async def cloud_drive_upload(
     request: Request,
+    background_tasks: BackgroundTasks,
     label: str           = Header(..., alias="X-Label"),
     path:  str           = Header(..., alias="X-Path"),
     mtime: Optional[float] = Header(None, alias="X-Mtime"),
@@ -4316,7 +4542,8 @@ async def cloud_drive_upload(
         raise HTTPException(507, "Pouco espaco livre nos volumes")
     ssd_dir   = await asyncio.to_thread(_ssd_cache_write_dir, db)
     write_dir = ssd_dir if ssd_dir else volume
-    sha256, size, tmp_path = await _stream_request_to_disk(request, write_dir)
+    sha256, size, tmp_path = await _stream_upload_limited(request, write_dir, db, user)
+    new_for_quota = False
     try:
         new_for_quota = await asyncio.to_thread(quota.check_new_content, db, user, sha256, size)
         replica_source = await asyncio.to_thread(
@@ -4325,17 +4552,26 @@ async def cloud_drive_upload(
         )
     except Exception:
         tmp_path.unlink(missing_ok=True)
+        if new_for_quota:
+            quota.release(user.id, size)
         raise
 
     def _register():
         d = cloud_drive.get(db, label, user)
         return cloud_drive.put_file(db, d, rel, sha256, mtime or time.time(), user), d.touched
-    vf_id, touched = await asyncio.to_thread(_register)
-    if replica_source is not None:
-        await asyncio.to_thread(_finish_replicas_sync, sha256, replica_source, db, True)
+    try:
+        vf_id, touched = await asyncio.to_thread(_register)
+        if replica_source is not None:
+            await asyncio.to_thread(_finish_replicas_sync, sha256, replica_source, db, True)
+    except Exception:
+        if new_for_quota:
+            quota.release(user.id, size)
+        raise
     # O conteúdo que já existia (dedup) sobe para o fator do Cloud; o que foi
     # substituído e saiu do Cloud volta ao fator do backup, se existir em algum.
-    await asyncio.to_thread(cloud_replicas.apply_bg, touched)
+    # Depois da resposta (BackgroundTasks), como o changelog da v10.3.0 descreve —
+    # antes era aguardado inline e o upload esperava a replicação em N discos.
+    background_tasks.add_task(cloud_replicas.apply_bg, touched)
     if new_for_quota:
         await asyncio.to_thread(quota.commit_new_content, db, user, size)
 
@@ -4354,15 +4590,28 @@ def sync(req: SyncRequest, db: Session = Depends(get_db), user: User = Depends(g
 
 
 # -- Files --------------------------------------------------------------------
+_FILES_HARD_LIMIT = 200_000
+
+
 @app.get("/files", response_model=list[FileInfo])
 def list_files(
     backup_label: str,
     version_key: str,
+    response: Response,
+    offset: int = Query(0, ge=0),
+    limit: Optional[int] = Query(None, ge=1, le=50_000),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Lista arquivos com size — usa JOIN explicito em vez de lazy load (N+1)."""
+    """Lista arquivos com size — usa JOIN explicito em vez de lazy load (N+1).
+
+    Paginável por `offset`/`limit` (o total vai no header X-Total-Count). Sem
+    `limit`, devolve tudo até _FILES_HARD_LIMIT — uma versão com milhões de
+    arquivos não vira mais uma resposta de centenas de MB montada em memória."""
     v = _get_version_or_404(backup_label, version_key, db, user)
+
+    total = db.query(func.count(VersionFile.id)).filter(VersionFile.version_id == v.id).scalar() or 0
+    response.headers["X-Total-Count"] = str(total)
 
     rows = (db.query(
                 VersionFile.id,
@@ -4375,6 +4624,8 @@ def list_files(
             .outerjoin(FileContent, FileContent.sha256 == VersionFile.sha256)
             .filter(VersionFile.version_id == v.id)
             .order_by(VersionFile.original_path)
+            .offset(offset)
+            .limit(limit if limit is not None else _FILES_HARD_LIMIT)
             .all())
 
     return [
@@ -4703,18 +4954,15 @@ def purge_quarantine(db: Session = Depends(get_db)):
         return {"purged": 0, "versions_failed": 0}
 
     affected_ids: set[int] = set()
+    purge_paths: list[str] = []  # apagados só depois do commit (um rollback não pode perder arquivo)
     for sha in shas:
         affected_ids.update(
             r[0] for r in db.query(VersionFile.version_id)
             .filter(VersionFile.sha256 == sha).distinct().all()
         )
-        for c in db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha).all():
-            try:
-                Path(c.stored_at).unlink()
-            except FileNotFoundError:
-                pass
-            except OSError as e:
-                log.warning(f"[quarantine-purge] não foi possível remover {c.stored_at}: {e}")
+        purge_paths.extend(
+            c.stored_at for c in db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha).all()
+        )
         db.query(VersionFile).filter(VersionFile.sha256 == sha).delete(synchronize_session=False)
         db.query(FileContentCopy).filter(FileContentCopy.sha256 == sha).delete(synchronize_session=False)
         db.query(FileContent).filter(FileContent.sha256 == sha).delete(synchronize_session=False)
@@ -4729,6 +4977,14 @@ def purge_quarantine(db: Session = Depends(get_db)):
         v.finished_at = datetime.now()
         v.integrity_status = None
     db.commit()
+
+    for raw in purge_paths:
+        try:
+            Path(raw).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            log.warning(f"[quarantine-purge] não foi possível remover {raw}: {e}")
 
     log.warning(
         f"[quarantine-purge] {len(shas)} conteúdo(s) apagado(s) definitivamente; "
@@ -4890,16 +5146,22 @@ def _bg_encrypt_existing(job_id: int) -> None:
             last_sha = page[-1].sha256
 
             page_shas = [fc.sha256 for fc in page]
-            copies_q = db.query(FileContentCopy).filter(FileContentCopy.sha256.in_(page_shas))
-            if degraded_strs:
-                copies_q = copies_q.filter(~FileContentCopy.volume_path.in_(degraded_strs))
             encrypt_copies_by_sha: dict[str, list] = {}
-            for c in copies_q.all():
+            for c in db.query(FileContentCopy).filter(FileContentCopy.sha256.in_(page_shas)).all():
                 encrypt_copies_by_sha.setdefault(c.sha256, []).append(c)
 
             for fc in page:
                 i += 1
                 copies = encrypt_copies_by_sha.get(fc.sha256, [])
+
+                # Uma cópia em volume degraded não pode ser cifrada agora — e marcar
+                # encrypted=True com ela ainda em plaintext faria readable_copy servir
+                # plaintext como cifrado quando o disco voltasse (decifrar falha).
+                # Fica para a próxima rodada, com o volume de volta.
+                if any(c.volume_path in degraded_strs for c in copies):
+                    log.warning(f"[encrypt-existing] [{i}/{total}] {fc.sha256[:8]}… cópia em volume degraded — adiado")
+                    skipped += 1
+                    continue
 
                 if not copies:
                     log.warning(f"[encrypt-existing] [{i}/{total}] {fc.sha256[:8]}… sem cópia acessível — pulando")
@@ -4943,7 +5205,8 @@ def _bg_encrypt_existing(job_id: int) -> None:
                         tmp_enc.unlink(missing_ok=True)
                 else:
                     for copy, p, tmp_enc in staged:
-                        shutil.move(str(tmp_enc), str(p))
+                        storage.fsync_file(tmp_enc)
+                        os.replace(tmp_enc, p)
                         log.info(f"[encrypt-existing] [{i}/{total}] cópia em {copy.volume_path} cifrada com sucesso")
 
                 if success:
@@ -5127,8 +5390,14 @@ def _latest_done_subquery(db: Session):
 
 
 def _parse_before_date(before: str) -> datetime:
+    """ISO 8601 → datetime naive no fuso local, que é como created_at é gravado.
+    Um `before` com offset ("…Z", "+00:00") era comparado direto com a coluna
+    naive e, no SQLite, virava comparação de strings com resultado errado."""
     try:
-        return datetime.fromisoformat(before)
+        dt = datetime.fromisoformat(before)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone().replace(tzinfo=None)
+        return dt
     except ValueError:
         raise HTTPException(400, f"'before' inválido — esperado ISO 8601 (ex: 2026-01-01T00:00:00): {before!r}")
 

@@ -110,7 +110,13 @@ def test_local_hash_cache_round_trip(cache_dir):
 
     assert loaded["version_key"] == "2026-01-01T00:00:00"
     assert loaded["files"] == files
-    assert (cache_dir / "mylabel.json").exists()
+    assert nestvault._local_cache_path("mylabel").exists()
+    assert nestvault._local_cache_path("mylabel").parent == cache_dir
+
+
+def test_local_hash_cache_path_does_not_collide(cache_dir):
+    # "a/b" e "a_b" normalizavam para o mesmo nome de arquivo.
+    assert nestvault._local_cache_path("a/b") != nestvault._local_cache_path("a_b")
 
 
 def test_local_hash_cache_miss_returns_empty_dict(cache_dir):
@@ -119,7 +125,7 @@ def test_local_hash_cache_miss_returns_empty_dict(cache_dir):
 
 def test_local_hash_cache_skips_saving_empty_snapshot(cache_dir):
     nestvault._save_local_hash_cache("mylabel", "2026-01-01T00:00:00", {})
-    assert not (cache_dir / "mylabel.json").exists()
+    assert not nestvault._local_cache_path("mylabel").exists()
 
 
 # -- diretorio de cache por SO -----------------------------------------------

@@ -5,11 +5,36 @@ on:
     tags:
       - 'v*'
 
+# Só o job de release precisa escrever no repositório (criar a Release).
 permissions:
-  contents: write
+  contents: read
+
+env:
+  PYINSTALLER_VERSION: '6.22.3'
 
 jobs:
+  # A suite inteira antes de qualquer binário: uma tag sobre código quebrado
+  # não vira release.
+  test:
+    uses: ./.github/workflows/test.yml
+
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Tag must match VERSION in client and server
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          client=$(sed -nE 's/^VERSION = "(v[0-9.]+)"/\1/p' client/nestvault.py)
+          server=$(sed -nE 's/.*FastAPI\(title="NestVault", version="([0-9.]+)".*/v\1/p' server/main.py)
+          echo "tag=$tag client=$client server=$server"
+          [ "$tag" = "$client" ] || { echo "::error::client/nestvault.py VERSION ($client) != tag ($tag)"; exit 1; }
+          [ "$tag" = "$server" ] || { echo "::error::server/main.py version ($server) != tag ($tag)"; exit 1; }
+
   build:
+    needs: [test, check-version]
     strategy:
       matrix:
         include:
@@ -26,13 +51,15 @@ jobs:
           - os: macos-latest
             asset_name: nestvault-macos-x64
             artifact_path: client/dist/nestvault-macos-x64
-            strip: "true"
+            strip: "false"
             python_arch: x64
+            expect_arch: x86_64
 
           - os: macos-latest
             asset_name: nestvault-macos-arm64
             artifact_path: client/dist/nestvault-macos-arm64
-            strip: "true"
+            strip: "false"
+            expect_arch: arm64
 
           - os: windows-latest
             asset_name: nestvault-windows-x64
@@ -47,9 +74,9 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.13'
           architecture: ${{ matrix.python_arch }}
@@ -57,19 +84,35 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r client/requirements.txt
-          pip install pyinstaller
+          pip install "pyinstaller==${PYINSTALLER_VERSION}"
+        shell: bash
 
       - name: Build executable
         shell: bash
         run: |
           cd client
           ARGS="--onefile --name ${{ matrix.asset_name }}"
+          # --strip no macOS quebra a assinatura ad-hoc das bibliotecas embutidas.
           if [ "${{ matrix.strip }}" = "true" ]; then
             ARGS="$ARGS --strip"
           fi
           pyinstaller $ARGS nestvault.py
 
-      - uses: actions/upload-artifact@v4
+      - name: Check macOS architecture
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          # macos-latest é arm64; o x64 sai de um Python x64 sob Rosetta e
+          # ninguém conferia o resultado.
+          archs=$(lipo -archs "${{ matrix.artifact_path }}")
+          echo "archs: $archs"
+          case "$archs" in *"${{ matrix.expect_arch }}"*) ;; *) echo "::error::esperado ${{ matrix.expect_arch }}, obtido $archs"; exit 1;; esac
+
+      - name: Smoke test
+        shell: bash
+        run: '"${{ matrix.artifact_path }}" --help'
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.asset_name }}
           path: ${{ matrix.artifact_path }}
@@ -77,14 +120,28 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write      # attestation de proveniência
+      attestations: write
 
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist/
           merge-multiple: true
 
-      - uses: softprops/action-gh-release@v2
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum nestvault-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        with:
+          subject-path: dist/nestvault-*
+
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           name: Release ${{ github.ref_name }}
           body: |
@@ -101,6 +158,16 @@ jobs:
             | Windows x64 | `nestvault-windows-x64.exe` |
             | Windows ARM64 | `nestvault-windows-arm64.exe` |
 
+            ### Conferir o download
+
+            `SHA256SUMS` traz o hash de cada arquivo — confira antes de executar:
+            ```bash
+            sha256sum -c SHA256SUMS --ignore-missing     # Linux
+            shasum -a 256 -c SHA256SUMS --ignore-missing # macOS
+            ```
+            Os binários também têm attestation de proveniência do GitHub:
+            `gh attestation verify nestvault-linux-x64 --repo ${{ github.repository }}`.
+
             ### Como usar
 
             **Linux/macOS** — dar permissão de execução antes do primeiro uso:
@@ -108,6 +175,8 @@ jobs:
             chmod +x nestvault-*
             ./nestvault-linux-x64 --help
             ```
+            No macOS, o Gatekeeper bloqueia binários baixados sem assinatura da Apple:
+            `xattr -d com.apple.quarantine nestvault-macos-arm64` libera a execução.
 
             **Windows** — executar diretamente:
             ```
@@ -115,6 +184,8 @@ jobs:
             ```
 
             A API Key é passada via variável de ambiente `BACKUP_API_KEY`.
-          files: dist/*
+          files: |
+            dist/nestvault-*
+            dist/SHA256SUMS
           draft: false
           prerelease: false

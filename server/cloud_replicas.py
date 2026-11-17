@@ -52,7 +52,8 @@ def _chunks(items: list[str]):
 
 
 def _live_label():
-    return or_(BackupID.status.is_(None), BackupID.status != TRASHED_STATUS)
+    import database
+    return database.live_label_filter()
 
 
 def _shas(db: Session, *filters, shas: list[str] | None = None) -> set[str]:
@@ -138,6 +139,9 @@ def _fix_one(db: Session, sha: str, is_cloud: bool) -> tuple[int, int]:
     return 0, 0
 
 
+_COMMIT_EVERY = 25
+
+
 def apply(db: Session, shas: Iterable[str], on_progress=None, prefix: str = "") -> tuple[int, int]:
     """Cria ou remove cópias de `shas` até o alvo de cada um. Faz commit.
     Devolve (cópias criadas, cópias removidas)."""
@@ -148,12 +152,18 @@ def apply(db: Session, shas: Iterable[str], on_progress=None, prefix: str = "") 
     progress = storage.ReplicationProgress("cloud-replicas", len(work), total_bytes, db,
                                            on_progress, prefix) if on_progress else None
     added = removed = 0
-    for sha, size, _, is_cloud in work:
+    for n, (sha, size, _, is_cloud) in enumerate(work, 1):
         a, r = _fix_one(db, sha, is_cloud)
         added += a
         removed += r
         if progress:
             progress.tick(copies=a, nbytes=size * a)
+        # Commit periódico: solta o write lock do SQLite entre as cópias. Sem
+        # on_progress (limpeza noturna, apply_bg) o commit só vinha no fim, e o
+        # lock ficava preso durante o job inteiro — uploads caíam em "database is
+        # locked", e um crash deixava as cópias já feitas sem linha no banco.
+        if n % _COMMIT_EVERY == 0:
+            db.commit()
     db.commit()
     if progress:
         progress.emit(force_log=True)
@@ -258,7 +268,7 @@ def storage_free_bytes() -> int:
     """Quanto ainda cabe no Cloud: o livre acima do limiar de cada disco saudável,
     dividido pelo nº de cópias que um arquivo novo do Cloud ganha."""
     with _free_lock:
-        if time.monotonic() - _free_cache["ts"] < _FREE_TTL:
+        if _free_cache["ts"] and time.monotonic() - _free_cache["ts"] < _FREE_TTL:  # ts 0 = nunca
             return _free_cache["value"]
     threshold = storage.STORAGE_FALLBACK_THRESHOLD_GB * 1024 ** 3
     free = 0
