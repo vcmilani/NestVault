@@ -4,6 +4,11 @@ Histórico de versões do NestVault. Veja o [README](README.md) para instalaçã
 
 ---
 
+**v10.4.1** — a página de **Estatísticas** mostra a idade real dos dados e ganha o botão **↻ Recalcular**.
+
+- "atualizado há" passa a contar a partir de quando as stats foram calculadas no servidor, não de quando o navegador as recebeu. Com o cache de 5 min, o texto podia dizer "há 3s" para números de vários minutos atrás. O `GET /api/stats` traz o novo campo `age_seconds` (idade do cache, medida no servidor, imune a diferença de relógio). A partir de 1 min o texto mostra minutos.
+- **↻ Recalcular**, no cabeçalho, chama `GET /api/stats?refresh=true`: recalcula na hora e grava no cache, em vez de devolver o valor guardado. Se um recálculo em background estiver rodando, espera ele terminar para não ser sobrescrito por ele. Só admin.
+
 **v10.4.0** — a página de **Estatísticas** ganha um **calendário de backups por dia**, antes de "Alterações por dia".
 
 Cada dia do mês mostra quantas versões de backup concluídas criadas naquele dia ainda existem, contando o dia atual, que aparece com contorno âmbar. Versões na lixeira, com falha ou incompletas não entram, nem as pastas do servidor do Cloud (a versão `live` delas não é um backup). A cor do dia é proporcional ao dia com mais backups do mês, e o cabeçalho traz o total do mês. Os botões ‹ › navegam do mês do backup mais antigo até o atual, e **Hoje** volta para o mês corrente; o mês escolhido se mantém nos refreshes automáticos. "Hoje" segue o relógio do servidor, o mesmo fuso das datas das versões. Os dados vêm do novo campo `backups_days` (`[{date, count}]`, todo o histórico) no `GET /api/stats`, numa única query agrupada por dia.

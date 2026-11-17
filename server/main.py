@@ -1,5 +1,5 @@
 """
-NestVault  v10.4.0
+NestVault  v10.4.1
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -638,7 +638,7 @@ async def lifespan(_: FastAPI):
 # /docs, /redoc e /openapi.json ficam fechados por padrão (server.expose_docs):
 # descreviam toda a API, com nomes de headers e rotas, sem login.
 _DOCS = {} if config.get("server.expose_docs") else {"docs_url": None, "redoc_url": None, "openapi_url": None}
-app = FastAPI(title="NestVault", version="10.4.0", lifespan=lifespan, **_DOCS)
+app = FastAPI(title="NestVault", version="10.4.1", lifespan=lifespan, **_DOCS)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 app.include_router(cloud_ui_router, prefix="/cloud", tags=["cloud"])
 
@@ -1230,6 +1230,9 @@ class StatsResponse(BaseModel):
     disk_usage_days: list[DiskUsageDay]
     freed_days: list[FreedDay]
     server_time: str
+    # Idade do cache no momento da resposta (s). Relativa ao servidor, para o
+    # "atualizado há" da página não depender do relógio do navegador.
+    age_seconds: float = 0.0
 
 
 # -- Helpers ------------------------------------------------------------------
@@ -2781,18 +2784,22 @@ def get_replication_estimate(refresh: bool = False, db: Session = Depends(get_db
 
 
 @app.get("/api/stats", response_model=StatsResponse, dependencies=[Depends(require_admin)])
-def get_stats(db: Session = Depends(get_db)):
+def get_stats(refresh: bool = False, db: Session = Depends(get_db)):
     data = _stats_cache["data"]
-    if data is None:
-        # Cold start: só a primeira chamada depois do boot calcula inline.
-        data = _build_stats_data(db)
-        _stats_cache.update({"data": data, "ts": time.monotonic()})
+    if data is None or refresh:
+        # Cold start (só a primeira chamada depois do boot) ou recálculo pedido
+        # pelo botão da página: calcula inline. O lock espera um recálculo em
+        # background terminar, para ele não sobrescrever depois o valor novo.
+        with _stats_refresh_lock:
+            data = _build_stats_data(db)
+            _stats_cache.update({"data": data, "ts": time.monotonic()})
     elif time.monotonic() - _stats_cache["ts"] > _STATS_TTL:
         # Cache vencido: devolve o valor atual e recalcula em background. Antes o
         # request que encontrava o cache vencido pagava a agregação inteira, o que
         # deixava a página lenta e competia por CPU com o resto do servidor.
         _refresh_stats_async()
-    return data
+    age = max(0.0, time.monotonic() - _stats_cache["ts"])
+    return data.model_copy(update={"age_seconds": round(age, 1)})
 
 
 def _rclone_labels(db: Session, labels: Optional[Iterable[str]] = None) -> set[str]:

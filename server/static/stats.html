@@ -180,6 +180,7 @@
   </div>
   <div class="header-right">
     <span class="last-updated" id="lastUpdated"></span>
+    <button class="hbtn always-visible" id="statsRefresh" onclick="load(true)" title="Recalcular as estatísticas agora (ignora o cache de 5 min)">↻<span class="hbtn-label"> Recalcular</span></button>
     <button class="hbtn always-visible" id="themeBtn" onclick="toggleTheme()">☀ Claro</button>
     <a class="hbtn" href="/admin" title="Dashboard">←<span class="hbtn-label"> Dashboard</span></a>
     <a class="hbtn" href="/disks" title="Discos">⊞<span class="hbtn-label"> Discos</span></a>
@@ -466,19 +467,23 @@
     'photos-index':          'Indexação de fotos',
   };
 
-  async function load() {
+  async function load(refresh) {
+    const btn = document.getElementById('statsRefresh');
+    if (refresh) { btn.disabled = true; btn.style.opacity = '.5'; }
     try {
-      const r = await fetch('/api/stats', {headers: H()});
+      const r = await fetch('/api/stats' + (refresh ? '?refresh=true' : ''), {headers: H()});
       if (r.status === 401) { showLogin('API Key inválida.'); return; }
       if (r.status === 403) { nvNotAdmin(); return; }
       if (!r.ok) throw new Error('HTTP '+r.status);
       const data = await r.json();
       clearError();
-      nvMarkUpdated();
+      nvMarkUpdated(data.age_seconds);
       render(data);
       loadReplication();
     } catch(e) {
       showError('Não foi possível conectar: '+e.message);
+    } finally {
+      btn.disabled = false; btn.style.opacity = '';
     }
   }
 
@@ -759,7 +764,7 @@
   }
 
   // ── Calendário: backups existentes por dia ───────────────────────────────
-  // O mês exibido sobrevive aos refreshes automáticos da página.
+  // O mês exibido sobrevive às recargas dos dados (botão Recalcular).
   const _bcal = {counts: {}, today: '', min: '', ym: null};
   const _ymKey = (y, m) => `${y}-${String(m + 1).padStart(2, '0')}`;
 

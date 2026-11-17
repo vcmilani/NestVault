@@ -113,7 +113,9 @@ let _nvTickTimer  = null;
 function _nvTickRender() {
   if (!_nvLastUpdate) return;
   const el = document.getElementById('lastUpdated');
-  if (el) el.textContent = 'atualizado há ' + Math.round((Date.now() - _nvLastUpdate) / 1000) + 's';
+  if (!el) return;
+  const s = Math.max(0, Math.round((Date.now() - _nvLastUpdate) / 1000));
+  el.textContent = 'atualizado há ' + (s < 60 ? s + 's' : Math.floor(s / 60) + 'min');
 }
 function _nvStartTick() {
   clearInterval(_nvTickTimer);
@@ -121,8 +123,10 @@ function _nvStartTick() {
   _nvTickTimer = setInterval(_nvTickRender, 1000);
 }
 // Marca o momento da última carga de dados e (re)inicia o tick de 1s.
-function nvMarkUpdated() {
-  _nvLastUpdate = Date.now();
+// ageSeconds: idade dos dados informada pelo servidor (ex.: cache), para o
+// texto refletir quando foram calculados e não só quando chegaram.
+function nvMarkUpdated(ageSeconds) {
+  _nvLastUpdate = Date.now() - (Number(ageSeconds) > 0 ? ageSeconds * 1000 : 0);
   _nvTickRender();
   _nvStartTick();
 }
