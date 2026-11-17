@@ -1,5 +1,5 @@
 """
-NestVault  v10.4.1
+NestVault  v10.4.2
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -267,8 +267,13 @@ _RECLAIMABLE_TTL = 60.0
 _historical_cache: dict = {"data": None, "ts": 0.0, "rev": 0}
 _HISTORICAL_FALLBACK_TTL = 300.0
 
-_stats_cache: dict = {"data": None, "ts": 0.0}
+_stats_cache: dict = {"data": None, "ts": 0.0, "build_s": 0.0}
 _STATS_TTL = 300.0
+# O cache só vence depois de max(_STATS_TTL, fator × duração do último cálculo).
+# Com TTL fixo, um cálculo mais lento que o TTL (7+ min num PostgreSQL com
+# milhões de linhas em version_files) emendava um recálculo no outro enquanto a
+# página estivesse aberta: o banco varria a tabela inteira sem parar.
+_STATS_TTL_BUILD_FACTOR = 3.0
 
 # Idade a partir da qual uma versão 'running' sem arquivos novos é considerada
 # abandonada. Mesmo critério da limpeza noturna (nightly_cleanup._SIX_HOURS).
@@ -638,7 +643,7 @@ async def lifespan(_: FastAPI):
 # /docs, /redoc e /openapi.json ficam fechados por padrão (server.expose_docs):
 # descreviam toda a API, com nomes de headers e rotas, sem login.
 _DOCS = {} if config.get("server.expose_docs") else {"docs_url": None, "redoc_url": None, "openapi_url": None}
-app = FastAPI(title="NestVault", version="10.4.1", lifespan=lifespan, **_DOCS)
+app = FastAPI(title="NestVault", version="10.4.2", lifespan=lifespan, **_DOCS)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 app.include_router(cloud_ui_router, prefix="/cloud", tags=["cloud"])
 
@@ -2609,12 +2614,17 @@ def _build_stats_data(db: Session) -> StatsResponse:
     # inflar pelo mesmo arquivo aparecendo em múltiplas versões antigas.
     reclaimable_by_label: list[ReclaimableLabelEntry] = []
     if latest_ids:
-        # O "não está em nenhuma keeper" usa NOT EXISTS (coberto por idx_sha256) em vez
-        # de LEFT JOIN + IS NULL: no formato anterior o SQLite comparava cada linha de
-        # version_files contra todo o subquery de keepers, e a query não terminava em
-        # tempo útil nos volumes reais.
-        _kf = aliased(VersionFile)
-        old_exclusive_sq = (
+        # Duas etapas: primeiro os pares DISTINCT (label, sha256) das versões antigas,
+        # depois o "não está em nenhuma keeper" (NOT EXISTS coberto por
+        # idx_vf_sha_version) sobre esses pares. Antes o NOT EXISTS ficava dentro do
+        # DISTINCT e era avaliado para cada linha de version_files das versões
+        # antigas — milhões de sondagens, que no PostgreSQL com ~6M linhas levavam
+        # mais de 7 minutos lendo disco. Como um subquery com DISTINCT não é
+        # achatado pelo planejador (nem no PostgreSQL nem no SQLite), a sondagem
+        # passa a rodar uma vez por conteúdo distinto de cada label: ordens de
+        # grandeza menos. (E não LEFT JOIN + IS NULL: nesse formato o SQLite
+        # comparava cada linha contra todo o subquery de keepers.)
+        old_pairs_sq = (
             db.query(
                 BackupVersion.backup_label.label("label"),
                 VersionFile.sha256.label("sha256"),
@@ -2623,19 +2633,20 @@ def _build_stats_data(db: Session) -> StatsResponse:
             .filter(
                 BackupVersion.status == "done",
                 BackupVersion.id.notin_(latest_ids),
-                ~exists().where(and_(_kf.sha256 == VersionFile.sha256,
-                                     _kf.version_id.in_(latest_ids))),
             )
             .distinct()
             .subquery()
         )
+        _kf = aliased(VersionFile)
         old_size_rows = (
             db.query(
-                old_exclusive_sq.c.label.label("label"),
+                old_pairs_sq.c.label.label("label"),
                 func.coalesce(func.sum(FileContent.size), 0).label("old_versions_size_bytes"),
             )
-            .join(FileContent, FileContent.sha256 == old_exclusive_sq.c.sha256)
-            .group_by(old_exclusive_sq.c.label)
+            .join(FileContent, FileContent.sha256 == old_pairs_sq.c.sha256)
+            .filter(~exists().where(and_(_kf.sha256 == old_pairs_sq.c.sha256,
+                                         _kf.version_id.in_(latest_ids))))
+            .group_by(old_pairs_sq.c.label)
             .order_by(func.coalesce(func.sum(FileContent.size), 0).desc())
             .all()
         )
@@ -2754,6 +2765,23 @@ def _build_stats_data(db: Session) -> StatsResponse:
 _stats_refresh_lock = threading.Lock()
 
 
+def _stats_effective_ttl() -> float:
+    return max(_STATS_TTL, _STATS_TTL_BUILD_FACTOR * _stats_cache.get("build_s", 0.0))
+
+
+def _compute_stats_into_cache(db: Session) -> StatsResponse:
+    """Recalcula e grava no cache, registrando quanto o cálculo levou. Quem chama
+    precisa estar segurando _stats_refresh_lock."""
+    t0 = time.monotonic()
+    data = _build_stats_data(db)
+    now = time.monotonic()
+    _stats_cache.update({"data": data, "ts": now, "build_s": now - t0})
+    if now - t0 > 30:
+        log.info(f"[stats] recálculo levou {now - t0:.0f}s — próximo em "
+                 f"{_stats_effective_ttl():.0f}s no mínimo")
+    return data
+
+
 def _refresh_stats_async() -> None:
     """Recalcula as stats fora do request, no máximo uma atualização por vez."""
     if not _stats_refresh_lock.acquire(blocking=False):
@@ -2762,8 +2790,7 @@ def _refresh_stats_async() -> None:
         try:
             db = SessionLocal()
             try:
-                data = _build_stats_data(db)
-                _stats_cache.update({"data": data, "ts": time.monotonic()})
+                _compute_stats_into_cache(db)
                 log.debug("[stats] cache atualizado em background")
             finally:
                 db.close()
@@ -2788,12 +2815,27 @@ def get_stats(refresh: bool = False, db: Session = Depends(get_db)):
     data = _stats_cache["data"]
     if data is None or refresh:
         # Cold start (só a primeira chamada depois do boot) ou recálculo pedido
-        # pelo botão da página: calcula inline. O lock espera um recálculo em
-        # background terminar, para ele não sobrescrever depois o valor novo.
-        with _stats_refresh_lock:
-            data = _build_stats_data(db)
-            _stats_cache.update({"data": data, "ts": time.monotonic()})
-    elif time.monotonic() - _stats_cache["ts"] > _STATS_TTL:
+        # pelo botão da página: calcula inline.
+        if _stats_refresh_lock.acquire(blocking=False):
+            try:
+                data = _compute_stats_into_cache(db)
+            finally:
+                _stats_refresh_lock.release()
+        else:
+            # Já há um recálculo em andamento (background ou outro clique): espera
+            # ele terminar e usa o resultado, que é tão novo quanto um segundo
+            # cálculo — rodar outro em seguida só dobraria a espera. Antes de
+            # esperar, encerra a transação aberta pela autenticação: sem isso a
+            # conexão ficava "idle in transaction" no pool durante minutos.
+            db.rollback()
+            ts_before = _stats_cache["ts"]
+            with _stats_refresh_lock:
+                if _stats_cache["data"] is None or _stats_cache["ts"] == ts_before:
+                    # O recálculo em andamento falhou: calcula aqui.
+                    data = _compute_stats_into_cache(db)
+                else:
+                    data = _stats_cache["data"]
+    elif time.monotonic() - _stats_cache["ts"] > _stats_effective_ttl():
         # Cache vencido: devolve o valor atual e recalcula em background. Antes o
         # request que encontrava o cache vencido pagava a agregação inteira, o que
         # deixava a página lenta e competia por CPU com o resto do servidor.

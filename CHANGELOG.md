@@ -4,6 +4,12 @@ Histórico de versões do NestVault. Veja o [README](README.md) para instalaçã
 
 ---
 
+**v10.4.2** — a página de **Estatísticas** deixa de sobrecarregar o banco em instalações grandes.
+
+- **"Espaço liberável por backup" bem mais leve.** A verificação "esse conteúdo ainda está em alguma versão mais recente?" rodava para cada linha de `version_files` das versões antigas. Com ~6M linhas no PostgreSQL, isso significava milhões de sondagens e mais de 7 min lendo disco. Agora ela roda uma vez por conteúdo distinto de cada label, depois do `DISTINCT`. O resultado é o mesmo.
+- **Recálculo em background com intervalo adaptativo.** O cache vencia em 5 min fixos. Se o cálculo levava mais que isso, um recálculo emendava no outro enquanto a página estivesse aberta. Agora o intervalo é o maior entre 5 min e 3× a duração do último cálculo, e cálculos acima de 30s vão para o log.
+- **↻ Recalcular não segura mais conexão.** Com um recálculo em andamento, o clique espera ele terminar e usa esse resultado, em vez de calcular tudo de novo. Antes de esperar, encerra a transação do login, que antes ficava `idle in transaction` no pool por minutos.
+
 **v10.4.1** — a página de **Estatísticas** mostra a idade real dos dados e ganha o botão **↻ Recalcular**.
 
 - "atualizado há" passa a contar a partir de quando as stats foram calculadas no servidor, não de quando o navegador as recebeu. Com o cache de 5 min, o texto podia dizer "há 3s" para números de vários minutos atrás. O `GET /api/stats` traz o novo campo `age_seconds` (idade do cache, medida no servidor, imune a diferença de relógio). A partir de 1 min o texto mostra minutos.
