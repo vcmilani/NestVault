@@ -4,6 +4,10 @@ Histórico de versões do NestVault. Veja o [README](README.md) para instalaçã
 
 ---
 
+**v10.4.3** — backups **rclone** (OneDrive, GDrive, iCloud) não falham mais com `SSL connection has been closed unexpectedly` no PostgreSQL.
+
+A conexão do job ficava com uma transação aberta durante toda a listagem e todo o download, que levam horas. Com `idle_in_transaction_session_timeout` configurado no PostgreSQL, o servidor derrubava a conexão e o job falhava ao gravar o resultado. Agora a transação é encerrada antes da leitura da config do remote, da listagem e dos downloads, nas duas estratégias (listagem recursiva e walk). A conexão volta ao pool e é re-testada antes de ser reutilizada, o que também protege contra quedas de conexão no meio de um backup longo.
+
 **v10.4.2** — a página de **Estatísticas** deixa de sobrecarregar o banco em instalações grandes.
 
 - **"Espaço liberável por backup" bem mais leve.** A verificação "esse conteúdo ainda está em alguma versão mais recente?" rodava para cada linha de `version_files` das versões antigas. Com ~6M linhas no PostgreSQL, isso significava milhões de sondagens e mais de 7 min lendo disco. Agora ela roda uma vez por conteúdo distinto de cada label, depois do `DISTINCT`. O resultado é o mesmo.

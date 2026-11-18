@@ -1,4 +1,4 @@
-# 🗄️ NestVault  `v10.4.2`
+# 🗄️ NestVault  `v10.4.3`
 
 Sistema de backup com **versionamento**, **deduplicação de conteúdo** e **backup por usuário** — cada conta só cria, lista e restaura seus próprios backups.
 

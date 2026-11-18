@@ -1,5 +1,5 @@
 """
-NestVault  v10.4.2
+NestVault  v10.4.3
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -643,7 +643,7 @@ async def lifespan(_: FastAPI):
 # /docs, /redoc e /openapi.json ficam fechados por padrão (server.expose_docs):
 # descreviam toda a API, com nomes de headers e rotas, sem login.
 _DOCS = {} if config.get("server.expose_docs") else {"docs_url": None, "redoc_url": None, "openapi_url": None}
-app = FastAPI(title="NestVault", version="10.4.2", lifespan=lifespan, **_DOCS)
+app = FastAPI(title="NestVault", version="10.4.3", lifespan=lifespan, **_DOCS)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 app.include_router(cloud_ui_router, prefix="/cloud", tags=["cloud"])
 
