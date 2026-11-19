@@ -48,6 +48,7 @@ import shutil
 
 import config
 import storage
+import version_summary
 from cache_state import invalidate_activity, mark_backup_activity
 from sqlalchemy import func
 from database import (
@@ -1537,6 +1538,7 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
         job.last_run_message = summary
         db.commit()
         invalidate_activity()
+        version_summary.wake()  # resumo da versão para as stats
         log.info(f"[rclone-runner] Job {job.id} concluído — {summary}")
 
     except Exception:
@@ -1676,6 +1678,7 @@ async def _run_fast_strategy(job: RcloneBackupJob, db) -> None:
         job.last_run_message = summary
         db.commit()
         invalidate_activity()
+        version_summary.wake()  # resumo da versão para as stats
         log.info(f"[rclone-runner] Job {job.id} concluído — {summary}")
 
     except Exception:

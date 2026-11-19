@@ -241,6 +241,15 @@ class BackupVersion(Base):
     trashed_at          = Column(DateTime, nullable=True)
     trashed_from_status = Column(String, nullable=True)
     trashed_by          = Column(Integer, nullable=True)
+    # Resumo da versão (version_summary.py): cache do que as stats agregariam de
+    # version_files. sum_status = status quando foi calculado; NULL = não resumida.
+    sum_status        = Column(String, nullable=True)
+    sum_file_count    = Column(Integer, nullable=True)
+    sum_logical_bytes = Column(BigInteger, nullable=True)
+    sum_added         = Column(Integer, nullable=True)
+    sum_modified      = Column(Integer, nullable=True)
+    sum_removed       = Column(Integer, nullable=True)
+    sum_prev_id       = Column(Integer, nullable=True)
 
     backup = relationship("BackupID", back_populates="versions")
     files  = relationship("VersionFile", back_populates="version", lazy="dynamic",
@@ -594,6 +603,14 @@ def init_db():
         # v10.4.0: bloqueio do PIN das ocultas persistido.
         ("users",           "pin_fails",               "INTEGER NOT NULL DEFAULT 0"),
         ("users",           "pin_locked_until",        "FLOAT"),
+        # v10.5.0: resumo por versão para as stats (version_summary.py).
+        ("backup_versions", "sum_status",          "TEXT"),
+        ("backup_versions", "sum_file_count",      "INTEGER"),
+        ("backup_versions", "sum_logical_bytes",   "BIGINT"),
+        ("backup_versions", "sum_added",           "INTEGER"),
+        ("backup_versions", "sum_modified",        "INTEGER"),
+        ("backup_versions", "sum_removed",         "INTEGER"),
+        ("backup_versions", "sum_prev_id",         "INTEGER"),
     ):
         with engine.connect() as conn:
             try:

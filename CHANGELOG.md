@@ -4,6 +4,14 @@ Histórico de versões do NestVault. Veja o [README](README.md) para instalaçã
 
 ---
 
+**v10.5.0** — a página de **Estatísticas** para de reler `version_files` inteira a cada recálculo.
+
+- **Resumo por versão.** Uma versão finalizada não muda mais. Então o nº de arquivos, os bytes lógicos e o diff contra a anterior (adicionados, modificados, removidos) são calculados uma vez e guardados em colunas novas de `backup_versions` (`sum_*`, criadas no boot). Deles saem a deduplicação, a tendência de 30 dias, as alterações por dia e o top backups, como somas instantâneas. Antes, cada um desses números varria a tabela inteira (milhões de linhas). Versões em andamento, incompletas e as pastas do Cloud continuam calculadas na hora, porque ainda podem receber arquivos.
+- **O resumo se corrige sozinho**, sem depender de cada escrita avisar. Uma versão é resumida de novo se o status mudou (restaurada da lixeira, refinalizada) ou se a versão anterior dela foi apagada (o diff muda de base). Um thread de background faz isso no boot, quando uma versão fecha e a cada 10 min. As 10 primeiras pendentes são resumidas na própria carga da página.
+- **Primeiro boot depois da atualização:** o thread resume todas as versões existentes, uma vez só. Até terminar, a página avisa "N versões ainda sendo resumidas — totais parciais".
+- **Painéis globais com cache próprio:** espaço liberável, liberável por backup e arquivos exclusivos dependem de todas as versões e continuam caros. Cada um agora guarda uma impressão digital barata dos dados (versões concluídas e conteúdo das pastas do Cloud) e só recalcula quando ela muda. Abrir a página sem nada ter mudado não recalcula nada. Quando muda, o recálculo roda em background, no máximo a cada 3× a duração do último. Cada painel mostra "calculando…", o próprio "há X min" e um botão **↻** (`POST /api/stats/panels/{kept|reclaimable|exclusive}/refresh`, só admin).
+- O espaço liberável de `/storage/info` e da Atividade usa o mesmo cache. Antes, durante os backups, ele revarria as versões mais recentes inteiras a cada minuto.
+
 **v10.4.3** — backups **rclone** (OneDrive, GDrive, iCloud) não falham mais com `SSL connection has been closed unexpectedly` no PostgreSQL.
 
 A conexão do job ficava com uma transação aberta durante toda a listagem e todo o download, que levam horas. Com `idle_in_transaction_session_timeout` configurado no PostgreSQL, o servidor derrubava a conexão e o job falhava ao gravar o resultado. Agora a transação é encerrada antes da leitura da config do remote, da listagem e dos downloads, nas duas estratégias (listagem recursiva e walk). A conexão volta ao pool e é re-testada antes de ser reutilizada, o que também protege contra quedas de conexão no meio de um backup longo.
