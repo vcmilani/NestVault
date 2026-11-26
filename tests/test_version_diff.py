@@ -160,18 +160,13 @@ def test_stats_exclusive_by_label_compares_latest_versions(client):
         "/only-a.txt": b"only-a",
         "/dup.txt":    b"only-a",  # mesmo conteúdo, mesmo label: continua exclusivo
     })
-    db = m.SessionLocal()
-    try:
-        stats = m._build_stats_data(db)
-    finally:
-        db.close()
-
-    by_label = {e.label: e for e in stats.exclusive_by_label}
-    assert (by_label["a"].file_count, by_label["a"].exclusive_file_count) == (4, 3)
-    assert by_label["a"].exclusive_pct == 75.0
-    assert by_label["a"].exclusive_size_bytes == len(b"x") + 2 * len(b"only-a")
-    assert (by_label["b"].file_count, by_label["b"].exclusive_file_count) == (1, 0)
-    assert by_label["b"].exclusive_pct == 0.0
+    # Painel global (stats_panels), sobreposto às stats em get_stats().
+    by_label = {e["label"]: e for e in client.get("/api/stats").json()["exclusive_by_label"]}
+    assert (by_label["a"]["file_count"], by_label["a"]["exclusive_file_count"]) == (4, 3)
+    assert by_label["a"]["exclusive_pct"] == 75.0
+    assert by_label["a"]["exclusive_size_bytes"] == len(b"x") + 2 * len(b"only-a")
+    assert (by_label["b"]["file_count"], by_label["b"]["exclusive_file_count"]) == (1, 0)
+    assert by_label["b"]["exclusive_pct"] == 0.0
 
 
 # -- daily_digest._version_diff -----------------------------------------------

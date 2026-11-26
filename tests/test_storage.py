@@ -131,10 +131,10 @@ def test_storage_info_reclaimable(tmp_path, monkeypatch):
         })
         c.patch("/backups/b1/versions/v2", json={"status": "done"})
 
-        # _get_reclaimable_bytes tem cache de 60s (_RECLAIMABLE_TTL), aquecido a
-        # cada boot do lifespan (_refresh_stats_async) antes das versões acima
+        # O total do store tem cache de 60s (_RECLAIMABLE_TTL), aquecido a cada
+        # boot do lifespan (_refresh_stats_async) antes das versões acima
         # existirem — força um recálculo para refletir o estado atual do teste.
-        m._reclaimable_cache.update({"value": 0, "ts": 0.0})
+        m._reclaimable_cache.update({"total": 0, "ts": 0.0, "gen": -1})
 
         r = c.get("/storage/info")
         # v2 é a keeper; conteúdo de v1 é reclaimable

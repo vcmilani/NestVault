@@ -1,5 +1,5 @@
 """
-NestVault  v10.4.2
+NestVault  v10.5.0
 Otimizacoes de performance:
 - Upload faz streaming para disco (nao carrega na RAM)
 - Hash calculado durante o stream (single-pass)
@@ -177,6 +177,8 @@ import stale_alerts
 import storage
 import sysmetrics
 import version_diff
+import version_summary
+import stats_panels
 # Implementação canônica do cleanup de órfãos (era duplicada aqui). O nome antigo
 # é mantido: cada sha256 é commitado individualmente, sem commit final agregado.
 from nightly_cleanup import _cleanup_orphan_contents as _cleanup_orphan_contents_no_commit
@@ -253,7 +255,7 @@ _rebalance_lock = threading.Lock()
 # bloquearia no join do executor por até _HISTORICAL_FALLBACK_TTL.
 _activity_loop_stop = threading.Event()
 
-_reclaimable_cache: dict = {"value": 0, "ts": 0.0, "gen": -1}
+_reclaimable_cache: dict = {"total": 0, "ts": 0.0, "gen": -1}
 _RECLAIMABLE_TTL = 60.0
 
 # Cache para dados históricos (recent_versions com diffs, recent_jobs, maintenance_jobs).
@@ -286,54 +288,24 @@ _RECENT_VERSIONS_CAP = 500
 
 
 def _get_reclaimable_bytes(db: Session) -> int:
+    """Espaço liberável = tudo que está no store − o que as versões mantidas usam.
+
+    O "retido" é o painel `kept` de stats_panels: só é recalculado quando muda o
+    conjunto de versões done (ou o conteúdo das pastas do Cloud). Antes ele era
+    refeito a cada invalidate_activity() — todo fim de versão, job e manutenção —,
+    então durante os backups /storage/info e a Atividade revarriam as versões
+    mais recentes inteiras a cada minuto. O total do store (uma soma sobre
+    file_contents) segue com o cache curto de antes: muda a cada upload.
+    """
     now = time.monotonic()
     gen = activity_generation()
-    # Só reusa o cache se o TTL não venceu E nenhuma escrita invalidou a atividade
-    # desde o cálculo. Antes o TTL era o único critério, então /storage/info e
-    # /api/activity podiam reportar o valor pré-limpeza por até um minuto depois
-    # dela terminar — exatamente quando o usuário está olhando para o número.
     if gen == _reclaimable_cache["gen"] and now - _reclaimable_cache["ts"] < _RECLAIMABLE_TTL:
-        return _reclaimable_cache["value"]
-    latest_ts_sq = (
-        db.query(BackupVersion.backup_label, func.max(BackupVersion.created_at).label("latest_ts"))
-        .filter(BackupVersion.status == "done")
-        .group_by(BackupVersion.backup_label)
-        .subquery()
-    )
-    keeper_ids = [
-        row.id for row in (
-            db.query(BackupVersion.id)
-            .join(latest_ts_sq,
-                  (BackupVersion.backup_label == latest_ts_sq.c.backup_label) &
-                  (BackupVersion.created_at   == latest_ts_sq.c.latest_ts))
-            .all()
-        )
-    ]
-    if keeper_ids:
-        # "liberável" = tudo que está no store menos o que as versões keeper ainda usam.
-        # Calculado como total - retido, em vez de um LEFT JOIN de file_contents inteiro
-        # contra o subquery de shas retidos: aquele formato levava o SQLite a comparar
-        # cada linha de file_contents contra todo o subquery (minutos de CPU travando o
-        # servidor). Aqui a varredura parte do conjunto pequeno (shas retidos) e entra em
-        # file_contents pela primary key.
-        kept_sq = (
-            db.query(VersionFile.sha256.label("sha256"))
-            .filter(VersionFile.version_id.in_(keeper_ids))
-            .distinct()
-            .subquery()
-        )
-        total_bytes = db.query(func.coalesce(func.sum(FileContent.size), 0)).scalar() or 0
-        kept_bytes = (
-            db.query(func.coalesce(func.sum(FileContent.size), 0))
-            .select_from(kept_sq)
-            .join(FileContent, FileContent.sha256 == kept_sq.c.sha256)
-            .scalar()
-        ) or 0
-        result = max(0, int(total_bytes) - int(kept_bytes))
+        total = _reclaimable_cache["total"]
     else:
-        result = db.query(func.coalesce(func.sum(FileContent.size), 0)).scalar() or 0
-    _reclaimable_cache.update({"value": int(result), "ts": now, "gen": gen})
-    return int(result)
+        total = int(db.query(func.coalesce(func.sum(FileContent.size), 0)).scalar() or 0)
+        _reclaimable_cache.update({"total": total, "ts": now, "gen": gen})
+    kept = stats_panels.PANELS["kept"].get(db, lambda: SessionLocal())
+    return max(0, total - int(kept or 0))
 
 
 def _pick_volume() -> Path:
@@ -623,6 +595,10 @@ async def lifespan(_: FastAPI):
     if cloud_media.AUTOSTART:
         # lambda, e não SessionLocal direto: resolve o global na hora (os testes o trocam)
         cloud_media.indexer.start(lambda: SessionLocal())
+    if version_summary.AUTOSTART:
+        # Resume as versões finalizadas que ainda não têm resumo (no primeiro boot
+        # depois da atualização, todas — uma vez só).
+        version_summary.summarizer.start(lambda: SessionLocal())
     log.info(f"Servidor iniciado — {len(storage.STORAGE_VOLUMES)} volume(s): {[str(v) for v in storage.STORAGE_VOLUMES]}")
     if storage.SSD_CACHE_ENABLED and storage.SSD_CACHE_DIR:
         log.info(f"SSD cache: habilitado — {storage.SSD_CACHE_DIR} (max {storage.SSD_CACHE_MAX_GB} GB)")
@@ -637,13 +613,14 @@ async def lifespan(_: FastAPI):
     activity_refresh.cancel()
     system_metrics.cancel()
     cloud_media.indexer.stop()
+    version_summary.summarizer.stop()
     sched.scheduler.shutdown(wait=False)
 
 
 # /docs, /redoc e /openapi.json ficam fechados por padrão (server.expose_docs):
 # descreviam toda a API, com nomes de headers e rotas, sem login.
 _DOCS = {} if config.get("server.expose_docs") else {"docs_url": None, "redoc_url": None, "openapi_url": None}
-app = FastAPI(title="NestVault", version="10.4.2", lifespan=lifespan, **_DOCS)
+app = FastAPI(title="NestVault", version="10.5.0", lifespan=lifespan, **_DOCS)
 app.include_router(rclone_router, prefix="/rclone", tags=["rclone"])
 app.include_router(cloud_ui_router, prefix="/cloud", tags=["cloud"])
 
@@ -1201,6 +1178,11 @@ class FreedDay(BaseModel):
     date: str
     bytes_freed: int
 
+class StatsPanelState(BaseModel):
+    age_seconds: Optional[float] = None
+    computing: bool = False
+    error: Optional[str] = None
+
 class StatsResponse(BaseModel):
     total_backups: int
     total_versions_done: int
@@ -1238,6 +1220,12 @@ class StatsResponse(BaseModel):
     # Idade do cache no momento da resposta (s). Relativa ao servidor, para o
     # "atualizado há" da página não depender do relógio do navegador.
     age_seconds: float = 0.0
+    # Versões finalizadas ainda sem resumo (version_summary) — ficam de fora dos
+    # totais até o resumidor chegar nelas; > 0 só no backfill do primeiro boot.
+    summaries_pending: int = 0
+    # Painéis globais (stats_panels): kept / reclaimable / exclusive →
+    # {age_seconds, computing, error}. age_seconds None = ainda sem valor.
+    panels: dict[str, StatsPanelState] = {}
 
 
 # -- Helpers ------------------------------------------------------------------
@@ -2363,12 +2351,12 @@ def _build_stats_data(db: Session) -> StatsResponse:
     unique_files  = int(dedup_row.unique_files  or 0)
     stored_bytes  = int(dedup_row.stored_bytes  or 0)
 
-    logical_row = db.query(
-        func.count(VersionFile.id).label("total_refs"),
-        func.coalesce(func.sum(FileContent.size), 0).label("logical_bytes"),
-    ).join(FileContent, FileContent.sha256 == VersionFile.sha256).first()
-    total_refs    = int(logical_row.total_refs    or 0)
-    logical_bytes = int(logical_row.logical_bytes or 0)
+    # Totais por versão (version_summary): resumo gravado para as finalizadas,
+    # ao vivo só para as mutáveis. Antes, Q4/Q5/Q5b/Q6 agregavam version_files
+    # inteira a cada recálculo.
+    vt = version_summary.VersionTotals(db)
+    total_refs    = sum(fc for fc, _ in vt.totals.values())
+    logical_bytes = sum(lb for _, lb in vt.totals.values())
 
     space_saved   = max(0, logical_bytes - stored_bytes)
     dedup_ratio   = round(logical_bytes / stored_bytes, 2) if stored_bytes > 0 else 1.0
@@ -2386,26 +2374,13 @@ def _build_stats_data(db: Session) -> StatsResponse:
     ).filter(BackupVersion.created_at >= cutoff, BackupVersion.status == "done"
     ).group_by(date_expr).order_by(date_expr).all()
 
-    # tamanho por dia via subquery para não multiplicar linhas
-    sz_sq = db.query(
-        BackupVersion.id.label("vid"),
-        BackupVersion.created_at.label("ts"),
-        func.coalesce(func.sum(FileContent.size), 0).label("sz"),
-    ).join(VersionFile, VersionFile.version_id == BackupVersion.id
-    ).join(FileContent, FileContent.sha256 == VersionFile.sha256
-    ).filter(BackupVersion.created_at >= cutoff, BackupVersion.status == "done"
-    ).group_by(BackupVersion.id, BackupVersion.created_at).subquery()
-
-    if _is_sqlite:
-        date_sq = func.strftime("%Y-%m-%d", sz_sq.c.ts)
-    else:
-        date_sq = func.to_char(sz_sq.c.ts, "YYYY-MM-DD")
-
-    trend_sizes_rows = db.query(
-        date_sq.label("day"),
-        func.coalesce(func.sum(sz_sq.c.sz), 0).label("sz"),
-    ).group_by(date_sq).all()
-    size_by_day = {r.day: int(r.sz) for r in trend_sizes_rows}
+    # tamanho por dia: bytes lógicos de cada versão, somados por dia de criação
+    from collections import defaultdict
+    size_by_day: dict[str, int] = defaultdict(int)
+    for r in db.query(BackupVersion.id, date_expr.label("day")).filter(
+            BackupVersion.created_at >= cutoff, BackupVersion.status == "done").all():
+        if r.id in vt.totals:
+            size_by_day[r.day] += vt.totals[r.id][1]
 
     trend_days = [TrendDay(date=r.day, version_count=r.n, total_size_bytes=size_by_day.get(r.day, 0))
                   for r in trend_counts]
@@ -2428,8 +2403,6 @@ def _build_stats_data(db: Session) -> StatsResponse:
     # --- Q5b: alterações por dia (adicionados/modificados/removidos, últimos 30 dias) ---
     # Agregado inteiramente no banco — nenhuma linha de version_files chega ao Python.
     # Ver version_diff.py para as identidades usadas nas contagens.
-    from collections import defaultdict
-
     _vseq = version_diff.done_version_lag_sq(db)
     _win = db.query(_vseq).filter(_vseq.c.ts >= cutoff).subquery()
 
@@ -2437,7 +2410,7 @@ def _build_stats_data(db: Session) -> StatsResponse:
 
     changes_days: list[ChangeDay] = []
     if window_rows:
-        diffs = version_diff.diff_counts_by_version(db, _win)
+        diffs = vt.diffs
 
         totals_by_day: dict[str, dict[str, int]] = defaultdict(lambda: {"added": 0, "modified": 0, "removed": 0})
         for r in window_rows:
@@ -2462,18 +2435,8 @@ def _build_stats_data(db: Session) -> StatsResponse:
     ).filter(BackupVersion.status == "done"
     ).group_by(BackupVersion.backup_label).all()
 
-    latest_ids = [r.latest_id for r in label_stats]
-    if latest_ids:
-        size_rows = db.query(
-            VersionFile.version_id,
-            func.count(VersionFile.id).label("fc"),
-            func.coalesce(func.sum(FileContent.size), 0).label("sz"),
-        ).join(FileContent, FileContent.sha256 == VersionFile.sha256
-        ).filter(VersionFile.version_id.in_(latest_ids)
-        ).group_by(VersionFile.version_id).all()
-        size_map = {r.version_id: (int(r.fc), int(r.sz)) for r in size_rows}
-    else:
-        size_map = {}
+    size_map = {r.latest_id: vt.totals[r.latest_id]
+                for r in label_stats if r.latest_id in vt.totals}
 
     all_labels = [r.label for r in label_stats]
     if all_labels:
@@ -2609,115 +2572,11 @@ def _build_stats_data(db: Session) -> StatsResponse:
         for r in _activity_sorted
     ]
 
-    # --- Q11: espaço liberável por label (versões done não-mais-recentes) ---
-    # Exclui sha256s presentes em qualquer versão keeper e usa DISTINCT para não
-    # inflar pelo mesmo arquivo aparecendo em múltiplas versões antigas.
+    # Q11 (liberável por label) e Q12 (exclusivos) dependem do conjunto global de
+    # versões: vêm dos painéis de stats_panels, sobrepostos em get_stats() a cada
+    # resposta — não ficam presos ao TTL deste cache.
     reclaimable_by_label: list[ReclaimableLabelEntry] = []
-    if latest_ids:
-        # Duas etapas: primeiro os pares DISTINCT (label, sha256) das versões antigas,
-        # depois o "não está em nenhuma keeper" (NOT EXISTS coberto por
-        # idx_vf_sha_version) sobre esses pares. Antes o NOT EXISTS ficava dentro do
-        # DISTINCT e era avaliado para cada linha de version_files das versões
-        # antigas — milhões de sondagens, que no PostgreSQL com ~6M linhas levavam
-        # mais de 7 minutos lendo disco. Como um subquery com DISTINCT não é
-        # achatado pelo planejador (nem no PostgreSQL nem no SQLite), a sondagem
-        # passa a rodar uma vez por conteúdo distinto de cada label: ordens de
-        # grandeza menos. (E não LEFT JOIN + IS NULL: nesse formato o SQLite
-        # comparava cada linha contra todo o subquery de keepers.)
-        old_pairs_sq = (
-            db.query(
-                BackupVersion.backup_label.label("label"),
-                VersionFile.sha256.label("sha256"),
-            )
-            .join(VersionFile, VersionFile.version_id == BackupVersion.id)
-            .filter(
-                BackupVersion.status == "done",
-                BackupVersion.id.notin_(latest_ids),
-            )
-            .distinct()
-            .subquery()
-        )
-        _kf = aliased(VersionFile)
-        old_size_rows = (
-            db.query(
-                old_pairs_sq.c.label.label("label"),
-                func.coalesce(func.sum(FileContent.size), 0).label("old_versions_size_bytes"),
-            )
-            .join(FileContent, FileContent.sha256 == old_pairs_sq.c.sha256)
-            .filter(~exists().where(and_(_kf.sha256 == old_pairs_sq.c.sha256,
-                                         _kf.version_id.in_(latest_ids))))
-            .group_by(old_pairs_sq.c.label)
-            .order_by(func.coalesce(func.sum(FileContent.size), 0).desc())
-            .all()
-        )
-        old_cnt_rows = (
-            db.query(
-                BackupVersion.backup_label.label("label"),
-                func.count(BackupVersion.id.distinct()).label("cnt"),
-            )
-            .filter(BackupVersion.status == "done", BackupVersion.id.notin_(latest_ids))
-            .group_by(BackupVersion.backup_label)
-            .all()
-        )
-        old_cnt_map = {r.label: int(r.cnt) for r in old_cnt_rows}
-
-        reclaimable_by_label = [
-            ReclaimableLabelEntry(
-                label=row.label,
-                client_name=names_map.get(row.label),
-                old_version_count=old_cnt_map.get(row.label, 0),
-                old_versions_size_bytes=int(row.old_versions_size_bytes),
-            )
-            for row in old_size_rows
-            if row.old_versions_size_bytes > 0
-        ]
-
-    # --- Q12: exclusividade da versão mais recente de cada label ---
-    # Arquivo exclusivo = conteúdo (sha256) que não aparece na versão mais recente
-    # de nenhum outro label. NOT EXISTS coberto por idx_vf_sha_version.
     exclusive_by_label: list[ExclusiveLabelEntry] = []
-    if latest_ids:
-        _of = aliased(VersionFile)
-        _excl_flag = case(
-            (exists().where(and_(_of.sha256 == VersionFile.sha256,
-                                 _of.version_id.in_(latest_ids),
-                                 _of.version_id != VersionFile.version_id)), 0),
-            else_=1,
-        )
-        _excl_sq = (
-            db.query(
-                VersionFile.version_id.label("vid"),
-                FileContent.size.label("size"),
-                _excl_flag.label("excl"),
-            )
-            .join(FileContent, FileContent.sha256 == VersionFile.sha256)
-            .filter(VersionFile.version_id.in_(latest_ids))
-            .subquery()
-        )
-        excl_rows = (
-            db.query(
-                _excl_sq.c.vid,
-                func.count().label("fc"),
-                func.coalesce(func.sum(_excl_sq.c.excl), 0).label("ec"),
-                func.coalesce(func.sum(_excl_sq.c.excl * _excl_sq.c.size), 0).label("es"),
-            )
-            .group_by(_excl_sq.c.vid)
-            .all()
-        )
-        excl_map = {r.vid: (int(r.fc), int(r.ec), int(r.es)) for r in excl_rows}
-        for r in label_stats:
-            fc, ec, es = excl_map.get(r.latest_id, (0, 0, 0))
-            if not fc:
-                continue
-            exclusive_by_label.append(ExclusiveLabelEntry(
-                label=r.label,
-                client_name=names_map.get(r.label),
-                file_count=fc,
-                exclusive_file_count=ec,
-                exclusive_pct=round(ec / fc * 100, 1),
-                exclusive_size_bytes=es,
-            ))
-        exclusive_by_label.sort(key=lambda e: e.exclusive_pct, reverse=True)
 
     # --- Q9: histórico diário de uso de disco (gráfico de flutuação) ---
     disk_usage_days = [
@@ -2759,6 +2618,7 @@ def _build_stats_data(db: Session) -> StatsResponse:
         disk_usage_days=disk_usage_days,
         freed_days=freed_days,
         server_time=datetime.now().isoformat(),
+        summaries_pending=len(vt.pending),
     )
 
 
@@ -2841,7 +2701,35 @@ def get_stats(refresh: bool = False, db: Session = Depends(get_db)):
         # deixava a página lenta e competia por CPU com o resto do servidor.
         _refresh_stats_async()
     age = max(0.0, time.monotonic() - _stats_cache["ts"])
-    return data.model_copy(update={"age_seconds": round(age, 1)})
+    return data.model_copy(update={"age_seconds": round(age, 1), **_stats_panels_overlay(db)})
+
+
+def _stats_panels_overlay(db: Session) -> dict:
+    """Valores atuais dos painéis globais, lidos a cada resposta: cada painel tem
+    o próprio cache (por impressão digital dos dados) e o seu "calculando"."""
+    sf = lambda: SessionLocal()  # resolve o global na hora (os testes o trocam)
+    fp = stats_panels.fingerprint(db)
+    P = stats_panels.PANELS
+    reclaimable = P["reclaimable"].get(db, sf, fp)
+    exclusive = P["exclusive"].get(db, sf, fp)
+    return {
+        "storage_reclaimable_bytes": _get_reclaimable_bytes(db),
+        "reclaimable_by_label": [ReclaimableLabelEntry(**e) for e in (reclaimable or [])],
+        "exclusive_by_label": [ExclusiveLabelEntry(**e) for e in (exclusive or [])],
+        "panels": {name: StatsPanelState(**p.state()) for name, p in P.items()},
+    }
+
+
+@app.post("/api/stats/panels/{panel}/refresh", dependencies=[Depends(require_admin)])
+def refresh_stats_panel(panel: str, db: Session = Depends(get_db)):
+    """Botão ↻ de um painel global: recalcula em background e responde na hora —
+    a página acompanha o "calculando…" pelo GET /api/stats."""
+    p = stats_panels.PANELS.get(panel)
+    if p is None:
+        raise HTTPException(404, f"Painel desconhecido: {panel}")
+    db.rollback()  # não segura a transação do auth enquanto o painel calcula
+    p.refresh(db, lambda: SessionLocal())
+    return StatsPanelState(**p.state())
 
 
 def _rclone_labels(db: Session, labels: Optional[Iterable[str]] = None) -> set[str]:
@@ -3907,6 +3795,7 @@ def finish_version(label: str, version_key: str, req: VersionFinish, background_
     if req.status == "done":
         background_tasks.add_task(_bg_auto_cleanup, v.backup.owner_user_id)
         cloud_media.indexer.wake()  # fotos novas entram na timeline
+        version_summary.wake()      # resumo da versão para as stats
         if _should_process_ssd_moves(db):
             background_tasks.add_task(_bg_process_ssd_pending_moves)
         # Caso contrário, o _ssd_space_monitor dispara quando ficar ocioso.

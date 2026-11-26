@@ -48,6 +48,7 @@ import shutil
 
 import config
 import storage
+import version_summary
 from cache_state import invalidate_activity, mark_backup_activity
 from sqlalchemy import func
 from database import (
@@ -951,6 +952,24 @@ async def _consumer(
 # Entry point principal
 # ---------------------------------------------------------------------------
 
+def _release_connection(db) -> None:
+    """Encerra a transação da Session antes de um await longo (listagem, download).
+
+    A Session do job vive o run inteiro, e qualquer leitura (db.refresh, query,
+    atributo expirado) abre uma transação que só termina no próximo commit. Sem
+    isto ela ficava "idle in transaction" por horas durante a listagem e os
+    downloads: o PostgreSQL com idle_in_transaction_session_timeout derrubava a
+    conexão ("SSL connection has been closed unexpectedly") e o job falhava no
+    commit final. Com a transação encerrada, a conexão volta ao pool e é
+    re-testada (pool_pre_ping) ao ser usada de novo.
+
+    O commit expira os objetos ORM: quem chama captura antes, em variáveis
+    locais, o que o trecho longo precisa — ler um atributo expirado depois
+    reabriria a transação.
+    """
+    db.commit()
+
+
 def _record_run_without_version(db, status: str, summary: str) -> None:
     """Registra na Atividade um run rclone que terminou sem criar BackupVersion
     (pulado por remote ocupado, ou falha antes da versão). A Atividade só mostra
@@ -1037,7 +1056,9 @@ async def run_rclone_backup_job(job_id: int) -> None:
                 _b.status, _b.trashed_at, _b.trashed_by = "active", None, None
                 db.commit()
 
-            cfg = await _remote_config(job.remote_name)
+            remote_name = job.remote_name
+            _release_connection(db)
+            cfg = await _remote_config(remote_name)
             strategy = job.strategy or "auto"
             use_walk = strategy == "walk" or (strategy == "auto" and _uses_walk(cfg))
             if use_walk:
@@ -1207,6 +1228,7 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
         remote_name = job.remote_name
         remote_path = job.remote_path
         version_id  = version.id
+        _release_connection(db)
 
         # Filas limitadas: sem maxsize o lister enfileirava o remote inteiro em
         # memória enquanto o consumer (que grava no banco) não vazava. O pipeline
@@ -1516,6 +1538,7 @@ async def _run_walk_strategy(job: RcloneBackupJob, db) -> None:
         job.last_run_message = summary
         db.commit()
         invalidate_activity()
+        version_summary.wake()  # resumo da versão para as stats
         log.info(f"[rclone-runner] Job {job.id} concluído — {summary}")
 
     except Exception:
@@ -1545,14 +1568,20 @@ async def _run_fast_strategy(job: RcloneBackupJob, db) -> None:
         db.commit()
         db.refresh(version)
 
+        # Valores planos para os trechos longos (ver _release_connection).
+        remote_name = job.remote_name
+        remote_path = job.remote_path
+        version_id  = version.id
+
         # Lista arquivos no remote. `errors` já entra aqui para receber uma
         # listagem parcial: com pastas faltando a versão precisa terminar
         # "incomplete", nunca "done".
         errors: list[str] = []
         unavailable: list[str] = []   # permissão/atalho — não impedem "done"
-        log.info(f"[rclone-runner] Listando {job.remote_name}:{job.remote_path}")
+        log.info(f"[rclone-runner] Listando {remote_name}:{remote_path}")
+        _release_connection(db)
         all_files = await list_files_recursive(
-            job.remote_name, job.remote_path, errors=errors
+            remote_name, remote_path, errors=errors
         )
         total = len(all_files)
         total_size = sum(e.size for e in all_files)
@@ -1606,11 +1635,12 @@ async def _run_fast_strategy(job: RcloneBackupJob, db) -> None:
         abort = asyncio.Event()
         queue: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_SIZE)
 
+        _release_connection(db)
         t_start = time.monotonic()
         _, (processed, skipped, bytes_dl) = await asyncio.gather(
-            _producer(queue, all_files, prev_files, job.remote_name, job.remote_path,
+            _producer(queue, all_files, prev_files, remote_name, remote_path,
                       errors, abort, unavailable),
-            _consumer(queue, version.id, enc_key, errors),
+            _consumer(queue, version_id, enc_key, errors),
         )
         elapsed = time.monotonic() - t_start
 
@@ -1648,6 +1678,7 @@ async def _run_fast_strategy(job: RcloneBackupJob, db) -> None:
         job.last_run_message = summary
         db.commit()
         invalidate_activity()
+        version_summary.wake()  # resumo da versão para as stats
         log.info(f"[rclone-runner] Job {job.id} concluído — {summary}")
 
     except Exception:

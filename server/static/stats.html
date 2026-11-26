@@ -17,6 +17,9 @@
 <script>(function(){const s=localStorage.getItem('nv-theme'),d=window.matchMedia('(prefers-color-scheme:dark)').matches;if(s?s==='light':!d)document.documentElement.setAttribute('data-theme','light');window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',e=>{if(!localStorage.getItem('nv-theme'))e.matches?document.documentElement.removeAttribute('data-theme'):document.documentElement.setAttribute('data-theme','light');});})();</script>
 <style>
   .last-updated{font-size:10px}
+  .panel-ctl{display:inline-flex;align-items:center;gap:8px;margin-left:auto;white-space:nowrap}
+  .panel-age{font-size:10px;color:var(--text-mute)}
+  .panel-age.computing{color:var(--amber)}
 
   /* Stats bar */
   /* .stats-bar usa o padrão de 4 colunas do app.css */
@@ -216,6 +219,7 @@
   <!-- 1. Resumo -->
   <div class="section-head" style="margin-bottom:10px">
     <div class="section-title">Resumo</div>
+    <span class="section-sub" id="summariesPending" style="display:none"></span>
     <button class="small-btn" id="statsRefresh" onclick="load(true)" title="Recalcular as estatísticas agora, sem esperar o cache vencer">↻ Recalcular</button>
   </div>
   <div class="stats-bar">
@@ -263,6 +267,7 @@
   <!-- 2. Armazenamento -->
   <div class="section-head" style="margin-bottom:10px">
     <div class="section-title">Armazenamento</div>
+    <span class="panel-ctl"><span class="panel-age" id="pAge-kept"></span><button class="small-btn" id="pBtn-kept" onclick="refreshPanel('kept')" title="Recalcular o espaço liberável">↻</button></span>
   </div>
   <div id="storageSection" style="margin-bottom:28px">
     <div class="loading">Carregando</div>
@@ -291,6 +296,7 @@
     <div class="section-head" style="margin-bottom:10px">
       <div class="section-title">Espaço liberável por backup</div>
       <span class="section-sub">versões antigas acumuladas por label</span>
+      <span class="panel-ctl"><span class="panel-age" id="pAge-reclaimable"></span><button class="small-btn" id="pBtn-reclaimable" onclick="refreshPanel('reclaimable')" title="Recalcular o espaço liberável por backup">↻</button></span>
     </div>
     <div class="table-wrap">
       <table id="tblReclaimable">
@@ -351,6 +357,7 @@
     <div class="section-head" style="margin-bottom:10px">
       <div class="section-title">Arquivos exclusivos por backup</div>
       <span class="section-sub">% de arquivos da versão mais recente que não existem na versão mais recente de outros backups</span>
+      <span class="panel-ctl"><span class="panel-age" id="pAge-exclusive"></span><button class="small-btn" id="pBtn-exclusive" onclick="refreshPanel('exclusive')" title="Recalcular os arquivos exclusivos">↻</button></span>
     </div>
     <div class="table-wrap">
       <table id="tblExclusive">
@@ -478,6 +485,8 @@
       const data = await r.json();
       clearError();
       nvMarkUpdated(data.age_seconds);
+      setPanels(data.panels || {});
+      renderSummariesPending(data.summaries_pending || 0);
       render(data);
       loadReplication();
     } catch(e) {
@@ -485,6 +494,71 @@
     } finally {
       btn.disabled = false; btn.textContent = '↻ Recalcular';
     }
+  }
+
+  // ── Painéis globais (liberável, liberável por backup, exclusivos) ──────────
+  // Cada um tem cache próprio no servidor, recalculado só quando as versões
+  // mudam. Enquanto um calcula, a página consulta de novo a cada poucos segundos.
+  let _panels = {};
+  let _panelPoll = null;
+  const _PANEL_POLL_MS = 4000;
+
+  function panelPending(name) {
+    const p = _panels[name];
+    return !!p && (p.computing || p.age_seconds == null);
+  }
+
+  function setPanels(panels) {
+    const now = Date.now();
+    _panels = {};
+    for (const [name, p] of Object.entries(panels)) {
+      _panels[name] = {...p, at: p.age_seconds == null ? null : now - p.age_seconds * 1000};
+    }
+    renderPanelAges();
+    clearTimeout(_panelPoll);
+    if (Object.keys(_panels).some(panelPending)) _panelPoll = setTimeout(() => load(false), _PANEL_POLL_MS);
+  }
+
+  function renderPanelAges() {
+    for (const [name, p] of Object.entries(_panels)) {
+      const el = document.getElementById('pAge-' + name);
+      const btn = document.getElementById('pBtn-' + name);
+      if (!el) continue;
+      const busy = panelPending(name);
+      el.classList.toggle('computing', busy);
+      if (busy) el.textContent = 'calculando…';
+      else if (p.error) el.textContent = 'falhou — ver logs';
+      else {
+        const s = Math.max(0, Math.round((Date.now() - p.at) / 1000));
+        el.textContent = 'há ' + (s < 60 ? s + 's' : s < 3600 ? Math.floor(s / 60) + 'min' : Math.floor(s / 3600) + 'h');
+      }
+      if (btn) btn.disabled = busy;
+    }
+  }
+  setInterval(() => { if (!document.hidden) renderPanelAges(); }, 1000);
+
+  async function refreshPanel(name) {
+    const btn = document.getElementById('pBtn-' + name);
+    if (btn) btn.disabled = true;
+    try {
+      const r = await fetch('/api/stats/panels/' + name + '/refresh', {method: 'POST', headers: H()});
+      if (r.status === 401) { showLogin('API Key inválida.'); return; }
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      if (_panels[name]) _panels[name].computing = true;
+      renderPanelAges();
+      clearTimeout(_panelPoll);
+      _panelPoll = setTimeout(() => load(false), 500);
+    } catch (e) {
+      showError('Não foi possível recalcular o painel: ' + e.message);
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function renderSummariesPending(n) {
+    const el = document.getElementById('summariesPending');
+    if (!el) return;
+    el.style.display = n > 0 ? '' : 'none';
+    el.textContent = n > 0 ? `${n.toLocaleString('pt-BR')} versão(ões) ainda sendo resumida(s) — totais parciais` : '';
   }
 
   function render(data) {
@@ -705,9 +779,17 @@
   function renderReclaimableByLabel(entries) {
     const sec = document.getElementById('sec-reclaimable');
     const filtered = (entries || []).filter(e => e.old_versions_size_bytes > 0);
-    if (!filtered.length) { sec.style.display = 'none'; return; }
-    sec.style.display = '';
     const tbody = document.querySelector('#tblReclaimable tbody');
+    if (!filtered.length) {
+      // Ainda sem valor (calculando em background): mostra a seção com o aviso,
+      // em vez de escondê-la como "nada a liberar".
+      if (panelPending('reclaimable')) {
+        sec.style.display = '';
+        tbody.innerHTML = '<tr><td colspan="4" class="loading">Calculando</td></tr>';
+      } else sec.style.display = 'none';
+      return;
+    }
+    sec.style.display = '';
     tbody.innerHTML = filtered.map(e => `<tr>
       <td>${esc(e.label)}</td>
       <td>${esc(e.client_name || '—')}</td>
@@ -718,9 +800,15 @@
 
   function renderExclusiveByLabel(entries) {
     const sec = document.getElementById('sec-exclusive');
-    if (!entries.length) { sec.style.display = 'none'; return; }
-    sec.style.display = '';
     const tbody = document.querySelector('#tblExclusive tbody');
+    if (!entries.length) {
+      if (panelPending('exclusive')) {
+        sec.style.display = '';
+        tbody.innerHTML = '<tr><td colspan="6" class="loading">Calculando</td></tr>';
+      } else sec.style.display = 'none';
+      return;
+    }
+    sec.style.display = '';
     tbody.innerHTML = entries.map(e => `<tr>
       <td>${esc(e.label)}</td>
       <td>${esc(e.client_name || '—')}</td>

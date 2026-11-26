@@ -34,10 +34,12 @@ def test_reclaimable_is_cached_between_reads(client):
     first = _reclaimable(client)
     assert first == len(b"conteudo antigo")
 
-    # Mexe direto no cache: se a segunda leitura recalculasse, o valor plantado
-    # seria descartado e o teste falharia — é assim que se observa o hit.
-    m._reclaimable_cache["value"] = 123456
-    assert _reclaimable(client) == 123456
+    # Mexe direto no cache do "retido": se a segunda leitura recalculasse, o
+    # valor plantado seria descartado e o teste falharia — é assim que se
+    # observa o hit (o conjunto de versões não mudou, a impressão digital é a mesma).
+    import stats_panels
+    stats_panels.PANELS["kept"].data = 0
+    assert _reclaimable(client) == len(b"conteudo antigo") + len(b"novo")
 
 
 def test_delete_version_invalidates_reclaimable_cache(client):
